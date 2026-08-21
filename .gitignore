@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Secrets / local env
+.env
+*.env.local
+
+# Runtime data (SQLite DB, generated at scan time)
+backend/data/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+npm-debug.log*
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# LibreOffice lock files
+.~lock.*#

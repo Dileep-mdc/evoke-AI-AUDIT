@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+httpx
+beautifulsoup4
+pydantic
+reportlab
+python-multipart
+protego
+urllib3
+pytest
+openai
+python-dotenv
