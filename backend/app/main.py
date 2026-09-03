@@ -5,7 +5,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .api.scans import router
-from .config import DEFAULT_URL
 from .db import init_db
 
 init_db()
@@ -22,7 +21,7 @@ app.include_router(router)
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "default_url": DEFAULT_URL}
+    return {"ok": True}
 
 
 frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"

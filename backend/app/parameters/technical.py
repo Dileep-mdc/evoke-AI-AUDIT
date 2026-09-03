@@ -4,214 +4,164 @@ import asyncio
 import re
 from urllib.parse import urlparse
 
-from ..config import AI_CRAWLER_UAS, BROWSER_UA
 from ..crawler.discover import sample_internal_links
 from ..crawler.http import fetch
 from ..crawler.robots import AI_BOTS, bot_decision
 from ..llm.client import judge
-from ..llm.prompts import SYSTEM, tech01_review_prompt, tech11_prompt
+from ..llm.prompts import SYSTEM, tech11_prompt
 from .common import flatten_schema, ms_since, result, schema_types, timed
 
 
 async def tech_01(spec, ctx):
     t = timed()
     robots = ctx.robots
+    if not robots.result.ok and not robots.raw.strip():
+        return result(spec, score=None, unknown=True, evidence={"url": robots.url}, recommendation="Publish a robots.txt that explicitly allows AI crawlers.", checked=robots.url, error="robots.txt unavailable", duration_ms=ms_since(t))
     decisions = [bot_decision(robots, bot) for bot in AI_BOTS]
-    if not robots.result.ok:
-        return result(
-            spec, score=None, unknown=True,
-            evidence={"url": robots.url, "http_status": robots.result.status_code, "error": robots.result.error},
-            recommendation="Publish a reachable robots.txt that explicitly allows desired AI crawlers.",
-            checked=robots.url, error=robots.result.error or f"HTTP {robots.result.status_code}",
-            duration_ms=ms_since(t),
-        )
-    allowed = sum(1 for d in decisions if d.get("decision") == "ALLOWED")
-    score = allowed / len(decisions) * 100
-    rec = None
-    blocked = [d["name"] for d in decisions if d.get("decision") == "BLOCKED"]
-    if blocked:
-        rec = f"Allow {', '.join(blocked)} for public content in robots.txt."
-
-    # Score stays fully deterministic -- robots.txt allow/block is unambiguous. The LLM
-    # only adds a plain-English review/explanation layer here, never a scoring override.
-    evidence = {"url": robots.url, "http_status": robots.result.status_code, "crawlers": decisions, "raw_preview": robots.raw[:1200], "method": "deterministic"}
-    llm_res = await judge(tech01_review_prompt(robots.raw, decisions), system=SYSTEM)
-    if llm_res.ok and llm_res.parsed:
-        evidence["llm_review"] = llm_res.parsed
-    elif not llm_res.ok:
-        evidence["llm_unavailable"] = llm_res.error
-
-    return result(
-        spec, score=score,
-        evidence=evidence,
-        recommendation=rec, checked=robots.url, duration_ms=ms_since(t), confidence=0.95,
-    )
+    known = [d for d in decisions if d["decision"] in {"ALLOWED", "BLOCKED"}]
+    if not known:
+        return result(spec, score=None, unknown=True, evidence={"url": robots.url, "decisions": decisions}, recommendation="Ensure robots.txt parses cleanly so AI-crawler rules can be evaluated.", checked=robots.url, error="robots.txt did not parse", duration_ms=ms_since(t))
+    allowed = sum(1 for d in known if d["decision"] == "ALLOWED")
+    score = allowed / len(known) * 100
+    blocked = [d["name"] for d in known if d["decision"] == "BLOCKED"]
+    rec = f"Allow these AI crawlers in robots.txt: {', '.join(blocked)}." if blocked else None
+    return result(spec, score=score, evidence={"url": robots.url, "decisions": decisions}, recommendation=rec, checked=robots.url, duration_ms=ms_since(t))
 
 
 async def tech_02(spec, ctx):
     t = timed()
-    urls = [ctx.normalized_url]
-    for u in ctx.sitemap.get("urls", [])[:3]:
-        if u not in urls:
-            urls.append(u)
+    url = ctx.origin.rstrip("/") + "/"
+    browser_fetch = await fetch(url, user_agent="Mozilla/5.0 (compatible; Chrome/126.0.0.0 Safari/537.36)")
+    if not browser_fetch.ok:
+        return result(spec, score=None, unknown=True, evidence={"url": url, "error": browser_fetch.error}, recommendation="Homepage was unreachable; retry the scan.", checked=url, error=browser_fetch.error or "homepage unreachable", duration_ms=ms_since(t))
+    baseline_len = len(browser_fetch.content)
+    bot_results = await asyncio.gather(*(fetch(url, user_agent=f"{bot}/1.0") for bot in AI_BOTS))
     rows = []
-    for url in urls[:4]:
-        browser = await fetch(url, user_agent=BROWSER_UA)
-        bot = await fetch(url, user_agent=AI_CRAWLER_UAS["GPTBot"])
-        rows.append({
-            "url": url,
-            "browser_status": browser.status_code,
-            "bot_status": bot.status_code,
-            "bot_error": bot.error,
-            "challenge": _looks_blocked(bot),
-        })
-    if not rows:
-        return result(spec, score=None, unknown=True, evidence={}, recommendation="Could not request test URLs.", checked=ctx.origin, error="no URLs", duration_ms=ms_since(t))
-    ok = sum(1 for r in rows if r["bot_status"] and 200 <= r["bot_status"] < 400 and not r["challenge"])
-    score = ok / len(rows) * 100
-    rec = "Review WAF/CDN rules that treat AI crawler user-agents differently from browsers." if score < 90 else None
-    return result(spec, score=score, evidence={"tests": rows}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.9)
+    blocked = []
+    for bot, res in zip(AI_BOTS, bot_results):
+        body_len = len(res.content)
+        starved = baseline_len > 500 and body_len < baseline_len * 0.2
+        is_block = (res.status_code in {403, 406, 429}) or starved
+        rows.append({"bot": bot, "status": res.status_code, "body_bytes": body_len, "blocked": is_block})
+        if is_block:
+            blocked.append(bot)
+    score = (len(AI_BOTS) - len(blocked)) / len(AI_BOTS) * 100
+    rec = f"Allow CDN/firewall traffic from: {', '.join(blocked)}." if blocked else None
+    return result(spec, score=score, evidence={"baseline_bytes": baseline_len, "bots": rows}, recommendation=rec, checked=url, duration_ms=ms_since(t), confidence=0.6)
 
 
-def _looks_blocked(res) -> bool:
-    if res.status_code in (401, 403, 429, 503):
-        return True
-    text = (res.text or "")[:1500].lower()
-    return any(k in text for k in ("captcha", "access denied", "cf-challenge", "attention required", "bot detection"))
+_LLMS_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)\s]+)\)")
+_DATE_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2}|20\d{2}[/.]\d{1,2}[/.]\d{1,2}|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+20\d{2})\b", re.I)
 
 
 async def tech_03(spec, ctx):
     t = timed()
-    res = ctx.llms
-    url = res.url
-    if res.error and res.status_code is None:
-        return result(spec, score=None, unknown=True, evidence={"url": url, "error": res.error}, recommendation="Retry llms.txt fetch.", checked=url, error=res.error, duration_ms=ms_since(t))
-    if res.status_code in (404, 410) or not res.ok:
-        return result(spec, score=0, evidence={"url": url, "http_status": res.status_code}, recommendation="Publish /llms.txt with company summary and priority public URLs.", checked=url, duration_ms=ms_since(t))
-    text = res.text.strip()
-    links = re.findall(r"https?://[^\s)]+", text)
-    score = 40
-    if len(text) > 80:
-        score += 20
+    llms = ctx.llms
+    if not llms.ok or not llms.text.strip():
+        return result(spec, score=0, evidence={"url": llms.url, "status": llms.status_code}, recommendation="Publish an /llms.txt file listing the site's most important pages for AI assistants.", checked=ctx.origin.rstrip("/") + "/llms.txt", duration_ms=ms_since(t))
+    text = llms.text
+    non_empty = len(text.strip()) > 40
+    links = _LLMS_LINK_RE.findall(text)[:5]
+    resolved = []
     if links:
-        score += 20
-    if any(k in text.lower() for k in ("service", "about", "contact", "evoke", "#")):
-        score += 20
-    rec = "Expand llms.txt with current service descriptions and canonical links." if score < 90 else None
-    return result(spec, score=score, evidence={"url": url, "http_status": res.status_code, "bytes": len(res.content), "link_count": len(links), "preview": text[:800]}, recommendation=rec, checked=url, duration_ms=ms_since(t))
+        checks = await asyncio.gather(*(fetch(link if link.startswith("http") else ctx.origin.rstrip("/") + "/" + link.lstrip("/")) for link in links[:3]))
+        resolved = [{"url": links[i], "ok": c.ok} for i, c in enumerate(checks)]
+    link_ratio = (sum(1 for r in resolved if r["ok"]) / len(resolved)) if resolved else 0.0
+    fresh = bool(_DATE_RE.search(text))
+    score = 40 + (20 if non_empty else 0) + (20 * link_ratio if links else 10) + (20 if fresh else 0)
+    rec = "Keep llms.txt non-empty, link to pages that resolve, and include a freshness/date signal." if score < 90 else None
+    return result(spec, score=min(100, score), evidence={"non_empty": non_empty, "links_found": len(links), "sampled_links": resolved, "freshness_signal": fresh}, recommendation=rec, checked=llms.final_url, duration_ms=ms_since(t))
+
+
+_OVERLAY_MARKERS = ("cookie", "consent", "gdpr", "onetrust", "cookiebot", "trustarc", "cookieyes", "modal", "overlay", "paywall")
 
 
 async def tech_04(spec, ctx):
     t = timed()
-    markers = []
-    tested = 0
-    blocked = 0
-    for page in ctx.pages[:8]:
-        if not page.soup:
-            continue
-        tested += 1
-        html = page.result.text.lower()
-        hits = [k for k in ("id=\"login\"", "cookie-consent", "cookie_banner", "paywall", "newsletter-popup", "modal-overlay") if k in html]
-        overlay = page.soup.select(".modal, .popup, [class*=cookie], [id*=cookie], [class*=overlay]")
-        content_len = len(page.text)
-        if content_len < 80 and overlay:
-            blocked += 1
-            markers.append({"url": page.result.final_url, "blocked": True, "hits": hits})
-        else:
-            markers.append({"url": page.result.final_url, "blocked": False, "overlay_candidates": len(overlay), "content_chars": content_len})
-    if not tested:
-        return result(spec, score=None, unknown=True, evidence={}, recommendation="Could not parse HTML for overlay checks.", checked=ctx.origin, error="no HTML", duration_ms=ms_since(t))
-    score = (tested - blocked) / tested * 100
-    rec = "Ensure cookie/login overlays do not hide primary content in the raw HTML." if blocked else None
-    return result(spec, score=score, evidence={"tested": tested, "blocked": blocked, "samples": markers[:8]}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    home = ctx.homepage
+    if not home or not home.soup:
+        return result(spec, score=None, unknown=True, evidence={}, recommendation="Homepage was unavailable to render.", checked=ctx.origin, error="no rendered homepage", duration_ms=ms_since(t))
+    blob = str(home.soup)[:200000].lower()
+    matched = [m for m in _OVERLAY_MARKERS if m in blob]
+    login_form = bool(home.soup.find("form", attrs={"action": re.compile("login|signin", re.I)}) or home.soup.find("input", attrs={"type": "password"}))
+    if not matched and not login_form:
+        score = 100
+    elif home.word_count >= 150:
+        score = 70
+    else:
+        score = 20
+    if login_form and home.word_count < 80:
+        score = min(score, 20)
+    rec = "Ensure the main page content is not hidden behind a login, pop-up or cookie wall." if score < 90 else None
+    return result(spec, score=score, evidence={"markers_found": matched, "login_form": login_form, "rendered_word_count": home.word_count}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.55)
 
 
 async def tech_05(spec, ctx):
     t = timed()
     sm = ctx.sitemap
-    if not sm.get("urls"):
-        return result(spec, score=0, evidence=sm, recommendation="Add a valid XML sitemap and reference it from robots.txt.", checked=ctx.origin + "/sitemap.xml", duration_ms=ms_since(t))
-    sample = sm["urls"][:12]
-    checks = []
-    for url in sample:
-        res = await fetch(url)
-        checks.append({"url": url, "status": res.status_code, "ok": bool(res.ok)})
-    valid = sum(1 for c in checks if c["ok"])
-    coverage = min(100, sm["count"] / 20 * 40 + 40)
-    sample_score = valid / max(1, len(checks)) * 100
-    score = sample_score * 0.6 + coverage * 0.4
-    rec = "Fix unreachable sitemap URLs and keep the sitemap aligned with canonical pages." if score < 90 else None
-    return result(spec, score=score, evidence={"sitemap_count": sm["count"], "sources": sm["sources"], "sample": checks, "errors": sm.get("errors", [])[:6]}, recommendation=rec, checked=sm["sources"][0]["url"] if sm.get("sources") else ctx.origin, duration_ms=ms_since(t))
+    urls = sm.get("urls") or []
+    if not urls:
+        return result(spec, score=0, evidence={"candidates": sm.get("candidates"), "errors": sm.get("errors")}, recommendation="Publish an XML sitemap and reference it from robots.txt.", checked=ctx.origin, duration_ms=ms_since(t))
+    sample = urls[:15]
+    checks = await asyncio.gather(*(fetch(u) for u in sample))
+    valid = sum(1 for c in checks if c.ok)
+    validity = valid / len(sample) * 100
+    crawled = {p.result.final_url.rstrip("/") for p in ctx.pages}
+    sitemap_set = {u.rstrip("/") for u in urls}
+    covered = sum(1 for u in crawled if u in sitemap_set)
+    coverage = (covered / len(crawled) * 100) if crawled else 0
+    score = 25 + validity * 0.45 + coverage * 0.30
+    rec = "Fix sitemap URLs that don't resolve and ensure crawled pages are listed in the sitemap." if score < 90 else None
+    return result(spec, score=min(100, score), evidence={"sitemap_url_count": len(urls), "sampled": len(sample), "valid_sampled": valid, "crawled_coverage_pct": round(coverage, 1), "errors": sm.get("errors")[:8]}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.7)
 
 
 async def tech_06(spec, ctx):
     t = timed()
-    urls = sample_internal_links(ctx, 36)
-    if not urls:
-        return result(spec, score=None, unknown=True, evidence={}, recommendation="No internal links discovered.", checked=ctx.origin, error="no internal links", duration_ms=ms_since(t))
-    sem = asyncio.Semaphore(6)
-
-    async def check(url):
-        async with sem:
-            res = await fetch(url)
-            return {"url": url, "status": res.status_code, "hops": res.hops, "error": res.error, "broken": (res.status_code or 0) >= 400 or bool(res.error)}
-
-    rows = await asyncio.gather(*(check(u) for u in urls))
-    working = sum(1 for r in rows if not r["broken"])
-    score = working / len(rows) * 100
-    broken = [r for r in rows if r["broken"]]
-    rec = f"Repair {len(broken)} broken internal URLs." if broken else None
-    return result(spec, score=score, evidence={"checked": len(rows), "broken": broken[:15], "working": working}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), pass_at=98, partial_at=90)
+    links = sample_internal_links(ctx, limit=15)
+    if not links:
+        return result(spec, score=None, unknown=True, evidence={}, recommendation="No internal links were found to sample.", checked=ctx.origin, error="no internal links", duration_ms=ms_since(t))
+    checks = await asyncio.gather(*(fetch(u) for u in links))
+    rows = []
+    broken = chains = 0
+    for u, c in zip(links, checks):
+        is_broken = not c.ok
+        is_chain = c.hops >= 3
+        broken += int(is_broken)
+        chains += int(is_chain)
+        rows.append({"url": u, "status": c.status_code, "hops": c.hops, "broken": is_broken, "chain": is_chain})
+    score = (len(links) - broken) / len(links) * 100 - min(20, chains * 5)
+    rec = "Fix broken internal links and collapse redirect chains to 1-2 hops." if score < 90 else None
+    return result(spec, score=max(0, score), evidence={"sampled": len(links), "broken": broken, "redirect_chains": chains, "pages": rows}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.7)
 
 
 async def tech_07(spec, ctx):
     t = timed()
-    pages = ctx.pages[:8]
+    pages = [p for p in ctx.pages if p.result and p.result.ok][:12]
     if not pages:
-        return result(spec, score=None, unknown=True, evidence={}, recommendation="No pages fetched for performance.", checked=ctx.origin, error="no pages", duration_ms=ms_since(t))
-    psi = await _pagespeed(ctx.normalized_url)
-    timings = [{"url": p.result.final_url, "ttfb_ms": p.result.elapsed_ms, "bytes": len(p.result.content)} for p in pages]
-    avg_ttfb = sum(x["ttfb_ms"] for x in timings) / len(timings)
-    lab = max(0, min(100, 100 - (avg_ttfb - 400) / 20))
-    if psi.get("available"):
-        score = psi.get("performance", lab)
-        evidence = {"pagespeed": psi, "lab_timings": timings}
-        confidence = 0.8
+        return result(spec, score=None, unknown=True, evidence={}, recommendation="No successfully crawled pages to measure.", checked=ctx.origin, error="no pages", duration_ms=ms_since(t))
+    latencies = [p.result.elapsed_ms for p in pages]
+    sizes = [len(p.result.content) for p in pages]
+    avg_latency = sum(latencies) / len(latencies)
+    avg_size = sum(sizes) / len(sizes)
+    if avg_latency <= 800:
+        latency_score = 100
+    elif avg_latency <= 1800:
+        latency_score = 70
+    elif avg_latency <= 3000:
+        latency_score = 40
     else:
-        score = lab * 0.7
-        evidence = {"pagespeed": psi, "lab_timings": timings, "note": "PageSpeed unavailable; score uses lab TTFB fallback and is capped."}
-        confidence = 0.45
-        if avg_ttfb > 2500:
-            score = min(score, 40)
-    rec = "Improve LCP/INP/CLS: compress hero media, reduce JS, and cache HTML/assets." if score < 90 else None
-    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.normalized_url, duration_ms=ms_since(t), confidence=confidence)
-
-
-async def _pagespeed(url: str) -> dict:
-    api = f"https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url={url}&strategy=mobile&category=performance"
-    res = await fetch(api, user_agent=BROWSER_UA)
-    if not res.ok:
-        return {"available": False, "reason": res.error or f"HTTP {res.status_code}"}
-    try:
-        import json
-        data = json.loads(res.text)
-        lh = data.get("lighthouseResult", {})
-        audits = lh.get("audits", {})
-        cats = lh.get("categories", {})
-        perf = ((cats.get("performance") or {}).get("score") or 0) * 100
-        def metric(key, field="numericValue"):
-            a = audits.get(key) or {}
-            return a.get(field)
-        return {
-            "available": True,
-            "performance": round(perf, 1),
-            "lcp_ms": metric("largest-contentful-paint"),
-            "cls": metric("cumulative-layout-shift"),
-            "inp_ms": metric("interaction-to-next-paint") or metric("total-blocking-time"),
-            "source": "Google PageSpeed Insights API",
-        }
-    except Exception as exc:
-        return {"available": False, "reason": str(exc)}
+        latency_score = 20
+    if avg_size <= 300_000:
+        weight_score = 100
+    elif avg_size <= 800_000:
+        weight_score = 70
+    elif avg_size <= 1_500_000:
+        weight_score = 40
+    else:
+        weight_score = 20
+    score = latency_score * 0.6 + weight_score * 0.4
+    rec = "Reduce server response time and page weight on representative pages; this proxy score is not a substitute for a real Lighthouse/CrUX audit." if score < 90 else None
+    return result(spec, score=score, evidence={"pages_measured": len(pages), "avg_latency_ms": round(avg_latency), "avg_page_bytes": round(avg_size), "note": "Latency/weight proxy -- no Lighthouse LCP/INP/CLS run is wired into this build."}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.4)
 
 
 async def tech_08(spec, ctx):

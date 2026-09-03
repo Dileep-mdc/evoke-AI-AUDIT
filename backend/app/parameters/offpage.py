@@ -2,13 +2,29 @@ from __future__ import annotations
 
 import json
 import re
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, unquote, urlparse
 
 from ..config import BROWSER_UA
 from ..crawler.http import fetch
 from ..llm.client import judge
-from ..llm.prompts import SYSTEM, off02_prompt
-from .common import ms_since, result, timed
+from ..llm.prompts import SYSTEM, off02_prompt, off09_prompt, off18_prompt
+from .common import derive_site_categories, derive_site_geographies, ms_since, primary_brand, result, timed
+
+
+async def _ddg_html(url: str):
+    """Fetch DuckDuckGo's HTML search endpoint.
+
+    DuckDuckGo returns HTTP 202 with a generic non-result shell page when it suspects
+    automated/bot traffic, rather than a hard error -- `res.ok` alone (200-399) treats
+    202 as success, which silently turns a blocked search into a false "zero mentions
+    found" result. Anything other than a clean 200 is treated as unavailable here.
+    """
+    res = await fetch(url, user_agent=BROWSER_UA)
+    if res.status_code == 200 and res.ok:
+        return res, None
+    if res.status_code and res.status_code != 200:
+        return None, f"DuckDuckGo returned HTTP {res.status_code} (likely a bot-detection challenge, not real results)"
+    return None, res.error or "DuckDuckGo unavailable"
 
 
 async def _json(url: str) -> tuple[dict | list | None, dict]:
@@ -23,6 +39,50 @@ async def _json(url: str) -> tuple[dict | list | None, dict]:
         return None, meta
 
 
+_UDDG_RE = re.compile(r'uddg=([^&"]+)')
+_RESULT_TITLE_RE = re.compile(r'class="result__a"[^>]*>(.*?)</a>', re.S)
+_RESULT_SNIPPET_RE = re.compile(r'class="result__snippet"[^>]*>(.*?)</a>', re.S)
+
+
+def _strip_tags(s: str) -> str:
+    return re.sub(r"<[^>]+>", " ", s or "").strip()
+
+
+def _extract_result_urls(html: str, limit: int = 15) -> list[str]:
+    """Real target URLs behind DuckDuckGo's /l/?uddg= redirect links, in result order."""
+    urls: list[str] = []
+    for m in _UDDG_RE.finditer(html or ""):
+        try:
+            u = unquote(m.group(1))
+        except Exception:
+            continue
+        if u.startswith("http") and u not in urls:
+            urls.append(u)
+        if len(urls) >= limit:
+            break
+    return urls
+
+
+def _domains_present(urls: list[str], domains: tuple[str, ...]) -> dict[str, list[str]]:
+    hits: dict[str, list[str]] = {d: [] for d in domains}
+    for u in urls:
+        host = (urlparse(u).hostname or "").lower()
+        for d in domains:
+            if host == d or host.endswith("." + d):
+                hits[d].append(u)
+    return hits
+
+
+def _extract_snippets(html: str, limit: int = 8) -> list[dict]:
+    titles = [_strip_tags(m) for m in _RESULT_TITLE_RE.findall(html or "")]
+    snippets = [_strip_tags(m) for m in _RESULT_SNIPPET_RE.findall(html or "")]
+    rows = []
+    for i in range(min(len(titles), len(snippets), limit)):
+        if titles[i] or snippets[i]:
+            rows.append({"title": titles[i], "snippet": snippets[i]})
+    return rows
+
+
 async def off_01(spec, ctx):
     t = timed()
     q = quote_plus(ctx.company_name)
@@ -30,10 +90,11 @@ async def off_01(spec, ctx):
     if data is None:
         return result(spec, score=None, unknown=True, evidence={"provider": "Wikidata", **meta}, recommendation="Connect Wikidata and retry.", checked=meta["url"], error=meta.get("error") or "Wikidata unavailable", duration_ms=ms_since(t))
     hits = data.get("search") or []
+    brand = primary_brand(ctx)
     match = None
     for h in hits:
         blob = f"{h.get('label','')} {h.get('description','')}".lower()
-        if "evoke" in blob or "software" in blob or "technolog" in blob:
+        if (brand and brand in blob) or any(k in blob for k in ("company", "business", "corporation", "organization", "organisation", "enterprise", "firm")):
             match = h
             break
     if not match and hits:
@@ -41,7 +102,7 @@ async def off_01(spec, ctx):
     if not match:
         return result(spec, score=0, evidence={"provider": "Wikidata", "hits": []}, recommendation="Create and maintain an accurate Wikidata organization item.", checked=meta["url"], duration_ms=ms_since(t))
     score = 70
-    if "evoke" in (match.get("label") or "").lower():
+    if brand and brand in (match.get("label") or "").lower():
         score += 20
     if match.get("description"):
         score += 10
@@ -87,31 +148,39 @@ async def off_02(spec, ctx):
 
 async def off_03(spec, ctx):
     t = timed()
-    return result(
-        spec, score=None, unknown=True,
-        evidence={"provider": "Search / Knowledge Graph", "reason": "Knowledge Panel UI cannot be reliably observed without a licensed SERP/knowledge API."},
-        recommendation="Connect a search/knowledge provider to measure Knowledge Panel presence.",
-        checked="knowledge-panel", error="No licensed SERP/knowledge API configured",
-        duration_ms=ms_since(t),
-    )
+    q = quote_plus(ctx.company_name)
+    data, meta = await _json(f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={q}&language=en&format=json&type=item&limit=5")
+    if data is None:
+        return result(spec, score=None, unknown=True, evidence={"provider": "Wikidata (Knowledge Panel proxy)", **meta}, recommendation="Retry once the Wikidata proxy signal is reachable.", checked=meta["url"], error=meta.get("error") or "Wikidata unavailable", duration_ms=ms_since(t))
+    hits = data.get("search") or []
+    brand = primary_brand(ctx)
+    match = next((h for h in hits if brand and brand in f"{h.get('label','')} {h.get('description','')}".lower()), None)
+    if not match:
+        return result(
+            spec, score=None, unknown=True,
+            evidence={"provider": "Wikidata (Knowledge Panel proxy)", "hits": hits[:3], "note": "Google's own Knowledge Panel UI cannot be scraped reliably; no confidently-matched Wikidata entity was found to use as a proxy."},
+            recommendation="Establish a Wikidata entity and consistent NAP details so a Knowledge Panel can be built.",
+            checked=meta["url"], duration_ms=ms_since(t),
+        )
+    score = 50 + (30 if match.get("description") else 0) + (20 if brand in (match.get("label") or "").lower() else 0)
+    rec = "Keep the identity fields a Knowledge Panel would draw on (name, description, website) accurate and consistent." if score < 90 else None
+    return result(spec, score=min(100, score), evidence={"provider": "Wikidata (Knowledge Panel proxy)", "entity": match, "note": "Approximated via Wikidata; the live Google Knowledge Panel UI is not directly scraped."}, recommendation=rec, checked=meta["url"], duration_ms=ms_since(t), confidence=0.4)
 
 
 async def off_04(spec, ctx):
     t = timed()
-    profiles = {
-        "linkedin": f"https://www.linkedin.com/company/evoke-technologies/",
-        "crunchbase": f"https://www.crunchbase.com/organization/evoke-technologies",
-    }
-    rows = []
-    for name, url in profiles.items():
-        res = await fetch(url, user_agent=BROWSER_UA)
-        rows.append({"source": name, "url": url, "status": res.status_code, "bytes": len(res.content), "error": res.error})
-    reachable = [r for r in rows if r["status"] and r["status"] < 400 and r["bytes"] > 500]
-    if not reachable and all((r["status"] in (999, 403, 401, None) or r["error"]) for r in rows):
-        return result(spec, score=None, unknown=True, evidence={"provider": "Public profiles", "rows": rows}, recommendation="Use licensed profile APIs; public pages are blocked or login-walled.", checked="company-profiles", error="Public profile pages unavailable (blocked or login-walled)", duration_ms=ms_since(t))
-    score = len(reachable) / len(rows) * 100
-    rec = "Complete LinkedIn/Crunchbase fields and keep descriptions consistent." if score < 90 else None
-    return result(spec, score=score, evidence={"rows": rows}, recommendation=rec, checked=rows[0]["url"], duration_ms=ms_since(t), confidence=0.45)
+    domains = ("linkedin.com", "crunchbase.com", "bloomberg.com", "zoominfo.com")
+    q = quote_plus(f'"{ctx.company_name}"') + "+" + quote_plus("(" + " OR ".join(f"site:{d}" for d in domains) + ")")
+    url = f"https://html.duckduckgo.com/html/?q={q}"
+    res, err = await _ddg_html(url)
+    if res is None:
+        return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a licensed company-data API (LinkedIn/Crunchbase/Bloomberg/ZoomInfo).", checked=url, error=err, duration_ms=ms_since(t))
+    urls = _extract_result_urls(res.text)
+    hits = _domains_present(urls, domains)
+    found = [d for d, v in hits.items() if v]
+    score = len(found) / len(domains) * 100
+    rec = f"Create or claim public company profiles on: {', '.join(d for d in domains if d not in found)}." if score < 90 else None
+    return result(spec, score=score, evidence={"provider": "DuckDuckGo HTML", "query": q, "platforms_found": found, "matches": hits, "note": "Presence signal only; no licensed profile-data API is connected, so field-level completeness is not verified."}, recommendation=rec, checked=url, duration_ms=ms_since(t), confidence=0.4)
 
 
 async def off_05(spec, ctx):
@@ -119,19 +188,16 @@ async def off_05(spec, ctx):
     site_bits = {
         "name": ctx.company_name,
         "domain": ctx.domain,
+        "locations": derive_site_geographies(ctx),
     }
-    if ctx.homepage:
-        text = ctx.homepage.text.lower()
-        if "hyderabad" in text:
-            site_bits["city"] = "Hyderabad"
-        if "ohio" in text or "dublin" in text:
-            site_bits["us_office"] = "Ohio"
-    data, meta = await _json("https://www.wikidata.org/w/api.php?action=wbsearchentities&search=Evoke%20Technologies&language=en&format=json&limit=1")
+    q = quote_plus(ctx.company_name)
+    data, meta = await _json(f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={q}&language=en&format=json&limit=1")
     if data is None:
         return result(spec, score=None, unknown=True, evidence={"canonical": site_bits, **meta}, recommendation="Need external directory records to compare NAP.", checked="nap-consistency", error="External NAP sources unavailable", duration_ms=ms_since(t))
     hits = data.get("search") or []
     match = hits[0] if hits else None
-    score = 70 if match and "evoke" in (match.get("label") or "").lower() else 40
+    brand = primary_brand(ctx)
+    score = 70 if match and brand and brand in (match.get("label") or "").lower() else 40
     rec = "Align company name, addresses and website across directories and the site footer." if score < 90 else None
     return result(spec, score=score, evidence={"canonical": site_bits, "wikidata": match, "provider": "Wikidata"}, recommendation=rec, checked=meta["url"], duration_ms=ms_since(t), confidence=0.5)
 
@@ -140,7 +206,13 @@ async def off_06(spec, ctx):
     t = timed()
     claims = []
     blob = " ".join(p.text for p in ctx.pages)
-    for label, pat in (("CMMI", r"cmmi"), ("ISO", r"iso\s?9"), ("Microsoft Partner", r"microsoft\s+partner"), ("AWS", r"aws\s+partner")):
+    for label, pat in (
+        ("Certified/Accredited", r"\b(certifi\w*|accredit\w*)\b"),
+        ("Compliance", r"\bcompliance\b|\bcompliant\b"),
+        ("Licensed", r"\blicens(e|ed|ing|ure)\b"),
+        ("ISO standard", r"\biso\s?\d{3,6}\b"),
+        ("Certified partner/vendor tier", r"\b(certified|authorized|accredited|premier|gold|platinum|elite)\s+partner\b"),
+    ):
         if re.search(pat, blob, re.I):
             claims.append(label)
     if not claims:
@@ -148,86 +220,107 @@ async def off_06(spec, ctx):
     return result(spec, score=55, evidence={"claims": claims, "note": "Issuer registries were not queried with a verification adapter; score reflects claimed-but-unverified."}, recommendation="Verify each certification on the issuer or partner directory and link the record.", checked=ctx.origin, duration_ms=ms_since(t), confidence=0.4)
 
 
+_REVIEW_DOMAINS = ("g2.com", "clutch.co", "gartner.com", "trustradius.com")
+
+
 async def off_07(spec, ctx):
     t = timed()
-    targets = {
-        "g2": "https://www.g2.com/products/evoke-technologies/reviews",
-        "clutch": "https://clutch.co/profile/evoke-technologies",
-        "trustradius": "https://www.trustradius.com/vendors/evoke-technologies",
-    }
-    rows = []
-    for name, url in targets.items():
-        res = await fetch(url, user_agent=BROWSER_UA)
-        rows.append({"source": name, "url": url, "status": res.status_code, "error": res.error, "bytes": len(res.content)})
-    blocked = all((r["status"] in (403, 401, 999, None) or r["error"]) for r in rows)
-    if blocked:
-        return result(spec, score=None, unknown=True, evidence={"provider": "Review platforms", "rows": rows}, recommendation="Connect review-platform adapters or licensed APIs.", checked="review-profiles", error="G2/Clutch/TrustRadius pages unavailable without platform API", duration_ms=ms_since(t))
-    found = sum(1 for r in rows if r["status"] and 200 <= r["status"] < 400)
-    score = found / len(rows) * 100
-    rec = "Complete G2, Clutch and adjacent review profiles." if score < 90 else None
-    return result(spec, score=score, evidence={"rows": rows}, recommendation=rec, checked=rows[0]["url"], duration_ms=ms_since(t), confidence=0.45)
+    q = quote_plus(f'"{ctx.company_name}"') + "+" + quote_plus("(" + " OR ".join(f"site:{d}" for d in _REVIEW_DOMAINS) + ")")
+    url = f"https://html.duckduckgo.com/html/?q={q}"
+    res, err = await _ddg_html(url)
+    if res is None:
+        return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a review-platform API (G2/Clutch/Gartner Peer Insights/TrustRadius).", checked=url, error=err, duration_ms=ms_since(t))
+    urls = _extract_result_urls(res.text)
+    hits = _domains_present(urls, _REVIEW_DOMAINS)
+    found = [d for d, v in hits.items() if v]
+    score = len(found) / len(_REVIEW_DOMAINS) * 100
+    rec = f"Claim and complete a profile on: {', '.join(d for d in _REVIEW_DOMAINS if d not in found)}." if score < 90 else None
+    return result(spec, score=score, evidence={"provider": "DuckDuckGo HTML", "query": q, "platforms_found": found, "matches": hits}, recommendation=rec, checked=url, duration_ms=ms_since(t), confidence=0.4)
 
 
 async def off_08(spec, ctx):
     t = timed()
-    return result(
-        spec, score=None, unknown=True,
-        evidence={"provider": "Review APIs", "reason": "Review volume/recency/velocity requires historical review-platform data."},
-        recommendation="Connect a review provider to benchmark volume, recency and velocity.",
-        checked="review-velocity", error="No review API configured", duration_ms=ms_since(t),
-    )
+    q = quote_plus(f'"{ctx.company_name}" reviews') + "+" + quote_plus("(" + " OR ".join(f"site:{d}" for d in _REVIEW_DOMAINS) + ")")
+    url = f"https://html.duckduckgo.com/html/?q={q}"
+    res, err = await _ddg_html(url)
+    if res is None:
+        return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a review-platform API for volume/recency/velocity data.", checked=url, error=err, duration_ms=ms_since(t))
+    urls = _extract_result_urls(res.text)
+    hits = _domains_present(urls, _REVIEW_DOMAINS)
+    count = sum(len(v) for v in hits.values())
+    score = min(60, 15 + count * 15)
+    rec = "Grow review volume on G2/Clutch/Gartner Peer Insights/TrustRadius, then connect a review-platform API to measure recency/velocity against named competitors."
+    return result(spec, score=score, evidence={"provider": "DuckDuckGo HTML", "query": q, "review_platform_hits": count, "matches": hits, "note": "Volume proxy only -- recency, velocity and a competitor benchmark require a review-platform API and are not measured here; score is capped at 60."}, recommendation=rec, checked=url, duration_ms=ms_since(t), confidence=0.3)
 
 
 async def off_09(spec, ctx):
     t = timed()
-    desired = []
-    text = (ctx.homepage.text if ctx.homepage else "").lower()
-    for cat in ("digital engineering", "product engineering", "it services", "staffing", "quality engineering", "data engineering"):
-        if cat in text:
-            desired.append(cat)
-    if not desired:
-        desired = ["it services"]
-    return result(
-        spec, score=None, unknown=True,
-        evidence={"desired_categories": desired, "reason": "Third-party category placements need directory/profile APIs."},
-        recommendation="Connect directory adapters and align external categories with site positioning.",
-        checked="category-placement", error="External directory categories unavailable", duration_ms=ms_since(t),
-    )
+    q = quote_plus(f'"{ctx.company_name}"') + "+" + quote_plus("(" + " OR ".join(f"site:{d}" for d in _REVIEW_DOMAINS) + ")")
+    url = f"https://html.duckduckgo.com/html/?q={q}"
+    res, err = await _ddg_html(url)
+    if res is None:
+        return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a directory/category adapter.", checked=url, error=err, duration_ms=ms_since(t))
+    snippets = _extract_snippets(res.text)
+    categories = derive_site_categories(ctx, limit=6)
+    if not snippets:
+        return result(spec, score=30, evidence={"provider": "DuckDuckGo HTML", "query": q, "snippets": [], "site_categories": categories}, recommendation="Get listed on review/directory platforms under an accurate category.", checked=url, duration_ms=ms_since(t), confidence=0.35)
+    blob = " ".join(f"{s['title']} {s['snippet']}" for s in snippets).lower()
+    lexical_match = any(c in blob for c in categories) if categories else False
+    score = 65 if lexical_match else 35
+    confidence = 0.45
+    evidence = {"provider": "DuckDuckGo HTML", "query": q, "snippets": snippets, "site_categories": categories, "method": "heuristic"}
+
+    if categories:
+        llm_res = await judge(off09_prompt(ctx.company_name, categories, snippets), system=SYSTEM)
+        if llm_res.ok and llm_res.parsed and "matches" in llm_res.parsed:
+            score = 85 if llm_res.parsed.get("matches") else 30
+            confidence = 0.6
+            evidence["method"] = "llm"
+            evidence["llm"] = llm_res.parsed
+        elif not llm_res.ok:
+            evidence["llm_unavailable"] = llm_res.error
+
+    rec = "Correct the category/positioning shown on third-party directories and review platforms." if score < 90 else None
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=url, duration_ms=ms_since(t), confidence=confidence)
 
 
 async def off_10(spec, ctx):
     t = timed()
-    q = quote_plus(f'"{ctx.company_name}" site:reddit.com OR site:stackoverflow.com OR site:quora.com')
+    domains = ("reddit.com", "stackoverflow.com", "quora.com")
+    q = quote_plus(f'"{ctx.company_name}"') + "+" + quote_plus("(" + " OR ".join(f"site:{d}" for d in domains) + ")")
     url = f"https://html.duckduckgo.com/html/?q={q}"
-    res = await fetch(url, user_agent=BROWSER_UA)
-    if not res.ok:
-        return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": res.error, "status": res.status_code}, recommendation="Connect a search adapter for community mentions.", checked=url, error=res.error or f"HTTP {res.status_code}", duration_ms=ms_since(t))
-    links = re.findall(r"https?://(?:[\w.-]+\.)?(reddit\.com|stackoverflow\.com|quora\.com)/[^\s\"']+", res.text, re.I)
-    score = 70 if links else 25
-    rec = "Encourage authentic community participation and indexable expert answers." if score < 90 else None
-    return result(spec, score=score, evidence={"provider": "DuckDuckGo HTML", "mentions": list(dict.fromkeys(links))[:10]}, recommendation=rec, checked=url, duration_ms=ms_since(t), confidence=0.4)
+    res, err = await _ddg_html(url)
+    if res is None:
+        return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a community-search adapter.", checked=url, error=err, duration_ms=ms_since(t))
+    urls = _extract_result_urls(res.text)
+    hits = _domains_present(urls, domains)
+    count = sum(len(v) for v in hits.values())
+    score = 15 if count == 0 else (40 if count <= 2 else 65)
+    rec = "Engage authentically in relevant Reddit/Stack Overflow/Quora/industry-forum discussions." if score < 90 else None
+    return result(spec, score=score, evidence={"provider": "DuckDuckGo HTML", "query": q, "mentions_found": count, "matches": hits, "note": "Presence signal only; substantiveness/spam is not individually verified."}, recommendation=rec, checked=url, duration_ms=ms_since(t), confidence=0.35)
 
 
 async def off_11(spec, ctx):
     t = timed()
-    q = quote_plus(f"{ctx.company_name} site:youtube.com")
+    q = quote_plus(f'"{ctx.company_name}"') + "+" + quote_plus("site:youtube.com")
     url = f"https://html.duckduckgo.com/html/?q={q}"
-    res = await fetch(url, user_agent=BROWSER_UA)
-    if not res.ok:
-        return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": res.error}, recommendation="Connect YouTube Data API.", checked=url, error=res.error or f"HTTP {res.status_code}", duration_ms=ms_since(t))
-    vids = re.findall(r"youtube\.com/watch\?v=[\w-]+|youtu\.be/[\w-]+", res.text, re.I)
-    score = 65 if vids else 20
-    rec = "Publish official, transcribed videos and earn relevant third-party mentions." if score < 90 else None
-    return result(spec, score=score, evidence={"provider": "DuckDuckGo HTML", "videos": list(dict.fromkeys(vids))[:8]}, recommendation=rec, checked=url, duration_ms=ms_since(t), confidence=0.4)
+    res, err = await _ddg_html(url)
+    if res is None:
+        return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a YouTube search adapter.", checked=url, error=err, duration_ms=ms_since(t))
+    urls = _extract_result_urls(res.text)
+    count = len(urls)
+    score = 15 if count == 0 else (45 if count <= 2 else 65)
+    rec = "Publish or earn relevant YouTube video coverage, with transcripts/captions enabled." if score < 90 else None
+    return result(spec, score=score, evidence={"provider": "DuckDuckGo HTML", "query": q, "video_results": count, "sample_urls": urls[:8], "note": "Transcript/caption availability is not independently verified."}, recommendation=rec, checked=url, duration_ms=ms_since(t), confidence=0.35)
 
 
 async def off_12(spec, ctx):
     t = timed()
     q = quote_plus(f'"{ctx.company_name}" (podcast OR webinar OR conference)')
     url = f"https://html.duckduckgo.com/html/?q={q}"
-    res = await fetch(url, user_agent=BROWSER_UA)
-    if not res.ok:
-        return result(spec, score=None, unknown=True, evidence={"error": res.error}, recommendation="Connect a search/event adapter.", checked=url, error=res.error or f"HTTP {res.status_code}", duration_ms=ms_since(t))
+    res, err = await _ddg_html(url)
+    if res is None:
+        return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a search/event adapter.", checked=url, error=err, duration_ms=ms_since(t))
     hits = len(re.findall(r"uddg=", res.text))
     score = 60 if hits >= 3 else (30 if hits else 15)
     rec = "Index webinar/podcast appearances with transcripts on authoritative domains." if score < 90 else None
@@ -236,44 +329,70 @@ async def off_12(spec, ctx):
 
 async def off_13(spec, ctx):
     t = timed()
+    q = quote_plus(f'"{ctx.domain}"') + "+" + quote_plus(f"-site:{ctx.domain}")
+    url = f"https://html.duckduckgo.com/html/?q={q}"
+    res, err = await _ddg_html(url)
+    if res is None:
+        return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a backlink data provider (Ahrefs/Moz/Majestic).", checked=url, error=err, duration_ms=ms_since(t))
+    urls = _extract_result_urls(res.text)
+    own_host = ctx.domain.removeprefix("www.")
+    external = [u for u in urls if (urlparse(u).hostname or "").lower().removeprefix("www.") != own_host]
+    count = len(external)
+    score = min(55, 10 + count * 9)
     return result(
-        spec, score=None, unknown=True,
-        evidence={"provider": "Backlink API", "reason": "Referring-domain quality requires a backlink provider."},
-        recommendation="Connect a backlink provider to score topical relevance and referring-domain quality.",
-        checked="backlink-provider", error="No backlink provider configured", duration_ms=ms_since(t),
+        spec, score=score,
+        evidence={"provider": "DuckDuckGo HTML", "query": q, "mentioning_pages": count, "sample_urls": external[:10], "note": "Mention-count proxy only -- topical relevance, link authority and follow/nofollow status require a backlink index (Ahrefs/Moz/Majestic) and are not verified here; score is capped at 55."},
+        recommendation="Earn links from topically-relevant, authoritative sites, then connect a backlink data provider for verified quality scoring.",
+        checked=url, duration_ms=ms_since(t), confidence=0.25,
     )
 
 
 async def off_14(spec, ctx):
     t = timed()
-    q = quote_plus(f'"{ctx.company_name}" -site:{ctx.domain}')
+    q = quote_plus(f'"{ctx.company_name}"') + "+" + quote_plus(f"-site:{ctx.domain}")
     url = f"https://html.duckduckgo.com/html/?q={q}"
-    res = await fetch(url, user_agent=BROWSER_UA)
-    if not res.ok:
-        return result(spec, score=None, unknown=True, evidence={"error": res.error}, recommendation="Connect a news/mention provider.", checked=url, error=res.error or f"HTTP {res.status_code}", duration_ms=ms_since(t))
-    hits = len(re.findall(r"uddg=", res.text))
-    score = 55 if hits >= 4 else 25
-    rec = "Reclaim unlinked brand mentions and pursue earned news in priority markets." if score < 90 else None
-    return result(spec, score=score, evidence={"provider": "DuckDuckGo HTML", "approx_mentions": hits}, recommendation=rec, checked=url, duration_ms=ms_since(t), confidence=0.35)
+    res, err = await _ddg_html(url)
+    if res is None:
+        return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a media-monitoring/search adapter.", checked=url, error=err, duration_ms=ms_since(t))
+    urls = _extract_result_urls(res.text)
+    own_host = ctx.domain.removeprefix("www.")
+    external = [u for u in urls if (urlparse(u).hostname or "").lower().removeprefix("www.") != own_host]
+    count = len(external)
+    score = 15 if count == 0 else (40 if count <= 3 else 65)
+    rec = "Pursue earned coverage, and ask unlinked mentions to add a link back to the site." if score < 90 else None
+    return result(spec, score=score, evidence={"provider": "DuckDuckGo HTML", "query": q, "third_party_mentions": count, "sample_urls": external[:10], "note": "Whether each mention omits a link back is not individually verified."}, recommendation=rec, checked=url, duration_ms=ms_since(t), confidence=0.3)
 
 
 async def off_15(spec, ctx):
     t = timed()
-    return result(
-        spec, score=None, unknown=True,
-        evidence={"provider": "AI assistant query runner", "reason": "Citation-share measurement needs controlled assistant queries."},
-        recommendation="Add an AI-citation research adapter to query assistants and collect cited domains.",
-        checked="ai-citations", error="AI assistant query adapter not configured", duration_ms=ms_since(t),
+    categories = derive_site_categories(ctx, limit=1)
+    topic = categories[0] if categories else "this kind of service"
+    prompt = (
+        f'If someone asked an AI assistant a buyer question about "{topic}", name up to 5 real, '
+        "specific websites (with domains) it would most likely reference or cite in its answer. "
+        f'Consider whether "{ctx.domain}" (the website of "{ctx.company_name}") would plausibly be '
+        "one of them, given how well-known it is.\n\n"
+        'Reply as JSON: {"sources": [<string domain>, ...], "site_included": <bool>}'
     )
+    llm_res = await judge(prompt, system=SYSTEM)
+    if not llm_res.ok or not llm_res.parsed:
+        return result(spec, score=None, unknown=True, evidence={"topic": topic, "llm_error": llm_res.error}, recommendation="Enable LLM scoring (ENABLE_LLM_SCORING + OPENAI_API_KEY) to approximate AI-citation visibility.", checked="llm-citation-probe", error=llm_res.error or "LLM unavailable", duration_ms=ms_since(t))
+    sources = llm_res.parsed.get("sources") or []
+    included = bool(llm_res.parsed.get("site_included")) or any(ctx.domain.removeprefix("www.") in str(s).lower() for s in sources)
+    score = 85 if included else (30 if sources else 15)
+    rec = "Build citable authority (original data, press coverage, directory listings) so AI assistants surface the site for this topic." if score < 90 else None
+    return result(spec, score=score, evidence={"topic": topic, "cited_sources": sources, "site_included": included, "note": "Single-model approximation using this tool's own LLM, not a multi-assistant citation audit."}, recommendation=rec, checked="llm-citation-probe", duration_ms=ms_since(t), confidence=0.4)
 
 
 async def off_16(spec, ctx):
     t = timed()
-    q = quote_plus(f'best digital engineering companies "{ctx.company_name}"')
+    categories = derive_site_categories(ctx, limit=1)
+    topic = categories[0] if categories else "companies"
+    q = quote_plus(f'best {topic} "{ctx.company_name}"')
     url = f"https://html.duckduckgo.com/html/?q={q}"
-    res = await fetch(url, user_agent=BROWSER_UA)
-    if not res.ok:
-        return result(spec, score=None, unknown=True, evidence={"error": res.error}, recommendation="Connect a SERP adapter for list-inclusion checks.", checked=url, error=res.error or f"HTTP {res.status_code}", duration_ms=ms_since(t))
+    res, err = await _ddg_html(url)
+    if res is None:
+        return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a SERP adapter for list-inclusion checks.", checked=url, error=err, duration_ms=ms_since(t))
     mentioned = ctx.company_name.split()[0].lower() in res.text.lower()
     score = 50 if mentioned else 20
     rec = "Pursue legitimate inclusion on authoritative best/top/leading service lists." if score < 90 else None
@@ -282,28 +401,41 @@ async def off_16(spec, ctx):
 
 async def off_17(spec, ctx):
     t = timed()
-    q = quote_plus(f'alternatives to "{ctx.company_name}"')
+    q = quote_plus(f'"{ctx.company_name}"') + "+" + quote_plus('(alternatives OR "alternative to")')
     url = f"https://html.duckduckgo.com/html/?q={q}"
-    res = await fetch(url, user_agent=BROWSER_UA)
-    if not res.ok:
-        return result(spec, score=None, unknown=True, evidence={"error": res.error}, recommendation="Connect a SERP adapter.", checked=url, error=res.error or f"HTTP {res.status_code}", duration_ms=ms_since(t))
-    mentioned = ctx.company_name.split()[0].lower() in res.text.lower()
-    score = 45 if mentioned else 15
-    rec = "Earn accurate inclusion on alternatives-to-competitor pages." if score < 90 else None
-    return result(spec, score=score, evidence={"provider": "DuckDuckGo HTML", "brand_mentioned": mentioned}, recommendation=rec, checked=url, duration_ms=ms_since(t), confidence=0.35)
+    res, err = await _ddg_html(url)
+    if res is None:
+        return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a SERP adapter for alternatives-page checks.", checked=url, error=err, duration_ms=ms_since(t))
+    urls = _extract_result_urls(res.text)
+    alt_pages = [u for u in urls if "alternative" in u.lower()]
+    score = 90 if len(alt_pages) >= 2 else (60 if alt_pages else 20)
+    rec = "Pursue inclusion on legitimate 'alternatives to' comparison pages relevant to the category." if score < 90 else None
+    return result(spec, score=score, evidence={"provider": "DuckDuckGo HTML", "query": q, "alternatives_pages": alt_pages[:8], "note": "No fixed competitor list is configured; this measures inclusion on alternatives-style pages generally rather than against named competitors."}, recommendation=rec, checked=url, duration_ms=ms_since(t), confidence=0.35)
 
 
 async def off_18(spec, ctx):
     t = timed()
-    q = quote_plus(f'"{ctx.company_name}" (analyst OR "trade press" OR directory OR "it services")')
+    q = quote_plus(f'"{ctx.company_name}"') + "+" + quote_plus('(gartner OR forrester OR idc OR "analyst report" OR "industry report")')
     url = f"https://html.duckduckgo.com/html/?q={q}"
-    res = await fetch(url, user_agent=BROWSER_UA)
-    if not res.ok:
-        return result(spec, score=None, unknown=True, evidence={"error": res.error}, recommendation="Connect a web-index adapter.", checked=url, error=res.error or f"HTTP {res.status_code}", duration_ms=ms_since(t))
-    hits = len(re.findall(r"uddg=", res.text))
-    score = 55 if hits >= 4 else 25
-    rec = "Increase accurate analyst, directory and trade-press coverage." if score < 90 else None
-    return result(spec, score=score, evidence={"provider": "DuckDuckGo HTML", "approx_results": hits}, recommendation=rec, checked=url, duration_ms=ms_since(t), confidence=0.35)
+    res, err = await _ddg_html(url)
+    if res is None:
+        return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect an analyst/trade-press monitoring adapter.", checked=url, error=err, duration_ms=ms_since(t))
+    snippets = _extract_snippets(res.text)
+    if not snippets:
+        return result(spec, score=20, evidence={"provider": "DuckDuckGo HTML", "query": q, "snippets": []}, recommendation="Pursue analyst, directory and trade-press coverage.", checked=url, duration_ms=ms_since(t), confidence=0.3)
+    score = 55
+    confidence = 0.35
+    evidence = {"provider": "DuckDuckGo HTML", "query": q, "snippets": snippets, "method": "heuristic"}
+    llm_res = await judge(off18_prompt(ctx.company_name, snippets), system=SYSTEM)
+    if llm_res.ok and llm_res.parsed and "accurate" in llm_res.parsed:
+        score = 80 if llm_res.parsed.get("accurate") else 40
+        confidence = 0.55
+        evidence["method"] = "llm"
+        evidence["llm"] = llm_res.parsed
+    elif not llm_res.ok:
+        evidence["llm_unavailable"] = llm_res.error
+    rec = "Pursue additional analyst/trade-press coverage and correct any inaccurate descriptions found." if score < 90 else None
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=url, duration_ms=ms_since(t), confidence=confidence)
 
 
 HANDLERS = {

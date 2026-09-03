@@ -9,17 +9,6 @@ SYSTEM = (
 )
 
 
-def on01_prompt(headings: list[str]) -> str:
-    return (
-        "Classify each heading below as phrased the way a buyer would ask a question "
-        "(How/What/Why/When/Where, or a direct question) versus purely informational or "
-        "navigational phrasing.\n\n"
-        f"Headings (JSON array):\n{json.dumps(headings)}\n\n"
-        'Reply as JSON: {"question_style_count": <int, how many are buyer-question-phrased>, '
-        '"total": <int, total headings given>}'
-    )
-
-
 def on03_prompt(concepts: list[dict]) -> str:
     return (
         "For each core concept below, decide whether the surrounding text on the page gives "
@@ -27,16 +16,6 @@ def on03_prompt(concepts: list[dict]) -> str:
         f"Concepts and surrounding text (JSON array of {{concept, window}}):\n{json.dumps(concepts)}\n\n"
         'Reply as JSON: {"results": [{"concept": <string>, "defined": <bool>}, ...]} '
         "with one entry per concept given, in the same order."
-    )
-
-
-def on09_prompt(text_sample: str) -> str:
-    return (
-        "Rate how natural and conversational this website copy sounds, as opposed to "
-        "keyword-stuffed or written for search engines rather than people.\n\n"
-        f"Text sample:\n{text_sample[:4000]}\n\n"
-        'Reply as JSON: {"naturalness_score": <float 0-100, 100=fully natural>, '
-        '"stuffed": <bool, true if it reads as keyword-stuffed>}'
     )
 
 
@@ -53,6 +32,37 @@ def off02_prompt(company_name: str, hits: list[dict]) -> str:
     )
 
 
+def on09_prompt(samples: list[dict]) -> str:
+    return (
+        "Read these excerpts of website copy and judge, overall, whether the writing reads as "
+        "natural, fluent, conversational language versus stiff, repetitive or stitched-together "
+        "keyword strings (e.g. \"best web design company web design services web design agency\").\n\n"
+        f"Excerpts (JSON array of {{url, excerpt}}):\n{json.dumps(samples)}\n\n"
+        'Reply as JSON: {"naturalness": <float 0-100, 100 = fully natural and fluent>}'
+    )
+
+
+def off09_prompt(company_name: str, categories: list[str], snippets: list[dict]) -> str:
+    return (
+        f'Given the company "{company_name}", whose own site describes its business using these '
+        f"categories: {json.dumps(categories)}, decide whether the third-party search snippets "
+        "below place the company in the same or a clearly equivalent category (not a mismatched "
+        "or unrelated one).\n\n"
+        f"Search snippets (JSON array of {{title, snippet}}):\n{json.dumps(snippets)}\n\n"
+        'Reply as JSON: {"matches": <bool>, "confidence": <float 0-100>}'
+    )
+
+
+def off18_prompt(company_name: str, snippets: list[dict]) -> str:
+    return (
+        f'Given the company "{company_name}", judge whether the analyst/trade-press search '
+        "snippets below describe the company accurately (not confusing it with a different "
+        "company, and not repeating outdated/incorrect facts).\n\n"
+        f"Search snippets (JSON array of {{title, snippet}}):\n{json.dumps(snippets)}\n\n"
+        'Reply as JSON: {"accurate": <bool>, "confidence": <float 0-100>}'
+    )
+
+
 def tech11_prompt(sections: list[dict]) -> str:
     return (
         "For each section below (a heading plus the word count of the text under it before "
@@ -61,17 +71,4 @@ def tech11_prompt(sections: list[dict]) -> str:
         "focused, and does not run on without a subheading.\n\n"
         f"Sections (JSON array of {{heading, word_count}}):\n{json.dumps(sections)}\n\n"
         'Reply as JSON: {"liftable_count": <int>, "total": <int>}'
-    )
-
-
-def tech01_review_prompt(raw_robots_txt: str, decisions: list[dict]) -> str:
-    return (
-        "A deterministic parser read this robots.txt and produced these allow/block decisions "
-        "for AI crawlers. Sanity-check whether the decisions look consistent with the raw text "
-        "(watch for wildcard rules, rule ordering, and User-agent grouping), and write a short "
-        "plain-English explanation suitable for a non-technical reader. Do not recompute a "
-        "score -- this is a review/explanation pass only.\n\n"
-        f"Raw robots.txt (may be truncated):\n{raw_robots_txt[:2000]}\n\n"
-        f"Computed decisions (JSON array):\n{json.dumps(decisions)}\n\n"
-        'Reply as JSON: {"looks_consistent": <bool>, "explanation": <string, 1-3 sentences>}'
     )

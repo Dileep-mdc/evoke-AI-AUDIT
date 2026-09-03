@@ -146,3 +146,73 @@ def is_question(text: str) -> bool:
 
 def word_count(text: str) -> int:
     return len(re.findall(r"[A-Za-z0-9']+", text or ""))
+
+
+def primary_brand(ctx) -> str:
+    """The site's own brand term, derived per scan -- never a fixed company name."""
+    name = (getattr(ctx, "company_name", "") or "").strip()
+    if name:
+        return name.split()[0].lower()
+    domain = (getattr(ctx, "domain", "") or "").split(".")[0]
+    return domain.lower()
+
+
+_NAV_STOPWORDS = {
+    "home", "contact", "contact us", "about", "about us", "careers", "career", "blog",
+    "insights", "news", "login", "sign in", "sign up", "search", "menu", "get in touch",
+    "resources", "privacy policy", "privacy", "terms", "terms of use", "sitemap", "faq",
+    "faqs", "team", "leadership", "investors", "events", "media", "press", "gallery",
+    "our story", "clients", "testimonials", "get started", "book a demo", "request a demo",
+}
+
+
+def derive_site_categories(ctx, limit: int = 10) -> list[str]:
+    """The business categories/concepts this specific site covers, derived from its own
+    navigation and service pages -- never a fixed, one-company keyword list, since every
+    site being audited runs a different business."""
+    candidates: list[str] = []
+    for page in getattr(ctx, "pages", None) or []:
+        if getattr(page, "page_type", None) == "service" and getattr(page, "title", ""):
+            t = page.title.split("|")[0].split(" - ")[0].strip().lower()
+            if t and t not in _NAV_STOPWORDS and 3 <= len(t) <= 60:
+                candidates.append(t)
+    homepage = getattr(ctx, "homepage", None)
+    if homepage:
+        for link in getattr(homepage, "links", None) or []:
+            txt = (link.get("text") or "").strip().lower()
+            if txt and txt not in _NAV_STOPWORDS and 3 <= len(txt) <= 40 and not txt.startswith(("http", "www.")):
+                candidates.append(txt)
+    seen: list[str] = []
+    for c in candidates:
+        if c not in seen:
+            seen.append(c)
+    return seen[:limit]
+
+
+_GEO_PAIR_RE = re.compile(r"\b([A-Z][a-zA-Z.\-]{2,24}),\s?([A-Z]{2}\b|[A-Z][a-zA-Z.\-]{2,24}\b)")
+
+
+def derive_site_geographies(ctx, limit: int = 8) -> list[str]:
+    """Office/market locations this specific site mentions, derived from its own structured
+    data and page text -- never a fixed list of one company's cities/offices."""
+    geos: list[str] = []
+    for page in getattr(ctx, "pages", None) or []:
+        for item in flatten_schema(getattr(page, "schema_blocks", None) or []):
+            addr = item.get("address")
+            if isinstance(addr, dict):
+                for key in ("addressLocality", "addressRegion", "addressCountry"):
+                    v = addr.get(key)
+                    if isinstance(v, str) and v.strip():
+                        geos.append(v.strip().lower())
+                    elif isinstance(v, dict) and v.get("name"):
+                        geos.append(str(v["name"]).strip().lower())
+    if not geos:
+        relevant = [p for p in (getattr(ctx, "pages", None) or []) if getattr(p, "page_type", None) in ("about", "utility", "home")]
+        blob = " ".join((p.text or "") for p in relevant)[:20000]
+        for m in _GEO_PAIR_RE.finditer(blob):
+            geos.append(m.group(0).lower())
+    seen: list[str] = []
+    for g in geos:
+        if g not in seen:
+            seen.append(g)
+    return seen[:limit]

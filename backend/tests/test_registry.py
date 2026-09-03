@@ -11,3 +11,10 @@ def test_sixty_two_parameters_and_handlers():
     assert sum(1 for s in specs if s["section"] == "off_page") == 18
     missing = [s["parameter_id"] for s in specs if s["parameter_id"] not in HANDLERS]
     assert missing == []
+
+
+def test_parameters_are_numbered_in_order():
+    specs = load_registry()
+    for section in ("technical", "on_page", "off_page"):
+        ids = [s["parameter_id"] for s in specs if s["section"] == section]
+        assert ids == sorted(ids)

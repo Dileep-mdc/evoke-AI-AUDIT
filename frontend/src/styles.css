@@ -23,6 +23,10 @@ body {
   font-family: Inter, system-ui, sans-serif;
   color: var(--text);
   background: var(--bg);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 button, input { font-family: inherit; }
 a { color: var(--blue); text-decoration: none; }
@@ -110,7 +114,7 @@ button { cursor: pointer; }
   background: var(--card); border: 1px solid #eef1f4; border-radius: 14px;
   box-shadow: var(--shadow); padding: 18px 20px;
 }
-.card h2 { margin: 0; font-size: 16px; }
+.card h2 { margin: 0; font-size: 16px; letter-spacing: -0.01em; }
 .card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 
 .band { font-weight: 700; font-size: 14px; }
@@ -127,7 +131,7 @@ button { cursor: pointer; }
 .visibility-body { display: flex; gap: 36px; align-items: flex-start; flex-wrap: wrap; margin-top: 6px; }
 .visibility-table { flex: 1 1 340px; min-width: 300px; }
 .overall-score-line { margin-top: 14px; font-size: 14px; color: var(--text); font-weight: 600; }
-.overall-score-value { font-size: 19px; margin-left: 6px; }
+.overall-score-value { font-size: 19px; margin-left: 6px; font-variant-numeric: tabular-nums; }
 
 .gauge-row { display: flex; gap: 22px; flex: 1 1 380px; justify-content: flex-end; flex-wrap: wrap; }
 .mini-gauge { display: flex; flex-direction: column; align-items: center; gap: 8px; }
@@ -143,7 +147,7 @@ button { cursor: pointer; }
 .seg-btn:hover { color: var(--text); }
 .seg-btn.active { background: #fff; color: var(--indigo); box-shadow: 0 1px 2px rgba(16, 24, 40, 0.08); }
 
-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
 th { text-align: left; color: #6b7280; font-weight: 600; font-size: 12px; padding: 10px 8px; border-bottom: 1px solid var(--line); }
 th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
 th.sortable:hover { color: var(--text); }
@@ -155,6 +159,7 @@ tr.clickable:hover { background: #f8fafc; }
 .points {
   display: inline-block; min-width: 36px; text-align: center;
   border-radius: 8px; padding: 3px 8px; font-weight: 700; font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 .points.hi { background: #dcfce7; color: #15803d; }
 .points.mid { background: #ffedd5; color: #c2410c; }
@@ -180,10 +185,11 @@ tr.clickable:hover { background: #f8fafc; }
 .history-btn { width: 100%; justify-content: center; margin-top: 4px; }
 
 .issue-cell { max-width: 280px; color: var(--muted); line-height: 1.45; }
-.overall-formula { display: block; margin-top: 4px; font-size: 12px; font-weight: 500; color: var(--muted); }
+
+.param-id-cell { white-space: nowrap; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: 0.02em; }
 
 .drawer-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
-.drawer-head h2 { margin: 4px 0 0; font-size: 20px; }
+.drawer-head h2 { margin: 4px 0 0; font-size: 20px; letter-spacing: -0.01em; }
 .drawer-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; margin-bottom: 4px; }
 .drawer-score b { color: var(--text); }
 .drawer-note { font-size: 12px; color: var(--muted); }

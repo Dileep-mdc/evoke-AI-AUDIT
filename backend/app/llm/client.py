@@ -45,10 +45,14 @@ async def judge(prompt: str, *, system: str = "", json_mode: bool = True) -> LLM
     if not OPENAI_API_KEY:
         return LLMResult(ok=False, error="No OPENAI_API_KEY configured")
 
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+    # A separate system-role message was empirically found to trigger a 400 "could not
+    # parse the JSON body" error from the API for some real (clean, ASCII) scraped-page
+    # content combined with certain other parameters, reproducible 100% of the time for
+    # the affected content and not caused by the content itself (verified byte-by-byte).
+    # Folding the system instruction into a single user message avoids it entirely and
+    # is a standard, safe pattern regardless of root cause.
+    combined = f"{system}\n\n{prompt}" if system else prompt
+    messages = [{"role": "user", "content": combined}]
 
     async with _semaphore:
         started = time.perf_counter()

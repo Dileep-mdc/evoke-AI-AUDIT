@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urljoin, urlparse
 
@@ -29,7 +29,6 @@ class FetchResult:
     content_type: str
     elapsed_ms: int
     error: Optional[str] = None
-    redirect_chain: list = field(default_factory=list)
     hops: int = 0
 
     @property
@@ -105,7 +104,6 @@ async def fetch(
                     text = content.decode(resp.encoding or "utf-8", errors="replace")
                 except Exception:
                     text = content.decode("utf-8", errors="replace")
-                chain = [str(h.url) for h in resp.history] + [str(resp.url)]
                 return FetchResult(
                     url=url,
                     final_url=str(resp.url),
@@ -115,11 +113,15 @@ async def fetch(
                     text=text,
                     content_type=resp.headers.get("content-type", ""),
                     elapsed_ms=int((time.perf_counter() - started) * 1000),
-                    redirect_chain=chain,
                     hops=max(0, len(resp.history)),
                 )
         except Exception as exc:
-            last_error = humanize_error(str(exc)) or str(exc)
+            # Some httpx exceptions (ConnectTimeout, ReadTimeout) stringify to "" with no
+            # message, which made humanize_error() match nothing and left last_error empty
+            # -- silently hiding *why* the fetch failed. Falling back to the exception's own
+            # class name keeps the regex matching working and guarantees a non-empty reason.
+            raw = str(exc) or type(exc).__name__
+            last_error = humanize_error(raw) or raw
             if attempt < RETRIES:
                 await asyncio.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
                 continue

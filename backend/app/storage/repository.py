@@ -11,13 +11,23 @@ def _now() -> str:
 
 
 class ScanRepository:
-    def create(self, scan_id: str, domain: str, input_url: str, version: str) -> dict:
+    def create(
+        self,
+        scan_id: str,
+        domain: str,
+        input_url: str,
+        version: str,
+        technical_total: int,
+        onpage_total: int,
+        offpage_total: int,
+    ) -> dict:
         started = _now()
         with get_db() as conn:
             conn.execute(
-                """INSERT INTO scans (id, domain, input_url, status, started_at, crawler_version)
-                   VALUES (?, ?, ?, 'queued', ?, ?)""",
-                (scan_id, domain, input_url, started, version),
+                """INSERT INTO scans (id, domain, input_url, status, started_at, crawler_version,
+                   technical_total, onpage_total, offpage_total)
+                   VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)""",
+                (scan_id, domain, input_url, started, version, technical_total, onpage_total, offpage_total),
             )
         return self.get(scan_id)
 

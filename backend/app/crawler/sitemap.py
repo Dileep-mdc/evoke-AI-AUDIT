@@ -3,7 +3,7 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from urllib.parse import urljoin
 
-from ..config import MAX_PAGES, MAX_SITEMAP_URLS
+from ..config import MAX_SITEMAP_URLS
 from .http import fetch, same_host
 
 
@@ -22,7 +22,7 @@ async def fetch_sitemaps(origin: str, discovered: list[str]) -> dict:
         urljoin(origin.rstrip("/") + "/", "sitemap_index.xml"),
         urljoin(origin.rstrip("/") + "/", "sitemap-index.xml"),
     ]))
-    cap = min(MAX_SITEMAP_URLS, max(40, MAX_PAGES * 3))
+    cap = MAX_SITEMAP_URLS
     urls: list[str] = []
     sources: list[dict] = []
     errors: list[str] = []

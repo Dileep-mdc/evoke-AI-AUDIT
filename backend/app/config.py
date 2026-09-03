@@ -10,26 +10,20 @@ DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "scans.db"
 REGISTRY_PATH = Path(__file__).resolve().parent / "parameters" / "registry.json"
 
-DEFAULT_URL = "https://www.evoketechnologies.com/"
 ENGINE_VERSION = "1.0.0"
-CRAWLER_UA = "EvokeAIVisibilityAudit/1.0 (+https://www.evoketechnologies.com; audit-bot)"
+CRAWLER_UA = "AIVisibilityAuditBot/1.0 (compatible; automated site audit tool)"
 BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
-AI_CRAWLER_UAS = {
-    "GPTBot": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; GPTBot/1.2",
-    "ChatGPT-User": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; ChatGPT-User/1.0",
-    "ClaudeBot": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; ClaudeBot/1.0",
-    "Google-Extended": "Mozilla/5.0 (compatible; Google-Extended/1.0; +https://developers.google.com/search)",
-    "PerplexityBot": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; PerplexityBot/1.0",
-}
-
-MAX_PAGES = 28
-MAX_SITEMAP_URLS = 250
+# High ceilings, not typical-case limits: the crawler is meant to cover every page of the
+# audited site. These only kick in as a safety net for pathological cases (e.g. a site with
+# millions of auto-generated, faceted-search URLs) so a single scan can't run forever.
+MAX_PAGES = 2500
+MAX_SITEMAP_URLS = 5000
 LINK_SAMPLE = 40
 CONCURRENCY = 6
-REQUEST_TIMEOUT = 12.0
+REQUEST_TIMEOUT = 30.0
 RETRIES = 2
 MAX_REDIRECTS = 8
 MAX_BODY_BYTES = 2_000_000
