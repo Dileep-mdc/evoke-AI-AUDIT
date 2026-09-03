@@ -105,7 +105,7 @@ def build_report(scan: dict, results: list[dict], issues: list[dict]) -> dict:
         },
         "weights": WEIGHTS,
         "status_counts": counts,
-        "coverage": {"scorable_parameters": 62, "known": known, "unknown": counts["unknown"]},
+        "coverage": {"scorable_parameters": len(results), "known": known, "unknown": counts["unknown"]},
         "parameters": results,
         "top_issues": issues[:8],
         "issues": issues,

@@ -4,16 +4,27 @@ import re
 from collections import Counter, defaultdict
 
 from ..llm.client import judge
-from ..llm.prompts import SYSTEM, on01_prompt, on03_prompt, on09_prompt
-from .common import flatten_schema, is_question, ms_since, result, timed, word_count
+from ..llm.prompts import SYSTEM, on03_prompt, on09_prompt
+from .common import derive_site_categories, derive_site_geographies, flatten_schema, is_question, ms_since, primary_brand, result, timed, word_count
 
 JOURNEY = {
     "awareness": ("what is", "overview", "insights", "blog", "guide"),
-    "qualification": ("service", "solution", "capability", "how we"),
-    "comparison": ("vs", "versus", "compar", "alternative", "why evoke"),
-    "objection": ("faq", "security", "compliance", "risk"),
-    "trust": ("case stud", "testimonial", "client", "award", "iso", "cmmi"),
-    "decision": ("contact", "get in touch", "engage", "rfp", "consult"),
+    "qualification": ("service", "solution", "product", "feature", "how it works", "how we"),
+    "comparison": ("vs", "versus", "compar", "alternative"),
+    "objection": ("faq", "security", "compliance", "risk", "guarantee", "return policy"),
+    "trust": ("case stud", "testimonial", "client", "review", "award", "certified", "accredit"),
+    "decision": ("contact", "get in touch", "get started", "book", "schedule", "buy", "order", "sign up"),
+}
+
+SUBTOPICS = {
+    "problem/need": ("problem", "need", "challenge", "pain point"),
+    "approach/process": ("approach", "process", "how it works", "how we", "methodology"),
+    "features": ("feature", "capabilit", "what you get", "includes"),
+    "outcomes/benefits": ("outcome", "result", "benefit"),
+    "audience/market": ("industry", "audience", "market", "who we serve", "for you"),
+    "pricing/plans": ("pricing", "price", "cost", "plan", "package"),
+    "proof/trust": ("review", "testimonial", "case stud", "client", "rated"),
+    "contact/next step": ("contact", "get started", "book", "schedule", "sign up"),
 }
 
 
@@ -36,67 +47,6 @@ def _heading_blocks(page):
         answer = re.sub(r"\s+", " ", " ".join(texts)).strip()
         blocks.append({"heading": h.get_text(" ", strip=True), "answer": answer})
     return blocks
-
-
-async def on_01(spec, ctx):
-    t = timed()
-    pages = _service_pages(ctx) or ctx.pages
-    eligible = []
-    found = []
-    for page in pages:
-        for h in page.headings:
-            row = {"url": page.result.final_url, "heading": h["text"], "level": h["level"]}
-            found.append(row)
-            if h["level"] <= 3 and len(h["text"]) > 8:
-                eligible.append({**row, "question": is_question(h["text"])})
-    if not eligible:
-        html_pages = [p for p in pages if (p.word_count or 0) > 0]
-        if not html_pages:
-            summary = "The crawl did not retrieve any HTML, so no headings could be extracted. Check the URL and run a new scan."
-        elif not found:
-            summary = f"{len(pages)} page(s) were crawled, but no headings were found in the HTML."
-        else:
-            summary = "Headings were found, but none were H2/H3 longer than 8 characters."
-        return result(
-            spec,
-            score=0,
-            evidence={
-                "summary": summary,
-                "pages_checked": len(pages),
-                "pages_with_html": len(html_pages),
-                "headings_found": len(found),
-                "samples": found[:12],
-            },
-            recommendation="Rewrite service H2s as buyer questions.",
-            checked=ctx.origin,
-            duration_ms=ms_since(t),
-        )
-    q = sum(1 for e in eligible if e["question"])
-    score = q / len(eligible) * 100
-    confidence = 0.75
-    evidence = {"eligible": len(eligible), "question_style": q, "examples": eligible[:12], "pages_checked": len(pages), "method": "regex"}
-
-    llm_res = await judge(on01_prompt([e["heading"] for e in eligible]), system=SYSTEM)
-    if llm_res.ok and llm_res.parsed and llm_res.parsed.get("total"):
-        llm_total = llm_res.parsed["total"]
-        llm_q = llm_res.parsed.get("question_style_count", 0)
-        score = llm_q / llm_total * 100
-        confidence = 0.85
-        evidence["method"] = "llm"
-        evidence["llm"] = {"question_style_count": llm_q, "total": llm_total}
-    elif not llm_res.ok:
-        evidence["llm_unavailable"] = llm_res.error
-
-    rec = "Phrase headings as buyer questions (How, What, Why) on service pages." if score < 90 else None
-    return result(
-        spec,
-        score=score,
-        evidence=evidence,
-        recommendation=rec,
-        checked=ctx.origin,
-        duration_ms=ms_since(t),
-        confidence=confidence,
-    )
 
 
 def _question_blocks(ctx):
@@ -127,6 +77,28 @@ def _question_blocks(ctx):
                 "preview": block["answer"][:220],
             })
     return pages, html_pages, headings, answers
+
+
+_NAV_LABEL_RE = re.compile(r"^(home|about|about us|contact|contact us|services?|solutions?|products?|blog|careers?|pricing)$", re.I)
+
+
+async def on_01(spec, ctx):
+    t = timed()
+    rows = []
+    for page in _service_pages(ctx) or ctx.pages:
+        for h in page.headings:
+            if h["level"] > 3:
+                continue
+            text = h["text"].strip()
+            if len(text.split()) < 3 or _NAV_LABEL_RE.match(text):
+                continue  # short nav-style labels aren't real buyer-facing headings
+            rows.append({"url": page.result.final_url, "heading": text, "question": is_question(text)})
+    if not rows:
+        return result(spec, score=30, evidence={"note": "No eligible H1-H3 headings found on service/solution pages."}, recommendation="Phrase key H2s on service pages as the questions buyers actually ask.", checked=ctx.origin, duration_ms=ms_since(t))
+    hits = sum(1 for r in rows if r["question"])
+    score = hits / len(rows) * 100
+    rec = "Phrase more H2/H3 headings as buyer questions (How/What/Why/Which…) rather than generic labels." if score < 90 else None
+    return result(spec, score=score, evidence={"headings": rows[:16], "question_headings": hits, "eligible_headings": len(rows)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.75)
 
 
 async def on_02(spec, ctx):
@@ -165,7 +137,7 @@ async def on_02(spec, ctx):
 
 async def on_03(spec, ctx):
     t = timed()
-    concepts = ["digital engineering", "product engineering", "data engineering", "quality engineering", "staff augmentation", "ai", "cloud"]
+    concepts = derive_site_categories(ctx, limit=8)
     blob = " ".join((p.text or "") for p in ctx.pages).lower()
     defined = []
     for c in concepts:
@@ -200,11 +172,12 @@ async def on_04(spec, ctx):
     t = timed()
     rows = []
     fillers = ("welcome to", "in today's", "in today’s", "we are a leading", "leveraging cutting")
+    site_terms = ctx.brand_terms + derive_site_categories(ctx, limit=6)
     for page in ctx.pages[:12]:
         paras = [p for p in re.split(r"\n+|(?<=\.)\s", page.text) if len(p.split()) > 8][:2]
         opening = " ".join(paras)[:400]
         generic = any(f in opening.lower() for f in fillers)
-        specific = any(k in opening.lower() for k in ctx.brand_terms + ["engineering", "digital", "product"])
+        specific = any(k in opening.lower() for k in site_terms)
         score = 85 if specific and not generic else (55 if specific else 35)
         rows.append({"url": page.result.final_url, "opening": opening, "generic": generic, "score": score})
     avg = sum(r["score"] for r in rows) / len(rows) if rows else 40
@@ -266,6 +239,8 @@ async def on_08(spec, ctx):
         if not page.soup:
             continue
         for lst in page.soup.find_all(["ul", "ol"]):
+            if lst.find_parent(["nav", "header", "footer"]):
+                continue  # navigation/menu lists repeat on every page and aren't real content
             items = [li.get_text(" ", strip=True) for li in lst.find_all("li")]
             if len(items) < 2:
                 continue
@@ -282,28 +257,37 @@ async def on_08(spec, ctx):
 
 async def on_09(spec, ctx):
     t = timed()
-    text = " ".join(p.text for p in ctx.pages if p.text)[:20000]
-    words = re.findall(r"[A-Za-z]{4,}", text.lower())
-    if not words:
-        return result(spec, score=None, unknown=True, evidence={}, recommendation="No copy extracted.", checked=ctx.origin, error="empty text", duration_ms=ms_since(t))
-    counts = Counter(words)
-    top = counts.most_common(8)
-    stuffing = any(c / len(words) > 0.035 for _, c in top[:3])
-    score = 55 if stuffing else 78
+    rows = []
+    samples = []
+    for page in ctx.pages:
+        words = re.findall(r"[A-Za-z]{3,}", (page.text or "").lower())
+        if len(words) < 40:
+            continue
+        counts = Counter(words)
+        dens = counts.most_common(1)[0][1] / len(words)
+        rows.append({"url": page.result.final_url, "max_density": round(dens, 4)})
+        if len(samples) < 8 and page.text:
+            samples.append({"url": page.result.final_url, "excerpt": page.text[:400]})
+    if not rows:
+        return result(spec, score=None, unknown=True, evidence={}, recommendation="No page copy available to evaluate.", checked=ctx.origin, error="no page text", duration_ms=ms_since(t))
+    avg_d = sum(r["max_density"] for r in rows) / len(rows)
+    lexical = 100 if avg_d < 0.025 else (75 if avg_d < 0.04 else 45)
+    score = lexical
     confidence = 0.55
-    evidence = {"top_terms": top, "word_count": len(words), "stuffing_flag": stuffing, "method": "lexical"}
+    evidence = {"pages": rows[:10], "average_max_density": round(avg_d, 4), "method": "heuristic"}
 
-    llm_res = await judge(on09_prompt(text), system=SYSTEM)
-    if llm_res.ok and llm_res.parsed and llm_res.parsed.get("naturalness_score") is not None:
-        score = float(llm_res.parsed["naturalness_score"])
-        stuffing = bool(llm_res.parsed.get("stuffed", stuffing))
-        confidence = 0.8
-        evidence["method"] = "llm"
-        evidence["llm"] = {"naturalness_score": score, "stuffed": stuffing}
-    elif not llm_res.ok:
-        evidence["llm_unavailable"] = llm_res.error
+    if samples:
+        llm_res = await judge(on09_prompt(samples), system=SYSTEM)
+        if llm_res.ok and llm_res.parsed and isinstance(llm_res.parsed.get("naturalness"), (int, float)):
+            naturalness = float(llm_res.parsed["naturalness"])
+            score = lexical * 0.4 + naturalness * 0.6
+            confidence = 0.75
+            evidence["method"] = "llm"
+            evidence["llm"] = llm_res.parsed
+        elif not llm_res.ok:
+            evidence["llm_unavailable"] = llm_res.error
 
-    rec = "Rewrite keyword-string headings into natural, conversational sentences." if stuffing else "Tighten remaining promotional phrasing so answers sound spoken, not stuffed."
+    rec = "Rewrite stiff or repetitive copy into natural, conversational sentences." if score < 90 else None
     return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
@@ -325,13 +309,12 @@ async def on_10(spec, ctx):
 
 async def on_11(spec, ctx):
     t = timed()
-    expected = ["problem", "approach", "capability", "outcome", "industry", "engagement", "technology", "contact"]
     rows = []
     for page in _service_pages(ctx) or ctx.pages:
         text = (page.text or "").lower()
-        covered = [tpc for tpc in expected if tpc in text]
-        rows.append({"url": page.result.final_url, "covered": covered, "missing": [t for t in expected if t not in covered], "words": page.word_count})
-    score = sum(len(r["covered"]) / len(expected) * 100 for r in rows) / max(1, len(rows))
+        covered = [name for name, kws in SUBTOPICS.items() if any(k in text for k in kws)]
+        rows.append({"url": page.result.final_url, "covered": covered, "missing": [name for name in SUBTOPICS if name not in covered], "words": page.word_count})
+    score = sum(len(r["covered"]) / len(SUBTOPICS) * 100 for r in rows) / max(1, len(rows))
     rec = "Fill missing subtopics on service pages: outcomes, industries, engagement model and proof." if score < 90 else None
     return result(spec, score=score, evidence={"pages": rows[:12]}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.6)
 
@@ -428,7 +411,9 @@ async def on_18(spec, ctx):
     t = timed()
     covered = defaultdict(list)
     corpus = [(p.result.final_url, f"{p.title} {p.text[:1000]}".lower()) for p in ctx.pages]
-    for stage, keys in JOURNEY.items():
+    brand = primary_brand(ctx)
+    journey = {**JOURNEY, "comparison": JOURNEY["comparison"] + ((f"why {brand}",) if brand else ())}
+    for stage, keys in journey.items():
         for url, blob in corpus:
             if any(k in blob or k in url.lower() for k in keys):
                 covered[stage].append(url)
@@ -486,10 +471,13 @@ async def on_21(spec, ctx):
     return result(spec, score=score, evidence={"thin": thin[:12], "near_duplicates": dups[:8]}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
 
 
+_GENERIC_REACH_TERMS = ("united states", "usa", "uk", "europe", "asia", "north america", "global", "worldwide", "nationwide")
+
+
 async def on_22(spec, ctx):
     t = timed()
-    geos = ("united states", "india", "hyderabad", "ohio", "north america", "usa", "uk")
-    cats = ("digital engineering", "product engineering", "it services", "software", "staffing", "quality engineering")
+    geos = tuple(derive_site_geographies(ctx)) + _GENERIC_REACH_TERMS
+    cats = tuple(derive_site_categories(ctx))
     rows = []
     for page in ctx.pages:
         text = (page.text or "").lower()

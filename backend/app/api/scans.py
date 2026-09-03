@@ -3,18 +3,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from ..config import DEFAULT_URL, ENGINE_VERSION
+from ..config import ENGINE_VERSION
 from ..crawler.discover import crawl_site
 from ..crawler.http import normalize_url
 from ..parameters.engine import load_registry, run_all_parameters
 from ..parameters.scoring import build_report, prioritize
 from ..pdf_export import build_pdf
+from ..scan_output import save_crawl_failures, save_crawl_output, save_excel_output
 from ..storage.repository import ScanRepository
 
 router = APIRouter(prefix="/api")
@@ -23,9 +25,13 @@ registry = load_registry()
 log = logging.getLogger("scans")
 _running: set[asyncio.Task] = set()
 
+SECTION_TOTALS = {"technical": 0, "on_page": 0, "off_page": 0}
+for _spec in registry:
+    SECTION_TOTALS[_spec["section"]] = SECTION_TOTALS.get(_spec["section"], 0) + 1
+
 
 class ScanRequest(BaseModel):
-    url: str = Field(default=DEFAULT_URL)
+    url: str = Field(..., min_length=1)
 
 
 def _progress_payload(scan: dict) -> dict:
@@ -36,11 +42,11 @@ def _progress_payload(scan: dict) -> dict:
         "status": scan["status"],
         "progress_percent": scan.get("progress_percent") or 0,
         "technical_completed": scan.get("technical_completed") or 0,
-        "technical_total": scan.get("technical_total") or 22,
+        "technical_total": scan.get("technical_total") or SECTION_TOTALS["technical"],
         "onpage_completed": scan.get("onpage_completed") or 0,
-        "onpage_total": scan.get("onpage_total") or 22,
+        "onpage_total": scan.get("onpage_total") or SECTION_TOTALS["on_page"],
         "offpage_completed": scan.get("offpage_completed") or 0,
-        "offpage_total": scan.get("offpage_total") or 18,
+        "offpage_total": scan.get("offpage_total") or SECTION_TOTALS["off_page"],
         "started_at": scan.get("started_at"),
         "completed_at": scan.get("completed_at"),
         "errors_count": scan.get("errors_count") or 0,
@@ -58,7 +64,9 @@ async def execute_scan(scan_id: str, url: str) -> None:
     try:
         ctx = await crawl_site(url, on_progress=bump)
         repo.save_pages(scan_id, ctx.pages)
-        repo.update(scan_id, status="evaluating", progress_percent=18, domain=ctx.domain)
+        crawl_path = await asyncio.to_thread(save_crawl_output, scan_id, ctx)
+        await asyncio.to_thread(save_crawl_failures, scan_id, ctx)
+        repo.update(scan_id, status="evaluating", progress_percent=18, domain=ctx.domain, crawl_output_path=str(crawl_path))
 
         counts = {"technical": 0, "on_page": 0, "off_page": 0}
         errors = 0
@@ -75,7 +83,7 @@ async def execute_scan(scan_id: str, url: str) -> None:
                 technical_completed=counts["technical"],
                 onpage_completed=counts["on_page"],
                 offpage_completed=counts["off_page"],
-                progress_percent=min(99, 18 + done / 62 * 80),
+                progress_percent=min(99, 18 + done / len(registry) * 80),
                 errors_count=errors,
                 status="evaluating",
             )
@@ -83,14 +91,19 @@ async def execute_scan(scan_id: str, url: str) -> None:
         results = await run_all_parameters(ctx, registry, on_each)
         issues = prioritize(results)
         repo.save_issues(scan_id, issues)
-        scan = repo.get(scan_id)
         from datetime import datetime, timezone
         completed = datetime.now(timezone.utc).isoformat()
-        repo.update(scan_id, completed_at=completed, status="completed", progress_percent=100)
+        repo.update(scan_id, completed_at=completed, progress_percent=100)
         scan = repo.get(scan_id)
         report = build_report(scan, results, issues)
         repo.save_report(scan_id, report)
-    except Exception as exc:
+        excel_path = await asyncio.to_thread(save_excel_output, scan_id, report, registry)
+        repo.update(scan_id, excel_output_path=str(excel_path))
+        # Only flip status to "completed" once the report is fully persisted, so a client
+        # that sees "completed" and immediately requests the report never hits a window
+        # where report_json is still empty.
+        repo.update(scan_id, status="completed")
+    except Exception:
         log.exception("Scan %s failed", scan_id)
         repo.update(scan_id, status="error", errors_count=1)
 
@@ -98,12 +111,17 @@ async def execute_scan(scan_id: str, url: str) -> None:
 @router.post("/scans")
 async def create_scan(payload: ScanRequest):
     try:
-        url = normalize_url(payload.url or DEFAULT_URL)
+        url = normalize_url(payload.url)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     domain = urlparse(url).netloc.lower()
     scan_id = str(uuid.uuid4())
-    scan = repo.create(scan_id, domain, url, ENGINE_VERSION)
+    scan = repo.create(
+        scan_id, domain, url, ENGINE_VERSION,
+        technical_total=SECTION_TOTALS["technical"],
+        onpage_total=SECTION_TOTALS["on_page"],
+        offpage_total=SECTION_TOTALS["off_page"],
+    )
     task = asyncio.create_task(_run(scan_id, url), name=f"scan-{scan_id}")
     _running.add(task)
     task.add_done_callback(_running.discard)
@@ -172,3 +190,32 @@ async def download_report(scan_id: str):
     pdf = build_pdf(report)
     filename = f"AI-Visibility-Audit-{report.get('domain','report')}.pdf"
     return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@router.get("/scans/{scan_id}/export.xlsx")
+async def download_excel(scan_id: str):
+    scan = repo.get(scan_id)
+    if not scan:
+        raise HTTPException(404, "Scan not found")
+    report = repo.report(scan_id)
+    path_str = scan.get("excel_output_path")
+    if not path_str or not Path(path_str).exists():
+        if not report:
+            raise HTTPException(409, "Report not ready")
+        saved = await asyncio.to_thread(save_excel_output, scan_id, report, registry)
+        repo.update(scan_id, excel_output_path=str(saved))
+        path_str = str(saved)
+    path = Path(path_str)
+    return Response(content=path.read_bytes(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="{path.name}"'})
+
+
+@router.get("/scans/{scan_id}/crawl-output")
+async def download_crawl_output(scan_id: str):
+    scan = repo.get(scan_id)
+    if not scan:
+        raise HTTPException(404, "Scan not found")
+    path_str = scan.get("crawl_output_path")
+    if not path_str or not Path(path_str).exists():
+        raise HTTPException(404, "Scraped output not found for this scan")
+    path = Path(path_str)
+    return Response(content=path.read_bytes(), media_type="application/json", headers={"Content-Disposition": f'attachment; filename="{path.name}"'})

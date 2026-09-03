@@ -10,3 +10,8 @@ urllib3
 pytest
 openai
 python-dotenv
+openpyxl
+scrapy
+scrapy-playwright
+playwright
+trafilatura

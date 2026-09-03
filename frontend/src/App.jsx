@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
 import { createScan, downloadUrl, getParameter, getProgress, getReport, listScans } from "./api";
+import logoIcon from "./assets/logo-icon.png";
 
 const WEIGHTS = { on_page: 0.4, off_page: 0.25, technical: 0.35 };
 
@@ -208,24 +209,7 @@ function Icon({ name }) {
 }
 
 function Logo() {
-  return (
-    <svg width="26" height="26" viewBox="0 0 40 40" fill="none">
-      <defs>
-        <linearGradient id="logoGrad" x1="4" y1="30" x2="34" y2="6" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stopColor="#1d4ed8" />
-          <stop offset="0.55" stopColor="#60a5fa" />
-          <stop offset="1" stopColor="#f97316" />
-        </linearGradient>
-      </defs>
-      <path
-        d="M32 10c-8.5 0-16 5.6-16 13.4 0 5.6 3.9 9 8 9 3.6 0 6.2-2.4 6.2-5.5 0-2.4-1.7-4.1-3.9-4.1-1.5 0-2.6.9-2.6 2.1"
-        stroke="url(#logoGrad)"
-        strokeWidth="3.6"
-        strokeLinecap="round"
-        fill="none"
-      />
-    </svg>
-  );
+  return <img src={logoIcon} alt="" width="26" height="26" style={{ display: "block", objectFit: "contain" }} />;
 }
 
 function Shell({ children, view, onView, onSearch, search, toast }) {
@@ -281,7 +265,7 @@ function Shell({ children, view, onView, onSearch, search, toast }) {
   );
 }
 
-function Landing({ onStarted }) {
+function Landing() {
   const nav = useNavigate();
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
@@ -297,7 +281,6 @@ function Landing({ onStarted }) {
     setError("");
     try {
       const scan = await createScan(target);
-      onStarted?.(scan);
       nav(`/scan/${scan.scan_id}`);
     } catch (e) {
       setError(e.message);
@@ -361,7 +344,7 @@ function Scanning() {
         setErr("");
         setP(data);
         if (data.status === "completed") nav(`/report/${scanId}`, { replace: true });
-        if (data.status === "error") setErr("Scan failed. Start a new report with a full URL such as https://www.evoketechnologies.com");
+        if (data.status === "error") setErr("Scan failed. Start a new report with a full URL such as https://www.example.com");
       } catch (e) {
         fails += 1;
         if (alive && fails >= 3) setErr("Waiting for the server to reconnect…");
@@ -437,6 +420,7 @@ function MiniGauge({ value, label }) {
 }
 
 const SORT_COLUMNS = [
+  { key: "parameter_id", label: "#" },
   { key: "name", label: "Parameter" },
   { key: "score", label: "Score" },
   { key: "issues", label: "Issues" },
@@ -447,6 +431,7 @@ function sortValue(p, key) {
   if (key === "score") return p.score ?? -1;
   if (key === "issues") return issueText(p);
   if (key === "recommendation") return p.recommendation || "";
+  if (key === "parameter_id") return p.parameter_id || "";
   return p.name || "";
 }
 
@@ -497,6 +482,7 @@ function ParameterTable({ title, rows, onSelect, tabs, activeTab, onTabChange })
             const tone = p.score == null ? "na" : p.score >= 75 ? "hi" : p.score >= 40 ? "mid" : "lo";
             return (
               <tr key={p.parameter_id} className="clickable" onClick={() => onSelect(p)}>
+                <td className="param-id-cell">{p.parameter_id}</td>
                 <td>{p.name}</td>
                 <td><span className={`points ${tone}`}>{p.score == null ? "—" : `${fmt(p.score, 0)}%`}</span></td>
                 <td className="issue-cell">{issueText(p)}</td>
@@ -564,9 +550,18 @@ function Dashboard() {
   const [selected, setSelected] = useState(null);
   const [scans, setScans] = useState([]);
   const [toast, setToast] = useState("");
-  const [activeSection, setActiveSection] = useState("on_page");
+  const [activeSection, setActiveSection] = useState("technical");
 
   useEffect(() => {
+    // Dashboard stays mounted when navigating from one report straight to another
+    // (e.g. clicking "View Details" on a different scan while on the Reports tab),
+    // so state from the previous report must be reset here rather than relying on
+    // a fresh component mount -- otherwise the view stays on whatever tab was open
+    // instead of jumping to the new report's analytics/graph view.
+    setView("analytics");
+    setReport(null);
+    setErr("");
+    setSelected(null);
     getReport(scanId).then(setReport).catch((e) => setErr(e.message));
   }, [scanId]);
 
@@ -595,15 +590,15 @@ function Dashboard() {
   const overallBand = band(overall);
 
   const pillars = [
+    { key: "technical", name: "Technical", color: "#2563eb", score: cats.technical, weight: WEIGHTS.technical },
     { key: "on_page", name: "On-Page", color: "#14b8a6", score: cats.on_page, weight: WEIGHTS.on_page },
     { key: "off_page", name: "Off-Page", color: "#f59e0b", score: cats.off_page, weight: WEIGHTS.off_page },
-    { key: "technical", name: "Technical", color: "#2563eb", score: cats.technical, weight: WEIGHTS.technical },
   ];
 
   const rowsBySection = useMemo(() => {
     const q = search.trim().toLowerCase();
     const out = {};
-    for (const key of ["on_page", "off_page", "technical"]) {
+    for (const key of ["technical", "on_page", "off_page"]) {
       out[key] = params
         .filter((p) => p.section === key)
         .filter((p) => !q || p.name.toLowerCase().includes(q) || p.parameter_id.toLowerCase().includes(q) || (p.recommendation || "").toLowerCase().includes(q));
@@ -678,7 +673,6 @@ function Dashboard() {
                 </table>
                 <div className="overall-score-line">
                   Overall Score <span className={`overall-score-value band ${overallBand.cls}`}>{fmt(overall)}</span>
-                  <span className="overall-formula">On-Page × 40% + Off-Page × 25% + Technical × 35%</span>
                 </div>
               </div>
               <div className="gauge-row">
@@ -725,8 +719,7 @@ function Dashboard() {
       {view === "settings" && (
         <div className="card panel">
           <h2>Settings</h2>
-          <p>Overall = On-Page × 40% + Off-Page × 25% + Technical × 35%. UNKNOWN is excluded from the denominator. Thresholds: Pass 90, Partial 60, Fail below 60.</p>
-          <button className="btn btn-primary" onClick={exportPdf}>Export current report</button>
+          <p>Account and report preferences will appear here.</p>
         </div>
       )}
 
@@ -772,19 +765,13 @@ function Dashboard() {
 function HomePage() {
   const [view, setView] = useState("home");
   const [search, setSearch] = useState("");
-  const [toast, setToast] = useState("");
   const nav = useNavigate();
-
-  function notify(msg) {
-    setToast(msg);
-    setTimeout(() => setToast(""), 2200);
-  }
 
   let body = <Landing />;
   if (view === "reports") {
-    body = <ReportsHome notify={notify} />;
+    body = <ReportsHome />;
   } else if (view === "settings") {
-    body = <div className="card panel"><h2>Settings</h2><p>Overall = On-Page × 40% + Off-Page × 25% + Technical × 35%. UNKNOWN is excluded from the score.</p></div>;
+    body = <div className="card panel"><h2>Settings</h2><p>Account and report preferences will appear here.</p></div>;
   } else if (view === "analytics") {
     body = (
       <div className="card panel">
@@ -796,7 +783,7 @@ function HomePage() {
   }
 
   return (
-    <Shell view={view} onView={(v) => { if (v === "home") { setView("home"); nav("/"); } else setView(v); }} search={search} onSearch={setSearch} toast={toast}>
+    <Shell view={view} onView={(v) => { if (v === "home") { setView("home"); nav("/"); } else setView(v); }} search={search} onSearch={setSearch}>
       {body}
     </Shell>
   );

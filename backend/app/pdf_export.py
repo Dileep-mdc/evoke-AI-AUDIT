@@ -83,7 +83,8 @@ def build_pdf(report: dict) -> bytes:
         ("TOPPADDING", (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
     ]))
-    story += [it, Paragraph("All 62 parameters", h)]
+    total_params = (report.get("coverage") or {}).get("scorable_parameters") or len(report.get("parameters") or [])
+    story += [it, Paragraph(f"All {total_params} parameters", h)]
 
     rows = [["ID", "Parameter", "Status", "Score"]]
     for p in report.get("parameters") or []:

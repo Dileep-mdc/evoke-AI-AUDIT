@@ -11,11 +11,11 @@ CREATE TABLE IF NOT EXISTS scans (
     status TEXT NOT NULL,
     progress_percent REAL DEFAULT 0,
     technical_completed INTEGER DEFAULT 0,
-    technical_total INTEGER DEFAULT 22,
+    technical_total INTEGER DEFAULT 15,
     onpage_completed INTEGER DEFAULT 0,
-    onpage_total INTEGER DEFAULT 22,
+    onpage_total INTEGER DEFAULT 20,
     offpage_completed INTEGER DEFAULT 0,
-    offpage_total INTEGER DEFAULT 18,
+    offpage_total INTEGER DEFAULT 6,
     errors_count INTEGER DEFAULT 0,
     started_at TEXT,
     completed_at TEXT,
@@ -25,8 +25,10 @@ CREATE TABLE IF NOT EXISTS scans (
     onpage_score REAL,
     offpage_score REAL,
     coverage_known INTEGER,
-    coverage_total INTEGER DEFAULT 62,
-    report_json TEXT
+    coverage_total INTEGER DEFAULT 41,
+    report_json TEXT,
+    crawl_output_path TEXT,
+    excel_output_path TEXT
 );
 
 CREATE TABLE IF NOT EXISTS pages (
