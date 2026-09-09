@@ -269,16 +269,44 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
     bump(16)
 
     pages_by_target: dict[str, Page] = {}
-    for u in targets:
-        pair = fetched.get(u)
-        if not pair or "raw" not in pair:
-            errors.append(f"{u}: no response from scraper")
-            continue
-        raw = pair["raw"]
-        rendered = pair.get("rendered") or raw
-        if raw.error:
-            errors.append(f"{u}: {raw.error}")
-        pages_by_target[u] = await asyncio.to_thread(parse_page, raw, rendered)
+    all_targets: list[str] = list(targets)
+
+    async def _parse_batch(url_list: list[str], fetched_pairs: dict) -> None:
+        for u in url_list:
+            pair = fetched_pairs.get(u)
+            if not pair or "raw" not in pair:
+                errors.append(f"{u}: no response from scraper")
+                continue
+            raw = pair["raw"]
+            rendered = pair.get("rendered") or raw
+            if raw.error:
+                errors.append(f"{u}: {raw.error}")
+            pages_by_target[u] = await asyncio.to_thread(parse_page, raw, rendered)
+
+    await _parse_batch(targets, fetched)
+
+    # The sitemap can be missing, stale, or blocked outright, which would otherwise cap
+    # the crawl at whatever handful of links happen to be on the homepage. Keep following
+    # same-host links actually found on the pages fetched so far -- in batches, across a
+    # few rounds -- so site coverage doesn't depend on the sitemap succeeding.
+    visited = set(all_targets)
+    for _ in range(6):
+        if len(pages_by_target) >= MAX_PAGES:
+            break
+        discovered: list[str] = []
+        for p in pages_by_target.values():
+            for link in p.links:
+                href = urldefrag(link["href"])[0]
+                if href and href not in visited and same_host(href, origin):
+                    visited.add(href)
+                    discovered.append(href)
+        if not discovered:
+            break
+        discovered = discovered[: MAX_PAGES - len(pages_by_target)]
+        all_targets.extend(discovered)
+        batch_fetched = await crawl_pages(discovered)
+        await _parse_batch(discovered, batch_fetched)
+    bump(18)
 
     homepage = (
         pages_by_target.get(normalized)
@@ -292,7 +320,7 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
     # unchanged site rather than "whichever pages responded fastest".
     ordered = [homepage] if homepage else []
     seen = {homepage.result.final_url} if homepage else set()
-    for u in targets:
+    for u in all_targets:
         p = pages_by_target.get(u)
         if p is None or not p.result.final_url or p.result.final_url in seen:
             continue

@@ -24,6 +24,10 @@ export function getParameter(id, parameterId) {
   return fetch(`/api/scans/${id}/parameters/${parameterId}`).then(read);
 }
 
+export function rerunUnscored(id) {
+  return fetch(`/api/scans/${id}/rerun-unscored`, { method: "POST" }).then(read);
+}
+
 export function downloadUrl(id) {
   return `/api/scans/${id}/download`;
 }

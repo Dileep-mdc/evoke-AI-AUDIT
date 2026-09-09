@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
-import { createScan, downloadUrl, getParameter, getProgress, getReport, listScans } from "./api";
+import { createScan, downloadUrl, getParameter, getProgress, getReport, listScans, rerunUnscored } from "./api";
 import logoIcon from "./assets/logo-icon.png";
 
 const WEIGHTS = { on_page: 0.4, off_page: 0.25, technical: 0.35 };
@@ -204,6 +204,7 @@ function Icon({ name }) {
   if (name === "folder") return <svg {...common}><path d="M3 6h5l2 2h7v8H3z" /></svg>;
   if (name === "export") return <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M8 10V3" /><path d="m5 5 3-3 3 3" /><path d="M3 11v3h10v-3" /></svg>;
   if (name === "plus") return <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2"><path d="M7 2v10M2 7h10" /></svg>;
+  if (name === "refresh") return <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M13.5 8A5.5 5.5 0 1 1 11.8 4" /><path d="M13.5 2.5V6h-3.5" /></svg>;
   if (name === "globe") return <svg {...common} width="20" height="20"><circle cx="9" cy="9" r="7" /><path d="M2 9h14M9 2c2.2 2 3.5 4.5 3.5 7s-1.3 5-3.5 7c-2.2-2-3.5-4.5-3.5-7s1.3-5 3.5-7z" /></svg>;
   return null;
 }
@@ -551,6 +552,7 @@ function Dashboard() {
   const [scans, setScans] = useState([]);
   const [toast, setToast] = useState("");
   const [activeSection, setActiveSection] = useState("technical");
+  const [rerunning, setRerunning] = useState(false);
 
   useEffect(() => {
     // Dashboard stays mounted when navigating from one report straight to another
@@ -585,6 +587,7 @@ function Dashboard() {
   }
 
   const params = report?.parameters || [];
+  const unscoredCount = params.filter((p) => p.status === "UNKNOWN" || p.error).length;
   const cats = report?.category_scores || {};
   const overall = report?.overall_score;
   const overallBand = band(overall);
@@ -622,6 +625,24 @@ function Dashboard() {
     notify("Preparing PDF download");
   }
 
+  async function rerunFailed() {
+    setRerunning(true);
+    try {
+      const result = await rerunUnscored(scanId);
+      const fresh = await getReport(scanId);
+      setReport(fresh);
+      notify(
+        result.rerun_count > 0
+          ? `Re-checked ${result.rerun_count} parameter${result.rerun_count === 1 ? "" : "s"}`
+          : "Nothing to re-check — every parameter already has a score"
+      );
+    } catch (e) {
+      notify(e.message);
+    } finally {
+      setRerunning(false);
+    }
+  }
+
   return (
     <Shell view={view} onView={(v) => { setView(v); if (v === "home") nav("/"); }} search={search} onSearch={(v) => { setSearch(v); if (v) setView("analytics"); }} toast={toast}>
       {view === "analytics" && (
@@ -632,6 +653,11 @@ function Dashboard() {
               <p>A snapshot of your brand’s visibility across AI platforms.</p>
             </div>
             <div className="head-actions">
+              {unscoredCount > 0 && (
+                <button className="btn btn-ghost" onClick={rerunFailed} disabled={rerunning} title="Re-evaluate every parameter that came back without a score">
+                  <Icon name="refresh" /> {rerunning ? "Re-checking…" : `Re-check Unscored (${unscoredCount})`}
+                </button>
+              )}
               <button className="btn btn-ghost" onClick={exportPdf}><Icon name="export" /> Export to PDF</button>
               <button className="btn btn-primary" onClick={() => nav("/")}><Icon name="plus" /> Create New Report</button>
             </div>

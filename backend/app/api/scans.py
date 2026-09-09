@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections import OrderedDict
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -24,6 +26,22 @@ repo = ScanRepository()
 registry = load_registry()
 log = logging.getLogger("scans")
 _running: set[asyncio.Task] = set()
+
+# The crawled site (pages, soups, sitemap, robots...) behind a completed scan, kept in
+# memory so "re-run unscored parameters" can re-evaluate against the exact same crawl
+# instead of re-crawling the site. Bounded so a long-lived server doesn't accumulate one
+# entry per scan forever; a scan that's aged out simply can't be re-run without a fresh
+# full scan.
+_ctx_cache: "OrderedDict[str, object]" = OrderedDict()
+_CTX_CACHE_SIZE = 12
+
+
+def _cache_ctx(scan_id: str, ctx) -> None:
+    _ctx_cache[scan_id] = ctx
+    _ctx_cache.move_to_end(scan_id)
+    while len(_ctx_cache) > _CTX_CACHE_SIZE:
+        _ctx_cache.popitem(last=False)
+
 
 SECTION_TOTALS = {"technical": 0, "on_page": 0, "off_page": 0}
 for _spec in registry:
@@ -63,6 +81,7 @@ async def execute_scan(scan_id: str, url: str) -> None:
 
     try:
         ctx = await crawl_site(url, on_progress=bump)
+        _cache_ctx(scan_id, ctx)
         repo.save_pages(scan_id, ctx.pages)
         crawl_path = await asyncio.to_thread(save_crawl_output, scan_id, ctx)
         await asyncio.to_thread(save_crawl_failures, scan_id, ctx)
@@ -180,6 +199,59 @@ async def get_parameter(scan_id: str, parameter_id: str):
     if not row:
         raise HTTPException(404, "Parameter result not found")
     return row
+
+
+@router.post("/scans/{scan_id}/rerun-unscored")
+async def rerun_unscored(scan_id: str):
+    """Re-evaluate only the parameters that came back UNKNOWN or errored last time,
+    reusing the original crawl (no re-fetching the site) so a flaky check can be retried
+    in seconds instead of re-running the whole audit."""
+    scan = repo.get(scan_id)
+    if not scan:
+        raise HTTPException(404, "Scan not found")
+    if scan["status"] != "completed":
+        raise HTTPException(409, f"Scan is {scan['status']}; wait for it to complete first")
+
+    ctx = _ctx_cache.get(scan_id)
+    if ctx is None:
+        raise HTTPException(
+            409,
+            "The original crawl for this scan is no longer available in memory "
+            "(the server may have restarted since). Run a new full scan to refresh it.",
+        )
+
+    existing = {row["parameter_id"]: row for row in repo.parameters(scan_id)}
+    failed_specs = [
+        spec for spec in registry
+        if (row := existing.get(spec["parameter_id"])) is None
+        or row["status"] == "UNKNOWN"
+        or row.get("error")
+    ]
+    if not failed_specs:
+        return {"rerun_count": 0, "rerun_parameter_ids": [], **_progress_payload(scan)}
+
+    repo.update(scan_id, status="evaluating")
+
+    async def on_each(row: dict) -> None:
+        repo.save_parameter(scan_id, row)
+
+    await run_all_parameters(ctx, failed_specs, on_each)
+
+    all_results = repo.parameters(scan_id)
+    issues = prioritize(all_results)
+    repo.save_issues(scan_id, issues)
+    repo.update(scan_id, completed_at=datetime.now(timezone.utc).isoformat())
+    scan = repo.get(scan_id)
+    report = build_report(scan, all_results, issues)
+    repo.save_report(scan_id, report)
+    excel_path = await asyncio.to_thread(save_excel_output, scan_id, report, registry)
+    repo.update(scan_id, excel_output_path=str(excel_path), status="completed")
+
+    return {
+        "rerun_count": len(failed_specs),
+        "rerun_parameter_ids": [s["parameter_id"] for s in failed_specs],
+        **_progress_payload(repo.get(scan_id)),
+    }
 
 
 @router.get("/scans/{scan_id}/download")

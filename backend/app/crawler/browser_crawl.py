@@ -19,7 +19,10 @@ from .http import FetchResult
 
 SECONDS_PER_PAGE_BUDGET = 6.0
 MIN_TIMEOUT_SECONDS = 120.0
-MAX_TIMEOUT_SECONDS = 1200.0
+# Large sites (hundreds of pages) need real headroom here -- at the old 1200s (20 min) cap,
+# a subprocess still mid-fetch got killed and every page it hadn't reported back yet was
+# silently dropped, capping audit coverage well short of the full site.
+MAX_TIMEOUT_SECONDS = 3600.0
 
 
 def _row_to_fetch_result(row: dict) -> FetchResult:
