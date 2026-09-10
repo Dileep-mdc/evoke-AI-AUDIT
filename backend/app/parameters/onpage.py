@@ -4,8 +4,72 @@ import re
 from collections import Counter, defaultdict
 
 from ..llm.client import judge
-from ..llm.prompts import SYSTEM, on03_prompt, on09_prompt
-from .common import derive_site_categories, derive_site_geographies, flatten_schema, is_question, ms_since, primary_brand, result, timed, word_count
+from ..llm.prompts import (
+    JOURNEY_RUBRIC,
+    SERVICE_PAGE_RUBRIC,
+    SYSTEM,
+    on03_prompt,
+    on04_prompt,
+    on09_prompt,
+    on11_prompt,
+    on18_prompt,
+)
+from .common import (
+    derive_site_categories,
+    derive_site_geographies,
+    flatten_schema,
+    heading_blocks,
+    is_question,
+    ms_since,
+    primary_brand,
+    result,
+    timed,
+    word_count,
+)
+
+# Openings that say nothing about the business. Only used when the model is unavailable.
+_FILLER_OPENINGS = ("welcome to", "in today's", "in today’s", "we are a leading", "leveraging cutting")
+
+# Peak single-term density bands, shared by ON-09 (naturalness) and ON-10 (stuffing) so the
+# same rule cannot drift between them.
+_DENSITY_BANDS = ((0.025, 100), (0.04, 75))
+_DENSITY_FLOOR = 45
+
+# How many pages to put in front of the model for whole-site judgments. Spread across page
+# types rather than taken off the top, so a large site's later sections are still represented.
+_JOURNEY_SAMPLE = 60
+
+
+def density_score(average_max_density: float) -> int:
+    """Score a page-set's peak keyword density against the shared bands."""
+    for ceiling, points in _DENSITY_BANDS:
+        if average_max_density < ceiling:
+            return points
+    return _DENSITY_FLOOR
+
+
+def _spread_by_page_type(pages, limit: int):
+    """A deterministic sample that takes pages round-robin across page types, so one huge
+    section (usually the blog) cannot crowd out every other kind of page."""
+    buckets: dict[str, list] = defaultdict(list)
+    for page in pages:
+        buckets[page.page_type or "other"].append(page)
+    picked = []
+    index = 0
+    while len(picked) < limit:
+        added = False
+        for page_type in sorted(buckets):
+            bucket = buckets[page_type]
+            if index < len(bucket):
+                picked.append(bucket[index])
+                added = True
+                if len(picked) >= limit:
+                    break
+        if not added:
+            break
+        index += 1
+    return picked
+
 
 JOURNEY = {
     "awareness": ("what is", "overview", "insights", "blog", "guide"),
@@ -32,23 +96,6 @@ def _service_pages(ctx):
     return [p for p in ctx.pages if p.page_type in {"service", "home", "case_study"} or "service" in (p.result.final_url or "").lower()]
 
 
-def _heading_blocks(page):
-    blocks = []
-    if not page.soup:
-        return blocks
-    heads = page.soup.find_all(re.compile(r"^h[1-3]$"))
-    for i, h in enumerate(heads):
-        texts = []
-        for sib in h.next_siblings:
-            if getattr(sib, "name", None) and re.match(r"^h[1-6]$", sib.name or ""):
-                break
-            if getattr(sib, "get_text", None):
-                texts.append(sib.get_text(" ", strip=True))
-        answer = re.sub(r"\s+", " ", " ".join(texts)).strip()
-        blocks.append({"heading": h.get_text(" ", strip=True), "answer": answer})
-    return blocks
-
-
 def _question_blocks(ctx):
     pages = ctx.pages or []
     html_pages = [p for p in pages if (p.word_count or 0) > 0]
@@ -58,7 +105,7 @@ def _question_blocks(ctx):
         url = page.result.final_url if page.result else page.url
         for h in page.headings:
             headings.append({"url": url, "heading": h["text"], "level": h["level"], "question": is_question(h["text"])})
-        for block in _heading_blocks(page):
+        for block in heading_blocks(page):
             if not is_question(block["heading"]):
                 continue
             wc = word_count(block["answer"])
@@ -146,7 +193,7 @@ async def on_03(spec, ctx):
             window = blob[max(0, idx - 40): idx + 160]
             has_def = bool(re.search(rf"{re.escape(c)}.{{0,40}}(is|are|means|refers to|helps)", window))
             defined.append({"concept": c, "defined": has_def, "span": window[:180]})
-    present = [d for d in defined if True]
+    present = defined
     hits = sum(1 for d in defined if d["defined"])
     score = (hits / max(1, len(present))) * 100 if present else 30
     confidence = 0.65
@@ -171,18 +218,35 @@ async def on_03(spec, ctx):
 async def on_04(spec, ctx):
     t = timed()
     rows = []
-    fillers = ("welcome to", "in today's", "in today’s", "we are a leading", "leveraging cutting")
     site_terms = ctx.brand_terms + derive_site_categories(ctx, limit=6)
     for page in ctx.pages[:12]:
         paras = [p for p in re.split(r"\n+|(?<=\.)\s", page.text) if len(p.split()) > 8][:2]
         opening = " ".join(paras)[:400]
-        generic = any(f in opening.lower() for f in fillers)
+        generic = any(f in opening.lower() for f in _FILLER_OPENINGS)
         specific = any(k in opening.lower() for k in site_terms)
         score = 85 if specific and not generic else (55 if specific else 35)
         rows.append({"url": page.result.final_url, "opening": opening, "generic": generic, "score": score})
     avg = sum(r["score"] for r in rows) / len(rows) if rows else 40
+    confidence = 0.6
+    evidence = {"pages": rows[:10], "method": "heuristic"}
+
+    # Whether an opening "leads with the conclusion" is a judgment about meaning, so the
+    # model decides it; the keyword heuristic above only stands in when it cannot.
+    openings = [{"url": r["url"], "opening": r["opening"]} for r in rows if r["opening"]]
+    if openings:
+        llm_res = await judge(on04_prompt(openings), system=SYSTEM)
+        verdicts = (llm_res.parsed or {}).get("results") if llm_res.ok else None
+        if isinstance(verdicts, list) and verdicts:
+            leads = sum(1 for v in verdicts if v.get("leads_with_substance"))
+            avg = leads / len(verdicts) * 100
+            confidence = 0.8
+            evidence["method"] = "llm"
+            evidence["llm"] = {"leads_with_substance": leads, "assessed": len(verdicts)}
+        elif not llm_res.ok:
+            evidence["llm_unavailable"] = llm_res.error
+
     rec = "Lead each page with the conclusion / value proposition, then supporting detail." if avg < 90 else None
-    return result(spec, score=avg, evidence={"pages": rows[:10]}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.6)
+    return result(spec, score=avg, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
 async def on_05(spec, ctx):
@@ -271,7 +335,7 @@ async def on_09(spec, ctx):
     if not rows:
         return result(spec, score=None, unknown=True, evidence={}, recommendation="No page copy available to evaluate.", checked=ctx.origin, error="no page text", duration_ms=ms_since(t))
     avg_d = sum(r["max_density"] for r in rows) / len(rows)
-    lexical = 100 if avg_d < 0.025 else (75 if avg_d < 0.04 else 45)
+    lexical = density_score(avg_d)
     score = lexical
     confidence = 0.55
     evidence = {"pages": rows[:10], "average_max_density": round(avg_d, 4), "method": "heuristic"}
@@ -302,34 +366,65 @@ async def on_10(spec, ctx):
         dens = counts.most_common(1)[0][1] / len(words)
         rows.append({"url": page.result.final_url, "top": counts.most_common(5), "max_density": round(dens, 4)})
     avg_d = sum(r["max_density"] for r in rows) / len(rows) if rows else 0
-    score = 100 if avg_d < 0.025 else (75 if avg_d < 0.04 else 45)
+    score = density_score(avg_d)
     rec = "Reduce repeated phrases that look like keyword stuffing." if score < 90 else None
     return result(spec, score=score, evidence={"pages": rows[:10], "average_max_density": round(avg_d, 4)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
 
 
 async def on_11(spec, ctx):
     t = timed()
+    pages = _service_pages(ctx) or ctx.pages
     rows = []
-    for page in _service_pages(ctx) or ctx.pages:
+    for page in pages:
         text = (page.text or "").lower()
         covered = [name for name, kws in SUBTOPICS.items() if any(k in text for k in kws)]
         rows.append({"url": page.result.final_url, "covered": covered, "missing": [name for name in SUBTOPICS if name not in covered], "words": page.word_count})
+    rubric_points = len(SERVICE_PAGE_RUBRIC)
     score = sum(len(r["covered"]) / len(SUBTOPICS) * 100 for r in rows) / max(1, len(rows))
+    confidence = 0.6
+    evidence = {"pages": rows[:12], "method": "heuristic", "rubric_points": rubric_points}
+
+    # Whether a page really covers "outcomes" or "proof" is a reading-comprehension call, so
+    # the model counts the rubric points it actually meets. The denominator is unchanged --
+    # the same pages, out of the same number of rubric points.
+    excerpts = [{"url": p.result.final_url, "excerpt": (p.text or "")[:1200]}
+                for p in _spread_by_page_type(pages, 12) if p.text]
+    if excerpts:
+        llm_res = await judge(on11_prompt(excerpts), system=SYSTEM)
+        verdicts = (llm_res.parsed or {}).get("results") if llm_res.ok else None
+        if isinstance(verdicts, list) and verdicts:
+            covered_counts = [min(rubric_points, max(0, int(v.get("covered") or 0))) for v in verdicts]
+            score = sum(c / rubric_points * 100 for c in covered_counts) / len(covered_counts)
+            confidence = 0.8
+            evidence["method"] = "llm"
+            evidence["llm"] = {"covered_per_page": covered_counts, "assessed": len(covered_counts)}
+        elif not llm_res.ok:
+            evidence["llm_unavailable"] = llm_res.error
+
     rec = "Fill missing subtopics on service pages: outcomes, industries, engagement model and proof." if score < 90 else None
-    return result(spec, score=score, evidence={"pages": rows[:12]}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.6)
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
 async def on_12(spec, ctx):
     t = timed()
     rows = []
+    # "Major pages" per the registry: the pages a buyer actually lands on to evaluate the
+    # business, not every blog post. The previous filter was `count >= 0`, which admitted
+    # every crawled page and made the denominator the whole site.
+    major_types = {"home", "service", "case_study", "about"}
     for page in ctx.pages:
         nums = re.findall(r"\b\d{2,}(?:\.\d+)?%?\b|\b\d+\+\b", page.text or "")
-        rows.append({"url": page.result.final_url, "stats": nums[:8], "count": len(nums)})
-    major = [r for r in rows if r["count"] >= 0]
+        rows.append({
+            "url": page.result.final_url,
+            "stats": nums[:8],
+            "count": len(nums),
+            "major": page.page_type in major_types,
+        })
+    major = [r for r in rows if r["major"]] or rows
     hit = sum(1 for r in major if r["count"] >= 1)
     score = hit / max(1, len(major)) * 100
     rec = "Add original, citable statistics on major pages with a source or date." if score < 90 else None
-    return result(spec, score=score, evidence={"pages": rows[:12]}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    return result(spec, score=score, evidence={"pages": major[:12], "major_pages": len(major)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
 
 
 async def on_13(spec, ctx):
@@ -417,9 +512,30 @@ async def on_18(spec, ctx):
         for url, blob in corpus:
             if any(k in blob or k in url.lower() for k in keys):
                 covered[stage].append(url)
-    score = len([s for s in JOURNEY if covered[s]]) / 6 * 100
+    stages = len(JOURNEY)
+    score = len([s for s in JOURNEY if covered[s]]) / stages * 100
+    confidence = 0.7
+    evidence = {"stages": {k: v[:5] for k, v in covered.items()}, "covered": list(covered), "method": "heuristic"}
+
+    # What stage a page serves is a judgment about purpose, not vocabulary -- a pricing page
+    # aids comparison whether or not it contains the word "vs". Denominator stays the six stages.
+    titles = [{"url": p.result.final_url, "title": p.title or ""}
+              for p in _spread_by_page_type(ctx.pages, _JOURNEY_SAMPLE)]
+    if titles:
+        llm_res = await judge(on18_prompt(titles), system=SYSTEM)
+        verdict = (llm_res.parsed or {}).get("stages") if llm_res.ok else None
+        if isinstance(verdict, dict) and verdict:
+            hit = [s for s in JOURNEY if verdict.get(s)]
+            score = len(hit) / stages * 100
+            confidence = 0.85
+            evidence["method"] = "llm"
+            evidence["covered"] = hit
+            evidence["llm"] = {"stages": verdict, "pages_assessed": len(titles)}
+        elif not llm_res.ok:
+            evidence["llm_unavailable"] = llm_res.error
+
     rec = "Add missing journey stages — especially comparison, objection-handling and decision pages." if score < 90 else None
-    return result(spec, score=score, evidence={"stages": {k: v[:5] for k, v in covered.items()}, "covered": list(covered)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.7)
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
 async def on_19(spec, ctx):

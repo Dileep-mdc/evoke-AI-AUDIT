@@ -28,6 +28,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from .config import DATA_DIR
+from .parameters.scoring import scrape_confidence
 
 FORMULAS_PATH = Path(__file__).resolve().parent / "parameters" / "formulas.json"
 FORMULAS: dict[str, str] = json.loads(FORMULAS_PATH.read_text(encoding="utf-8"))
@@ -69,45 +70,10 @@ def _unique_path(path: Path) -> Path:
     return candidate
 
 
-def _scrape_confidence(p) -> dict:
-    """A 0-100 confidence score for how far this page's scraped data can be trusted,
-    derived purely from signals already captured during the crawl (HTTP status, bot-block
-    detection, extracted text volume, title presence) -- no extra fetch is made. This is
-    a confidence-in-the-scrape signal, not a content-quality score."""
-    result = p.result
-    status = result.status_code if result else None
-    error = result.error if result else "No response received"
-    if status is None or error:
-        return {"score": 0, "label": "Failed", "reasons": [error or "No response received"]}
-
-    score = 100
-    reasons: list[str] = []
-    if not (200 <= status < 300):
-        score -= 35
-        reasons.append(f"non-2xx HTTP status ({status})")
-    if p.blocked_reason:
-        score -= 50
-        reasons.append(p.blocked_reason)
-    if p.word_count < 40:
-        score -= 30
-        reasons.append("very little visible text was extracted (page may be JS-only or blocked)")
-    elif p.word_count < 150:
-        score -= 10
-        reasons.append("only a small amount of visible text was extracted")
-    if not p.title:
-        score -= 5
-        reasons.append("no <title> was found")
-    score = max(0, min(100, score))
-    label = "High" if score >= 75 else "Medium" if score >= 40 else "Low"
-    if not reasons:
-        reasons.append("clean 2xx response with substantial extracted text")
-    return {"score": score, "label": label, "reasons": reasons}
-
-
 def _page_failure(p) -> dict | None:
     """None if this page's crawl succeeded; otherwise why the crawler could not scrape it
     cleanly -- a hard fetch failure (timeout, DNS, connection refused), a non-2xx HTTP
-    status, or a bot-detection block. Deliberately narrower than _scrape_confidence: thin
+    status, or a bot-detection block. Deliberately narrower than scrape_confidence(): thin
     content on an otherwise clean 2xx page lowers confidence but isn't a crawl failure."""
     result = p.result
     status = result.status_code if result else None
@@ -172,7 +138,7 @@ def save_crawl_output(scan_id: str, ctx) -> Path:
     """Save the complete scraped-website output (every page, end to end) for this run."""
     pages = []
     for p in ctx.pages or []:
-        confidence = _scrape_confidence(p)
+        confidence = scrape_confidence(p)
         pages.append({
             "url": p.url,
             "final_url": p.result.final_url if p.result else p.url,

@@ -8,6 +8,8 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from .config import WEIGHTS
+
 
 NAVY = colors.HexColor("#14367A")
 GREEN = colors.HexColor("#1B8A5A")
@@ -106,8 +108,16 @@ def build_pdf(report: dict) -> bytes:
     pt.setStyle(TableStyle(style_cmds))
     story.append(pt)
     story.append(Spacer(1, 10))
+    # Read the weights rather than restating them, so the sentence cannot contradict the
+    # scores printed above it if a weight is ever retuned.
+    weights = report.get("weights") or WEIGHTS
+    blend = ", ".join(
+        f"{label} ({weights[key] * 100:.0f}%)"
+        for key, label in (("technical", "Technical"), ("on_page", "Content &amp; Answers"), ("off_page", "Reputation &amp; Authority"))
+        if key in weights
+    )
     story.append(Paragraph(
-        "Scores are a weighted blend of Technical (35%), Content &amp; Answers (40%) and Reputation &amp; Authority (25%). "
+        f"Scores are a weighted blend of {blend}. "
         "Each parameter is Pass / Partial / Fail / Unknown. This PDF uses the same persisted scan results as the dashboard.",
         small,
     ))

@@ -144,6 +144,28 @@ def is_question(text: str) -> bool:
     return bool(text and QUESTION_RE.search(text.strip()))
 
 
+def heading_blocks(page) -> list[dict]:
+    """Every H1-H3 on the page paired with the text that follows it up to the next heading.
+
+    Shared by the checks that judge answers under a heading (ON-02) and whether a section is
+    short enough for an assistant to lift whole (TECH-11) -- both need real section text, not
+    a per-page average.
+    """
+    if not page.soup:
+        return []
+    blocks = []
+    for h in page.soup.find_all(re.compile(r"^h[1-3]$")):
+        texts = []
+        for sib in h.next_siblings:
+            if getattr(sib, "name", None) and re.match(r"^h[1-6]$", sib.name or ""):
+                break
+            if getattr(sib, "get_text", None):
+                texts.append(sib.get_text(" ", strip=True))
+        body = re.sub(r"\s+", " ", " ".join(texts)).strip()
+        blocks.append({"heading": h.get_text(" ", strip=True), "answer": body, "words": word_count(body)})
+    return blocks
+
+
 def word_count(text: str) -> int:
     return len(re.findall(r"[A-Za-z0-9']+", text or ""))
 

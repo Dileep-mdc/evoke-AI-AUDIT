@@ -10,12 +10,15 @@ CREATE TABLE IF NOT EXISTS scans (
     input_url TEXT NOT NULL,
     status TEXT NOT NULL,
     progress_percent REAL DEFAULT 0,
+    -- Section totals are supplied by ScanRepository.create() from the live registry, so no
+    -- default is declared here: a baked-in number silently goes stale when a parameter is
+    -- added (these read 15/20/6 while the registry held 22/22/18).
     technical_completed INTEGER DEFAULT 0,
-    technical_total INTEGER DEFAULT 15,
+    technical_total INTEGER,
     onpage_completed INTEGER DEFAULT 0,
-    onpage_total INTEGER DEFAULT 20,
+    onpage_total INTEGER,
     offpage_completed INTEGER DEFAULT 0,
-    offpage_total INTEGER DEFAULT 6,
+    offpage_total INTEGER,
     errors_count INTEGER DEFAULT 0,
     started_at TEXT,
     completed_at TEXT,
@@ -25,7 +28,7 @@ CREATE TABLE IF NOT EXISTS scans (
     onpage_score REAL,
     offpage_score REAL,
     coverage_known INTEGER,
-    coverage_total INTEGER DEFAULT 41,
+    coverage_total INTEGER,
     report_json TEXT,
     crawl_output_path TEXT,
     excel_output_path TEXT

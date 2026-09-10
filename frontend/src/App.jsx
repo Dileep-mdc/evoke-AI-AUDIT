@@ -3,8 +3,6 @@ import { Navigate, Route, Routes, useNavigate, useParams } from "react-router-do
 import { createScan, downloadUrl, getParameter, getProgress, getReport, listScans, rerunUnscored } from "./api";
 import logoIcon from "./assets/logo-icon.png";
 
-const WEIGHTS = { on_page: 0.4, off_page: 0.25, technical: 0.35 };
-
 function band(score) {
   if (score == null) return { label: "Unknown", cls: "unknown" };
   if (score >= 90) return { label: "Excellent", cls: "excellent" };
@@ -592,11 +590,20 @@ function Dashboard() {
   const overall = report?.overall_score;
   const overallBand = band(overall);
 
+  // Weights and per-pillar contributions both come from the report. The backend owns every
+  // calculation; this file only formats what it is given.
+  const weights = report?.weights || {};
+  const contributions = report?.category_contributions || {};
   const pillars = [
-    { key: "technical", name: "Technical", color: "#2563eb", score: cats.technical, weight: WEIGHTS.technical },
-    { key: "on_page", name: "On-Page", color: "#14b8a6", score: cats.on_page, weight: WEIGHTS.on_page },
-    { key: "off_page", name: "Off-Page", color: "#f59e0b", score: cats.off_page, weight: WEIGHTS.off_page },
-  ];
+    { key: "technical", name: "Technical", color: "#2563eb" },
+    { key: "on_page", name: "On-Page", color: "#14b8a6" },
+    { key: "off_page", name: "Off-Page", color: "#f59e0b" },
+  ].map((p) => ({
+    ...p,
+    score: cats[p.key],
+    weight: weights[p.key],
+    contribution: contributions[p.key],
+  }));
 
   const rowsBySection = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -677,7 +684,6 @@ function Dashboard() {
                   <tbody>
                     {pillars.map((p) => {
                       const b = band(p.score);
-                      const weighted = p.score == null ? null : p.score * p.weight;
                       return (
                         <tr
                           key={p.key}
@@ -688,9 +694,9 @@ function Dashboard() {
                           }}
                         >
                           <td>{p.name}</td>
-                          <td>{Math.round(p.weight * 100)}%</td>
+                          <td>{p.weight == null ? "—" : `${Math.round(p.weight * 100)}%`}</td>
                           <td>{fmt(p.score)}</td>
-                          <td>{fmt(weighted)}</td>
+                          <td>{fmt(p.contribution, 2)}</td>
                           <td className={`band ${b.cls}`}>{b.label}</td>
                         </tr>
                       );

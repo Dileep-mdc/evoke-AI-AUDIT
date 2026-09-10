@@ -19,6 +19,10 @@ npm-debug.log*
 # Dev server logs
 *_server.log
 
+# Generated per-scan reports (regenerate from the scan rather than committing one customer's)
+ai-visibility-*.html
+ai-readiness-*.html
+
 # Editor / OS
 .vscode/
 .idea/

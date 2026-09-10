@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -43,7 +44,6 @@ def visible_text(soup: BeautifulSoup) -> str:
 
 def extract_jsonld(soup: BeautifulSoup) -> list:
     blocks = []
-    import json
     for script in soup.find_all("script", attrs={"type": re.compile(r"ld\+json", re.I)}):
         raw = script.string or script.get_text() or ""
         raw = raw.strip()

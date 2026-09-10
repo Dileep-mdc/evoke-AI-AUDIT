@@ -110,7 +110,6 @@ async def execute_scan(scan_id: str, url: str) -> None:
         results = await run_all_parameters(ctx, registry, on_each)
         issues = prioritize(results)
         repo.save_issues(scan_id, issues)
-        from datetime import datetime, timezone
         completed = datetime.now(timezone.utc).isoformat()
         repo.update(scan_id, completed_at=completed, progress_percent=100)
         scan = repo.get(scan_id)

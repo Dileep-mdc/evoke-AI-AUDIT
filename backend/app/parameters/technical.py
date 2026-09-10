@@ -9,7 +9,7 @@ from ..crawler.http import fetch
 from ..crawler.robots import AI_BOTS, bot_decision
 from ..llm.client import judge
 from ..llm.prompts import SYSTEM, tech11_prompt
-from .common import flatten_schema, ms_since, result, schema_types, timed
+from .common import flatten_schema, heading_blocks, ms_since, result, schema_types, timed
 
 
 async def tech_01(spec, ctx):
@@ -242,8 +242,22 @@ async def tech_11(spec, ctx):
     confidence = 0.7
     evidence = {"pages": rows[:12], "method": "heuristic"}
 
-    if rows:
-        sections_payload = [{"heading": r["url"], "word_count": r["words_per_heading"]} for r in rows[:20]]
+    # Real headings with the word count of their own section. This previously sent each
+    # page's URL as the "heading" and its mean words-per-heading as the "word count", so the
+    # model was judging URLs against an average and its verdict overwrote the score.
+    sections_payload = []
+    for page in ctx.pages:
+        if page.word_count < 40:
+            continue
+        for block in heading_blocks(page):
+            if block["heading"]:
+                sections_payload.append({"heading": block["heading"][:160], "word_count": block["words"]})
+            if len(sections_payload) >= 40:
+                break
+        if len(sections_payload) >= 40:
+            break
+
+    if sections_payload:
         llm_res = await judge(tech11_prompt(sections_payload), system=SYSTEM)
         if llm_res.ok and llm_res.parsed and llm_res.parsed.get("total"):
             liftable = llm_res.parsed.get("liftable_count", 0)
@@ -460,7 +474,7 @@ async def tech_22(spec, ctx):
     length_q = sum(1 for r in rows if r["title_ok"] and r["desc_ok"]) / max(1, len(rows))
     score = presence * 50 + uniq_t * 15 + uniq_d * 10 + length_q * 25
     rec = "Write unique titles and meta descriptions in recommended length ranges." if score < 90 else None
-    return result(spec, score=score * 100 if score <= 1 else score, evidence={"pages": rows[:16], "unique_title_ratio": round(uniq_t, 2)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    return result(spec, score=score, evidence={"pages": rows[:16], "unique_title_ratio": round(uniq_t, 2)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
 
 
 HANDLERS = {

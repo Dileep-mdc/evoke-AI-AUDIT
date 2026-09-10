@@ -63,6 +63,91 @@ def off18_prompt(company_name: str, snippets: list[dict]) -> str:
     )
 
 
+# The rubrics below are the audit's own definitions of what a page should cover, taken from
+# the parameter descriptions in registry.json. They are the question put to the model, not
+# keywords matched against the page -- the model decides whether each point is actually met.
+SERVICE_PAGE_RUBRIC = (
+    "the problem or need it addresses",
+    "the approach, process or methodology",
+    "what is included (features or capabilities)",
+    "the outcomes or benefits",
+    "who it is for (industry, audience or market)",
+    "pricing or commercial model",
+    "proof (clients, case studies, testimonials or ratings)",
+    "a clear next step or way to get in touch",
+)
+
+JOURNEY_RUBRIC = (
+    "awareness - explains the problem space to someone new to it",
+    "qualification - explains what the company actually offers",
+    "comparison - helps a buyer compare options or alternatives",
+    "objection - answers concerns such as security, compliance or risk",
+    "trust - offers proof via clients, case studies, testimonials or credentials",
+    "decision - gives a clear way to start, buy or make contact",
+)
+
+
+def on04_prompt(openings: list[dict]) -> str:
+    return (
+        "Each item below is the opening text of a web page. For each one, judge whether it "
+        "leads with a specific, concrete statement of what the business does or what the page "
+        "is about, rather than opening with generic filler, boilerplate or throat-clearing.\n\n"
+        f"Openings (JSON array of {{url, opening}}):\n{json.dumps(openings)}\n\n"
+        'Reply as JSON: {"results": [{"url": <string>, "leads_with_substance": <bool>}, ...]} '
+        "with one entry per opening given, in the same order."
+    )
+
+
+def on07_prompt(pages: list[dict]) -> str:
+    return (
+        "Each item below is a web page. Decide, for each, whether it is a page where a buyer "
+        "would be actively evaluating or comparing options -- comparing products, weighing "
+        "alternatives, reviewing capabilities or checking pricing -- as opposed to general "
+        "marketing, news or company background.\n\n"
+        f"Pages (JSON array of {{url, title, excerpt}}):\n{json.dumps(pages)}\n\n"
+        'Reply as JSON: {"results": [{"url": <string>, "evaluation_intent": <bool>}, ...]} '
+        "with one entry per page given, in the same order."
+    )
+
+
+def on08_prompt(lists: list[dict]) -> str:
+    return (
+        "Each item below is a list found on a web page. Judge whether each is genuinely useful "
+        "for answering a question -- a procedure, a set of benefits, evaluation criteria, "
+        "specifications -- as opposed to decorative or navigational filler.\n\n"
+        f"Lists (JSON array of {{url, items}}):\n{json.dumps(lists)}\n\n"
+        'Reply as JSON: {"results": [{"url": <string>, "useful": <bool>}, ...]} '
+        "with one entry per list given, in the same order."
+    )
+
+
+def on11_prompt(pages: list[dict]) -> str:
+    rubric = "\n".join(f"- {point}" for point in SERVICE_PAGE_RUBRIC)
+    return (
+        "A complete service page should cover all of the following:\n"
+        f"{rubric}\n\n"
+        "For each page excerpt below, decide which of those points the page actually covers. "
+        "Judge on substance, not on whether a particular word appears.\n\n"
+        f"Pages (JSON array of {{url, excerpt}}):\n{json.dumps(pages)}\n\n"
+        f'Reply as JSON: {{"results": [{{"url": <string>, "covered": <int 0-{len(SERVICE_PAGE_RUBRIC)}, '
+        "how many of the points above this page covers>}, ...]} with one entry per page given, "
+        "in the same order."
+    )
+
+
+def on18_prompt(pages: list[dict]) -> str:
+    rubric = "\n".join(f"- {stage}" for stage in JOURNEY_RUBRIC)
+    return (
+        "A site that serves a buyer through their whole journey has content for each of these "
+        f"six stages:\n{rubric}\n\n"
+        "Given the pages below (title and URL only), decide which of the six stages the site "
+        "has content for. Judge by what each page is evidently for, not by keywords.\n\n"
+        f"Pages (JSON array of {{url, title}}):\n{json.dumps(pages)}\n\n"
+        'Reply as JSON: {"stages": {"awareness": <bool>, "qualification": <bool>, '
+        '"comparison": <bool>, "objection": <bool>, "trust": <bool>, "decision": <bool>}}'
+    )
+
+
 def tech11_prompt(sections: list[dict]) -> str:
     return (
         "For each section below (a heading plus the word count of the text under it before "
