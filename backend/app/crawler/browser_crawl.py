@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -80,10 +81,18 @@ async def crawl_pages(
         "--user-agent", user_agent,
     ]
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, cwd=str(BASE_DIR),
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-    )
+    # Spawned synchronously (via a worker thread), not asyncio.create_subprocess_exec:
+    # uvicorn's --reload on Windows forces the SelectorEventLoop (see
+    # uvicorn/loops/asyncio.py, use_subprocess=True), and SelectorEventLoop cannot create
+    # subprocesses on Windows at all -- every scan crashed with NotImplementedError. A
+    # plain subprocess.Popen has no such dependency on which event loop is active.
+    def _run_subprocess() -> None:
+        proc = subprocess.Popen(cmd, cwd=str(BASE_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
 
     expected = len(urls) * 2
     stop = asyncio.Event()
@@ -108,10 +117,7 @@ async def crawl_pages(
 
     watcher = asyncio.create_task(watch_progress())
     try:
-        await asyncio.wait_for(proc.wait(), timeout=timeout_s)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+        await asyncio.to_thread(_run_subprocess)
     finally:
         stop.set()
         watcher.cancel()
