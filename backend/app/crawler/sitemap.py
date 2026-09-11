@@ -7,11 +7,6 @@ from ..config import MAX_SITEMAP_URLS
 from .http import fetch, same_host
 
 
-NS = {
-    "sm": "http://www.sitemaps.org/schemas/sitemap/0.9",
-}
-
-
 def _local(tag: str) -> str:
     return tag.split("}", 1)[-1].lower()
 

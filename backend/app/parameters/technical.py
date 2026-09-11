@@ -9,7 +9,7 @@ from ..crawler.http import fetch
 from ..crawler.robots import AI_BOTS, bot_decision
 from ..llm.client import judge
 from ..llm.prompts import SYSTEM, tech11_prompt
-from .common import flatten_schema, heading_blocks, ms_since, result, schema_types, timed
+from .common import band, flatten_schema, heading_blocks, ms_since, result, schema_types, timed
 
 
 async def tech_01(spec, ctx):
@@ -192,12 +192,15 @@ async def tech_09(spec, ctx):
         raw_words = len(re.findall(r"\w+", raw_text))
         rendered = page.word_count
         ratio = (raw_words / rendered * 100) if rendered else 0
-        rows.append({"url": page.result.final_url, "raw_words": raw_words, "rendered_words": rendered, "ratio": round(ratio, 1)})
+        # Capped per page, before averaging. Raw HTML routinely holds more words than the
+        # rendered text (hidden nav, inline JSON), so an uncapped page can exceed 100 and,
+        # in the mean, conceal a genuinely JS-only page scoring 20.
+        rows.append({"url": page.result.final_url, "raw_words": raw_words, "rendered_words": rendered, "ratio": round(ratio, 1), "score": min(100.0, ratio)})
     if not rows:
         return result(spec, score=None, unknown=True, evidence={}, recommendation="No HTML to compare.", checked=ctx.origin, error="no HTML", duration_ms=ms_since(t))
-    avg = sum(r["ratio"] for r in rows) / len(rows)
-    rec = "Ensure primary copy is present in raw HTML, not injected only after JavaScript." if avg < 70 else None
-    return result(spec, score=min(100, avg), evidence={"pages": rows, "average_ratio": round(avg, 1)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    avg = sum(r["score"] for r in rows) / len(rows)
+    rec = "Ensure primary copy is present in raw HTML, not injected only after JavaScript." if avg < 90 else None
+    return result(spec, score=avg, evidence={"pages": rows, "average_ratio": round(sum(r["ratio"] for r in rows) / len(rows), 1)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
 
 
 async def tech_10(spec, ctx):
@@ -286,6 +289,14 @@ async def tech_12(spec, ctx):
     return result(spec, score=score, evidence={"tables": tables, "lists": lists, "pages": len(ctx.pages)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
 
 
+# A text-to-code ratio is a percentage of bytes, not a score: a genuinely content-rich
+# page sits around 20-25% and essentially never approaches 100. Feeding the raw percentage
+# into a 0-100 score therefore capped even an excellent page at about a quarter of the
+# marks available for it, so the ratio is banded against what is actually achievable.
+_TEXT_TO_CODE_BANDS = ((25.0, 100.0), (15.0, 85.0), (10.0, 70.0), (5.0, 45.0))
+_TEXT_TO_CODE_FLOOR = 20.0
+
+
 async def tech_13(spec, ctx):
     t = timed()
     rows = []
@@ -293,8 +304,9 @@ async def tech_13(spec, ctx):
         html_len = max(1, len(page.result.text or ""))
         text_len = len(page.text)
         ratio = text_len / html_len * 100
+        ratio_score = band(ratio, _TEXT_TO_CODE_BANDS, _TEXT_TO_CODE_FLOOR)
         depth = 100 if page.word_count >= 400 else page.word_count / 400 * 100
-        rows.append({"url": page.result.final_url, "text_to_code": round(ratio, 2), "words": page.word_count, "combined": round(ratio * 0.4 + depth * 0.6, 1)})
+        rows.append({"url": page.result.final_url, "text_to_code": round(ratio, 2), "text_to_code_score": ratio_score, "words": page.word_count, "combined": round(ratio_score * 0.4 + depth * 0.6, 1)})
     avg = sum(r["combined"] for r in rows) / len(rows) if rows else 0
     rec = "Increase indexable copy relative to chrome/JS and deepen service-page content." if avg < 90 else None
     return result(spec, score=min(100, avg), evidence={"pages": rows[:12]}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
@@ -359,21 +371,26 @@ async def tech_16(spec, ctx):
     return result(spec, score=score, evidence={"organization": bool(org), "fields": present + extra, "types": schema_types(home.schema_blocks) if home else []}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
 
 
+# Schema.org types that genuinely satisfy each page type, including the subtypes a CMS
+# actually emits. Matching previously also accepted FAQPage for *any* expected type, so a
+# blog post carrying only FAQPage counted as correctly marked-up Article markup.
+_PAGE_TYPE_SCHEMA = {
+    "article": ("article", "blogposting", "newsarticle", "techarticle", "report"),
+    "service": ("service", "product", "offer", "professionalservice"),
+    "about": ("organization", "corporation", "localbusiness", "aboutpage"),
+    "home": ("organization", "corporation", "localbusiness", "website"),
+    "case_study": ("article", "casestudy", "creativework"),
+}
+
+
 async def tech_17(spec, ctx):
     t = timed()
     rows = []
     for page in ctx.pages:
         types = schema_types(page.schema_blocks)
-        expected = None
-        if page.page_type == "article":
-            expected = "Article"
-        elif page.page_type == "service":
-            expected = "Service"
-        elif page.page_type == "about":
-            expected = "Organization"
-        elif page.page_type == "home":
-            expected = "Organization"
-        hit = expected and any(expected.lower() in t.lower() or "faqpage" in t.lower() for t in types)
+        accepted = _PAGE_TYPE_SCHEMA.get(page.page_type)
+        expected = accepted[0].title() if accepted else None
+        hit = bool(accepted) and any(any(a in ty.lower() for a in accepted) for ty in types)
         if expected is None:
             rows.append({"url": page.result.final_url, "page_type": page.page_type, "types": types, "applicable": False})
         else:
@@ -413,7 +430,12 @@ async def tech_19(spec, ctx):
                 valid += 1
             else:
                 mismatches.append({"url": page.result.final_url, "error": block.get("error")})
-    score = (valid / total * 100) if total else 40
+    if not total:
+        # Nothing to validate is not 40% valid. Whether the site *should* have markup is
+        # already scored by TECH-16 and TECH-17; scoring a number here would penalise the
+        # same absence a third time. UNKNOWN is excluded from the pillar average instead.
+        return result(spec, score=None, unknown=True, evidence={"blocks": 0, "note": "No JSON-LD blocks were found on any crawled page, so there was no markup to validate. Markup presence is scored by TECH-16 and TECH-17."}, recommendation="Publish JSON-LD structured data (see TECH-16 and TECH-17), then re-run to validate it.", checked=ctx.origin, error="no structured data to validate", duration_ms=ms_since(t))
+    score = valid / total * 100
     rec = "Fix invalid JSON-LD blocks so markup parses and matches visible entity values." if score < 90 else None
     return result(spec, score=score, evidence={"blocks": total, "valid": valid, "errors": mismatches[:8]}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
 
@@ -449,7 +471,11 @@ async def tech_21(spec, ctx):
     for page in ctx.pages:
         tags.extend({"url": page.result.final_url, **h} for h in page.hreflang)
     if not tags:
-        return result(spec, score=100, evidence={"hreflang": [], "note": "No multi-market hreflang detected; treated as not applicable rather than fail."}, recommendation=None, checked=ctx.origin, duration_ms=ms_since(t))
+        # Not applicable must not score 100. A free full-marks row is averaged into the
+        # Technical pillar and lifts it for every single-market site, which is the opposite
+        # of "not applicable". UNKNOWN is the registry's own unknown_policy ("exclude"), so
+        # the check drops out of the denominator and hands its share to its siblings.
+        return result(spec, score=None, unknown=True, evidence={"hreflang": [], "note": "No hreflang annotations were found, and no multi-market targeting was detected. This check is not applicable to a single-market site and is excluded from the score rather than passed or failed."}, recommendation=None, checked=ctx.origin, error="not applicable: no multi-market targeting detected", duration_ms=ms_since(t))
     # if present, require valid lang codes
     valid = sum(1 for h in tags if h.get("lang") and h.get("href"))
     score = valid / len(tags) * 100

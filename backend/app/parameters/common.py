@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 import time
 from typing import Any, Optional
@@ -168,6 +169,109 @@ def heading_blocks(page) -> list[dict]:
 
 def word_count(text: str) -> int:
     return len(re.findall(r"[A-Za-z0-9']+", text or ""))
+
+
+# Function words carry no topical signal, so they must not be counted when measuring
+# keyword density. Without this filter the most frequent 3+ letter token on almost any
+# English page is "the" (typically 4-7% of such tokens), which sits above the stuffing
+# bands in onpage.py -- so every site scored the same floor regardless of its copy.
+STOPWORDS = frozenset("""
+and are was were for with that this these those from have has had not but you your our their its his her they them
+who whom which what when where why how all any both each few more most other some such only own same than too very
+can will just should now the she him let out off over under again further then once here there while about against
+between into through during before after above below down upon per via such also been being does did doing would
+could shall may might must because until unless whether within without across among along around behind beside
+beyond except inside outside since toward towards upon whereas whose yours ours theirs itself himself herself
+themselves ourselves yourself yourselves get got make made take taken give given come came go went know known see
+seen say said want need use used using like well back even still way much many lot new old good great best
+""".split())
+
+
+def content_words(text: str) -> list[str]:
+    """Lower-cased topical words in `text`: 3+ letters, function words removed.
+
+    Shared by every density measurement so "keyword density" means density of a term a
+    buyer could actually search for, not of English grammar.
+    """
+    return [w for w in re.findall(r"[a-z]{3,}", (text or "").lower()) if w not in STOPWORDS]
+
+
+def top_term_density(text: str, minimum_words: int = 40) -> tuple[float, list[tuple[str, int]]] | tuple[None, list]:
+    """(peak single-term density, the five most frequent terms) over content words only.
+
+    Returns (None, []) when the page has too little copy for a density to mean anything.
+    """
+    from collections import Counter
+
+    words = content_words(text)
+    if len(words) < minimum_words:
+        return None, []
+    counts = Counter(words)
+    top = counts.most_common(5)
+    return top[0][1] / len(words), top
+
+
+def band(value: float, thresholds: tuple[tuple[float, float], ...], floor: float) -> float:
+    """First score whose threshold `value` meets or exceeds, else `floor`.
+
+    `thresholds` is ordered best-first as ((minimum_value, score), ...). Used wherever a
+    raw measurement has no natural 0-100 scale (a text-to-code ratio never reaches 100%,
+    so using the raw percentage as a score would cap a perfect page at ~25).
+    """
+    for minimum, score in thresholds:
+        if value >= minimum:
+            return score
+    return floor
+
+
+_TOKEN_RE = re.compile(r"[a-z0-9]{4,}")
+
+
+def near_duplicate_pairs(documents: list[tuple[str, str]], threshold: float) -> list[dict]:
+    """Pairs of documents whose token sets overlap at or above `threshold` (Jaccard).
+
+    Returns exactly what comparing every pair would return, without doing so. The all-pairs
+    form this replaces was O(n^2): at the crawler's 2500-page ceiling that is ~3.1M set
+    intersections per parameter, which blew the 25s parameter timeout and turned both
+    duplicate checks UNKNOWN on precisely the large sites where duplication matters most.
+
+    Exactness comes from the standard Jaccard prefix filter. Order every document's tokens
+    by how rare they are site-wide. If J(a,b) >= t then |a & b| >= t*|a|, so at most
+    ceil(t*|a|) - 1 of a's tokens may fall outside any shared region -- meaning a and b
+    must share a token inside the first |a| - ceil(t*|a|) + 1 tokens of each. Only those
+    prefixes are indexed, so a pair that cannot reach the threshold is never scored, and
+    every pair that can is still checked in full. test_parameters.py asserts this against
+    brute force on random corpora.
+    """
+    tokens = [(url, set(_TOKEN_RE.findall((text or "").lower()))) for url, text in documents]
+    document_frequency: dict[str, int] = {}
+    for _, toks in tokens:
+        for tok in toks:
+            document_frequency[tok] = document_frequency.get(tok, 0) + 1
+
+    def prefix(toks: set[str]) -> list[str]:
+        ordered = sorted(toks, key=lambda tok: (document_frequency[tok], tok))
+        keep = len(ordered) - math.ceil(threshold * len(ordered)) + 1
+        return ordered[:max(1, keep)]
+
+    index: dict[str, list[int]] = {}
+    candidates: set[tuple[int, int]] = set()
+    for i, (_, toks) in enumerate(tokens):
+        if not toks:
+            continue
+        for tok in prefix(toks):
+            for j in index.setdefault(tok, []):
+                candidates.add((j, i))
+            index[tok].append(i)
+
+    pairs = []
+    for a, b in sorted(candidates):
+        url_a, toks_a = tokens[a]
+        url_b, toks_b = tokens[b]
+        similarity = len(toks_a & toks_b) / len(toks_a | toks_b)
+        if similarity >= threshold:
+            pairs.append({"a": url_a, "b": url_b, "similarity": round(similarity, 2)})
+    return pairs
 
 
 def primary_brand(ctx) -> str:

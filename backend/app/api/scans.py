@@ -5,7 +5,6 @@ import logging
 import uuid
 from collections import OrderedDict
 from datetime import datetime, timezone
-from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException
@@ -159,17 +158,12 @@ async def list_scans():
     return [_progress_payload(s) for s in repo.list_scans()]
 
 
-@router.get("/scans/{scan_id}")
-async def get_scan(scan_id: str):
+@router.get("/scans/{scan_id}/progress")
+async def get_progress(scan_id: str):
     scan = repo.get(scan_id)
     if not scan:
         raise HTTPException(404, "Scan not found")
     return _progress_payload(scan)
-
-
-@router.get("/scans/{scan_id}/progress")
-async def get_progress(scan_id: str):
-    return await get_scan(scan_id)
 
 
 @router.get("/scans/{scan_id}/report")
@@ -183,13 +177,6 @@ async def get_report(scan_id: str):
     if not report:
         raise HTTPException(409, "Report not persisted yet")
     return report
-
-
-@router.get("/scans/{scan_id}/parameters")
-async def get_parameters(scan_id: str):
-    if not repo.get(scan_id):
-        raise HTTPException(404, "Scan not found")
-    return repo.parameters(scan_id)
 
 
 @router.get("/scans/{scan_id}/parameters/{parameter_id}")
@@ -243,7 +230,9 @@ async def rerun_unscored(scan_id: str):
     scan = repo.get(scan_id)
     report = build_report(scan, all_results, issues)
     repo.save_report(scan_id, report)
-    excel_path = await asyncio.to_thread(save_excel_output, scan_id, report, registry)
+    # Update this scan's one workbook in place -- a rerun re-scores the same scan, it
+    # doesn't start a new one, so it must not leave a fresh file behind each time it's clicked.
+    excel_path = await asyncio.to_thread(save_excel_output, scan_id, report, registry, existing_path=scan.get("excel_output_path"))
     repo.update(scan_id, excel_output_path=str(excel_path), status="completed")
 
     return {
@@ -261,32 +250,3 @@ async def download_report(scan_id: str):
     pdf = build_pdf(report)
     filename = f"AI-Visibility-Audit-{report.get('domain','report')}.pdf"
     return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
-
-
-@router.get("/scans/{scan_id}/export.xlsx")
-async def download_excel(scan_id: str):
-    scan = repo.get(scan_id)
-    if not scan:
-        raise HTTPException(404, "Scan not found")
-    report = repo.report(scan_id)
-    path_str = scan.get("excel_output_path")
-    if not path_str or not Path(path_str).exists():
-        if not report:
-            raise HTTPException(409, "Report not ready")
-        saved = await asyncio.to_thread(save_excel_output, scan_id, report, registry)
-        repo.update(scan_id, excel_output_path=str(saved))
-        path_str = str(saved)
-    path = Path(path_str)
-    return Response(content=path.read_bytes(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="{path.name}"'})
-
-
-@router.get("/scans/{scan_id}/crawl-output")
-async def download_crawl_output(scan_id: str):
-    scan = repo.get(scan_id)
-    if not scan:
-        raise HTTPException(404, "Scan not found")
-    path_str = scan.get("crawl_output_path")
-    if not path_str or not Path(path_str).exists():
-        raise HTTPException(404, "Scraped output not found for this scan")
-    path = Path(path_str)
-    return Response(content=path.read_bytes(), media_type="application/json", headers={"Content-Disposition": f'attachment; filename="{path.name}"'})

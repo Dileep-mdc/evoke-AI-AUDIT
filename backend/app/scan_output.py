@@ -295,7 +295,10 @@ def _write_pillar_sheet(wb: Workbook, sheet_name: str, rows: list[dict], reg_by_
             p.get("weight"),
             output,
             reg.get("check_logic") or "",
-            FORMULAS.get(p.get("parameter_id"), reg.get("scoring") or ""),
+            # formulas.json covers all 62 parameters and test_frozen_spec.py enforces that,
+            # so the registry "scoring" one-liner this used to fall back to was dead and has
+            # been removed rather than left as a second, quietly diverging source of truth.
+            FORMULAS.get(p.get("parameter_id"), ""),
             p.get("checked_url_or_source") or "",
             _friendly_timestamp(p.get("evaluated_at")),
         ]
@@ -468,9 +471,22 @@ def build_excel(report: dict, registry: list[dict]) -> bytes:
     return buf.getvalue()
 
 
-def save_excel_output(scan_id: str, report: dict, registry: list[dict]) -> Path:
+def save_excel_output(scan_id: str, report: dict, registry: list[dict], *, existing_path: str | Path | None = None) -> Path:
+    """Write this scan's metrics workbook.
+
+    A brand-new scan gets a fresh timestamped file (so re-auditing the same URL later
+    leaves distinct history, per the module docstring). But re-scoring the *same* scan --
+    the "Re-check Unscored" retry -- must update that one file in place rather than leave
+    a trail of near-identical workbooks behind for a single scan; pass that scan's already-
+    recorded `excel_output_path` as `existing_path` to overwrite it instead of minting a new
+    timestamped name.
+    """
     data = build_excel(report, registry)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    path = _unique_path(OUTPUT_DIR / f"{_slug(report.get('domain'))}-metrics-{_file_stamp()}.xlsx")
+    if existing_path:
+        path = Path(existing_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        path = _unique_path(OUTPUT_DIR / f"{_slug(report.get('domain'))}-metrics-{_file_stamp()}.xlsx")
     path.write_bytes(data)
     return path

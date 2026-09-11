@@ -368,7 +368,7 @@ function Scanning() {
       <h1 style={{ fontSize: 28 }}>{p?.domain || "Evaluating website"}</h1>
       <p style={{ color: "var(--muted)" }}>
         {p?.status === "crawling"
-          ? "Fetching live pages and sitemaps. This usually takes under a minute."
+          ? "Fetching live pages and sitemaps. This usually takes a few minutes."
           : "Scores stay hidden until every runnable check finishes."}
       </p>
       {pipes.map(([name, done, total]) => (

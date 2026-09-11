@@ -1,0 +1,627 @@
+{
+  "freeze_version": "1.0.0",
+  "frozen_at": "2026-09-11T04:03:57.815330+00:00",
+  "note": "Frozen parameter logic. Each entry describes what backend/app/parameters/*.py actually does. tools/build_parameter_workbook.py re-validates every llm flag against the handler source, so this file cannot silently drift from the code.",
+  "parameters": {
+    "TECH-01": {
+      "name": "AI crawler permissions",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Fetch /robots.txt once per scan and parse it with Protego. For each of the five AI crawlers (GPTBot, ChatGPT-User, ClaudeBot, Google-Extended, PerplexityBot) evaluate the Allow/Disallow rules for path \"/\", falling back to the wildcard group when no bot-specific group exists.\nScore = allowed bots / bots with a definite ALLOWED-or-BLOCKED decision x 100.\nUNKNOWN if robots.txt cannot be fetched, or if it is non-empty but fails to parse.",
+      "llm_rationale": "robots.txt is a formal grammar with one correct interpretation, and Protego implements it. A language model would add latency, cost and run-to-run variation to a question that already has an exact, verifiable answer."
+    },
+    "TECH-02": {
+      "name": "No CDN/firewall blocking AI crawlers",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Fetch the homepage once with a normal browser user-agent to establish a baseline response size, then fetch it again once per AI-crawler user-agent. A bot counts as blocked if it receives HTTP 403, 406 or 429, or if its response body is under 20% of the baseline size (content starvation) while the baseline itself exceeded 500 bytes.\nScore = (5 - blocked bots) / 5 x 100.   Confidence 0.6.",
+      "llm_rationale": "The evidence is HTTP status codes and response byte counts, both measured directly. Confidence is held at 0.6 because a site legitimately serving different content per user-agent is indistinguishable from a block by size alone - a data limitation, not a judgment an LLM could resolve."
+    },
+    "TECH-03": {
+      "name": "llms.txt present, accurate and current",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Fetch /llms.txt. Missing or empty gives 0. Otherwise: 40 base, +20 if the file holds more than 40 characters of content, +20 x the share of up to 3 sampled markdown links that resolve to a working URL (or a flat +10 if the file contains no links at all), +20 if a date appears anywhere in it.\nScore capped at 100.",
+      "llm_rationale": "File presence, HTTP resolution of the links it lists, and a date pattern are all deterministic checks against a fetched file."
+    },
+    "TECH-04": {
+      "name": "No login, pop-up or cookie wall covering main content",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Scan the rendered homepage HTML for overlay markers (cookie, consent, gdpr, onetrust, cookiebot, trustarc, cookieyes, modal, overlay, paywall) and for a login form or password input.\nScore = 100 if neither is present; 70 if markers are present but at least 150 rendered words still survive; 20 otherwise. Capped at 20 when a login form is present and the page yields under 80 words.\nConfidence 0.55.",
+      "llm_rationale": "Decided from DOM markers plus the rendered word count. The low confidence reflects that a marker in the HTML does not prove an overlay actually covers content; proving that needs visual or viewport analysis, not a language model."
+    },
+    "TECH-05": {
+      "name": "Sitemap complete, accurate and submitted",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Read the XML sitemap(s) discovered from robots.txt and the well-known locations. Fetch the first 15 sitemap URLs to test whether they resolve, and compare the set of crawled pages against the set of sitemap URLs.\nValidity = resolving sampled URLs / sampled URLs x 100.\nCoverage = crawled pages that appear in the sitemap / crawled pages x 100.\nScore = 25 + Validity x 0.45 + Coverage x 0.30, capped at 100.\nScore 0 if no sitemap URLs were found at all.",
+      "llm_rationale": "XML parsing, HTTP resolution and set comparison are exact operations."
+    },
+    "TECH-06": {
+      "name": "No broken links, redirect chains or error pages",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Take a deterministic sample of 15 internal links from the crawl and fetch each one. A link is broken if the fetch fails or returns a non-2xx status; it is a redirect chain if it takes 3 or more hops.\nScore = (sampled - broken) / sampled x 100 - min(20, chains x 5), floored at 0.\nConfidence 0.7.",
+      "llm_rationale": "HTTP status codes and redirect hop counts are facts recorded by the fetcher."
+    },
+    "TECH-07": {
+      "name": "Page speed and Core Web Vitals (LCP, INP, CLS)",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Measure server response time and transferred HTML size across up to 12 successfully crawled pages, then band each mean:\n   Latency:  <=800ms -> 100,  <=1800ms -> 70,  <=3000ms -> 40,  else 20\n   Weight:   <=300KB -> 100,  <=800KB  -> 70,  <=1.5MB  -> 40,  else 20\nScore = Latency x 0.6 + Weight x 0.4.   Confidence 0.4.",
+      "llm_rationale": "Timing and byte size are measured directly. The confidence is deliberately low: this is a proxy, not Core Web Vitals. Real LCP, INP and CLS require a rendering or field-data source (Lighthouse or CrUX). That is a missing integration, not something a language model could supply."
+    },
+    "TECH-08": {
+      "name": "Mobile responsiveness and secure HTTPS delivery",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Score = 50 if the homepage final URL is https, + 50 if a viewport meta tag containing \"width\" is present.\nCapped at 80 if the HTML contains both \"min-width:\" and \"1200px\", a weak signal of a fixed-width layout that may overflow on mobile.",
+      "llm_rationale": "URL scheme and meta-tag presence are read directly from the response and the DOM."
+    },
+    "TECH-09": {
+      "name": "Main content present in page source, not JS-only",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "For each of the first 10 pages, strip <script> and <style> from the RAW (pre-JavaScript) HTML, strip the remaining tags, and count the words left. Compare that with the rendered word count.\nPer-page ratio = raw words / rendered words x 100, capped at 100 per page.\nScore = mean of the per-page capped ratios.",
+      "llm_rationale": "A word count on two versions of the same document. The per-page cap matters: raw HTML routinely carries more words than the rendered text (hidden navigation, inline JSON), so an uncapped page can exceed 100 and conceal a genuinely JavaScript-only page inside the average."
+    },
+    "TECH-10": {
+      "name": "One H1 per page and logical H2/H3 hierarchy",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Per page, start at 100. Subtract 40 if there is no H1, or 25 if there is more than one. Subtract min(30, skips x 10), where a skip is a jump of more than one heading level between consecutive headings. Floor each page at 0.\nScore = mean of per-page scores.\nScore 0 outright if no headings were found on any page.",
+      "llm_rationale": "Counting H1 tags and comparing consecutive heading levels is exact."
+    },
+    "TECH-11": {
+      "name": "Heading frequency that lets an assistant lift a clean passage",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": true,
+      "metric": "Heuristic baseline per page: start at 100, -30 if mean words per heading exceeds 220, -20 if heading density is under 1.5 per 1000 words, or a flat 30 if the page has no H1-H3 at all.\nLLM pass (authoritative when available): up to 40 real (heading, word count of the text under that heading up to the next heading) pairs go to the model, which returns how many of those sections an assistant could lift whole.\nScore = liftable sections / sections assessed x 100.",
+      "llm_rationale": "YES. Whether a section can be lifted as a clean, self-contained passage is a judgment about whether its heading actually scopes its content. Word counts alone cannot distinguish a focused 200-word section from a rambling one of the same length.\nThe heuristic stays as the fallback when the model is unavailable, so a scan never fails for lack of an API key."
+    },
+    "TECH-12": {
+      "name": "Tables and lists as real markup rather than images",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Count <table> elements and <ul>/<ol> elements across every crawled page.\nScore = 100 if tables + lists >= 8; 70 if >= 3; else 40.",
+      "llm_rationale": "Element counting is exact.\nKnown limitation: this confirms semantic markup exists but does not detect the failure mode in the parameter name - a comparison table published as an image. Catching that needs image analysis (a vision model or OCR), which is not wired into this build."
+    },
+    "TECH-13": {
+      "name": "Text-to-code ratio and content depth per page",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Per page:\n   Text-to-code = visible text characters / total HTML characters x 100, then banded, because a byte ratio is not a score (a content-rich page sits near 20-25% and never approaches 100):\n      >=25% -> 100,  >=15% -> 85,  >=10% -> 70,  >=5% -> 45,  else 20\n   Depth = min(100, words / 400 x 100)\n   Per-page score = banded text-to-code x 0.4 + Depth x 0.6\nScore = mean across pages.",
+      "llm_rationale": "Character ratios and word counts are measured directly from the fetched HTML."
+    },
+    "TECH-14": {
+      "name": "Image alt text and video transcripts",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Collect every <img> across the crawl. Alt text counts as usable if it is non-empty, longer than 3 characters, and not one of the placeholder values image/img/logo. Count <video>/<iframe> elements and pages whose text mentions a transcript.\nImage score = usable alt / images x 100.\nVideo score = 100 if there are no videos, else transcript signals / videos x 100 (capped 100).\nScore = Image x 0.7 + Video x 0.3.   Flat 80 if the site has no images at all.",
+      "llm_rationale": "Attribute presence and a placeholder blocklist are deterministic.\nKnown limitation: this measures whether alt text exists and is non-trivial, not whether it actually describes the image. Judging descriptiveness would need a vision model - a deliberate scope boundary, not an oversight."
+    },
+    "TECH-15": {
+      "name": "Published and updated dates visible and in code",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "A page counts as dated if it exposes a published or modified date through article:published_time, article:modified_time or a <time> element, or through datePublished/dateModified in its JSON-LD.\nScore = 60 + (dated pages / pages) x 40.\nThe 60 floor is deliberate: dates matter most on articles, so their absence on home and service pages is treated as partial rather than a total failure.",
+      "llm_rationale": "Metadata and JSON-LD field presence are read directly."
+    },
+    "TECH-16": {
+      "name": "Organization markup — logo, address, contact, profiles",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Find an Organization node in the homepage JSON-LD. Expected fields are name, url, logo and sameAs; address/location and contactPoint/email/telephone count as a bonus group.\nScore = (expected fields present / 4) x 80 + 20 if any address or contact field is present.\nScore 0 if no Organization node exists.",
+      "llm_rationale": "Checking for named fields in parsed JSON-LD is exact."
+    },
+    "TECH-17": {
+      "name": "Page-type markup — Article, FAQ, Service, Product, Person, HowTo",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Map each page detected type to the schema.org types that genuinely satisfy it:\n   article     -> Article, BlogPosting, NewsArticle, TechArticle, Report\n   service     -> Service, Product, Offer, ProfessionalService\n   about       -> Organization, Corporation, LocalBusiness, AboutPage\n   home        -> Organization, Corporation, LocalBusiness, WebSite\n   case_study  -> Article, CaseStudy, CreativeWork\nPages of other types are not applicable and are excluded.\nScore = matched pages / applicable pages x 100, or 50 if no page is applicable.",
+      "llm_rationale": "Matching type strings against an explicit allowlist is deterministic. The allowlist is the point: it replaces a rule that accepted FAQPage as satisfying any expected type, which let a blog post carrying only FAQPage count as correctly marked-up Article content."
+    },
+    "TECH-18": {
+      "name": "Author profiles marked up with real credentials",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Collect author signals across the crawl: Person nodes or author fields in JSON-LD, plus visible [rel=author], .author or .byline elements.\nScore = 25 if no signal is found; 80 if any signal is found; 95 if any author node carries a jobTitle.\nConfidence 0.65.",
+      "llm_rationale": "Schema nodes and CSS selectors are read directly.\nKnown limitation: this confirms an author is named and titled, not that the credentials are real. Verifying that needs external identity sources, not a language model."
+    },
+    "TECH-19": {
+      "name": "Markup validates cleanly and matches visible content",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Count every JSON-LD block found across the crawl and how many parsed successfully.\nScore = valid blocks / total blocks x 100.\nUNKNOWN when the site has no JSON-LD at all: nothing to validate is not the same as 40% valid, and whether markup should exist is already scored by TECH-16 and TECH-17.",
+      "llm_rationale": "JSON parse success is binary and exact.\nKnown limitation: the \"matches visible content\" half of this parameter name is not currently evaluated - only syntactic validity is."
+    },
+    "TECH-20": {
+      "name": "One clean URL per page; duplicates resolved",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Per page, flag a problem when: no canonical link is present; or an absolute canonical points to a path that differs from the page own final path (excluding the homepage); or the page took 3 or more redirect hops.\nScore = pages with no problem / pages x 100.",
+      "llm_rationale": "URL comparison and redirect hop counts are exact."
+    },
+    "TECH-21": {
+      "name": "hreflang set correctly for every target country",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Collect every <link rel=alternate hreflang> across the crawl.\nUNKNOWN when none is found: a single-market site is not applicable to this check, so it is excluded from the pillar average rather than passed or failed.\nWhen tags are present, a tag is valid if it carries both a lang and an href.\nScore = valid tags / tags x 100.",
+      "llm_rationale": "Attribute presence is exact.\nKnown limitation: reciprocity between pages and the validity of each locale code are not verified."
+    },
+    "TECH-22": {
+      "name": "Page titles and meta descriptions present and unique",
+      "section": "technical",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Across every crawled page, measure four things:\n   Presence               = pages with both a title and a meta description / pages\n   Title uniqueness       = distinct non-empty titles / non-empty titles\n   Description uniqueness = distinct non-empty descriptions / non-empty descriptions\n   Length quality         = pages with a 20-70 char title AND a 70-170 char description / pages\nScore = Presence x 50 + Title uniqueness x 15 + Description uniqueness x 10 + Length quality x 25.",
+      "llm_rationale": "String lengths and set uniqueness are exact measurements."
+    },
+    "ON-01": {
+      "name": "Headings phrased as buyer questions",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Eligible headings are H1-H3 on service, home and case-study pages that have at least 3 words and are not a bare navigation label (home, about, services, blog, pricing ...). A heading counts as a question if it opens with how/what/why/when/where/which/who/can/should/is/are/do/does/will or ends with a question mark.\nQuestion share = question headings / eligible headings, then banded:\n   >=33% -> 100,  >=20% -> 85,  >=10% -> 65,  >=3% -> 45,  else 25\nScore 30 if the site has no eligible headings at all.   Confidence 0.75.",
+      "llm_rationale": "A regex decides interrogative form, which is exact and reproducible. Banding replaces a raw share, which required about 90% of every heading to be a question for full marks - no well-written page does that, so the check could only ever return FAIL.\nKnown limitation: the regex detects question FORM, not whether it is a question a BUYER would ask. Tightening that to intent is the clearest candidate for a future model pass."
+    },
+    "ON-02": {
+      "name": "Self-contained 40–60 word answer under each question",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "For every question-phrased H1-H3, take the text between it and the next heading as the answer.\n   Base    = 70 if the answer runs to 20 words or more, else 30\n   Bonus   = +30 if the answer is 40-60 words (the target window), or +15 if it is 25-90 words\n   Per-answer score capped at 100\nScore = mean across all answers.\nScore 25, with a diagnostic naming the reason, when the site has no question headings to score.",
+      "llm_rationale": "NO - and this is a known gap, recorded here rather than papered over. Word-count windows are deterministic, but the parameter asks whether the answer is SELF-CONTAINED, which is a comprehension judgment a word count cannot make: a 50-word answer that begins \"As mentioned above...\" scores full marks today.\nThe registry previously claimed this parameter was AI-assisted; no prompt was ever written for it. The registry has been corrected to match the code, and this is the highest-value place to add a model pass next."
+    },
+    "ON-03": {
+      "name": "Clear definition sentences for every core concept",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": true,
+      "metric": "Derive the core concepts from the site own navigation and service-page titles (never a fixed keyword list - every audited site is a different business).\nHeuristic baseline: for each concept, look at a 200-character window around its first mention and test for a definition pattern (concept + is/are/means/refers to/helps).\nLLM pass (authoritative when available): the model receives each (concept, surrounding window) pair and decides whether the text gives a clear, complete definition rather than a passing mention.\nScore = concepts defined / concepts assessed x 100.   Score 30 if no concept could be derived.",
+      "llm_rationale": "YES. Whether a passage truly DEFINES a concept or merely mentions it is reading comprehension. The regex recognises exactly one sentence shape and misses every definition written another way, while also passing text that happens to contain \"is\" near the term."
+    },
+    "ON-04": {
+      "name": "Conclusion first, supporting detail after",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": true,
+      "metric": "Take the opening (first two substantial sentences, up to 400 characters) of up to 12 pages.\nHeuristic baseline: 85 if the opening names a site-specific term and avoids filler openings (\"welcome to\", \"in today's\", \"we are a leading\"), 55 if it names a term but also opens with filler, 35 otherwise.\nLLM pass (authoritative when available): the model judges per opening whether it leads with a specific, concrete statement rather than boilerplate.\nScore = openings leading with substance / openings assessed x 100.",
+      "llm_rationale": "YES. \"Leads with the conclusion\" is a statement about meaning, not vocabulary. A page can open with a brand term and still say nothing, or open with none of the keywords and be perfectly direct."
+    },
+    "ON-05": {
+      "name": "FAQ section on every service and solution page",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Identify service and solution pages (page type service or home, or a URL containing service/solution). A page satisfies the check if it has a heading matching FAQ / frequently asked, or carries FAQPage schema.\nScore = qualifying pages / service pages x 100.\nUNKNOWN when the site has no service or solution pages, since there is nothing the check applies to.",
+      "llm_rationale": "Heading regex and schema type presence are exact.\nThe UNKNOWN path replaces a fallback that graded EVERY crawled page when no service page was found, which demanded an FAQ section on contact and careers pages too."
+    },
+    "ON-06": {
+      "name": "FAQ schema validity and answer consistency",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Consider only pages that have FAQ schema or a visible FAQ mention.\nPer page: 50 if valid FAQPage JSON-LD is present + 50 if a visible FAQ is present.\nScore = mean across those pages.   Score 20 if neither appears anywhere on the site.",
+      "llm_rationale": "Schema presence and a text match are deterministic.\nKnown limitation: the \"answer consistency\" half of the parameter - whether the schema answers match the visible Q&A - is not verified. That comparison is semantic and would need a model."
+    },
+    "ON-07": {
+      "name": "Comparison and specification tables where buyers evaluate",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": true,
+      "metric": "Heuristic baseline: a page shows evaluation intent if its title, opening text or URL contains vs / compar / alternative / pricing / feature / capability, or it is a service page.\nLLM pass (authoritative when available): a page-type-spread sample of 24 pages goes to the model, which decides which are pages where a buyer is actively evaluating or comparing options. The numerator stays the measured fact - does that page carry a real HTML <table>.\nScore = evaluation pages with a table / evaluation pages x 100.   Score 40 if none qualify.",
+      "llm_rationale": "YES. Which pages are evaluation pages is a judgment about purpose: a pricing page qualifies without containing \"vs\", and a blog post titled \"X vs Y\" often does not. The keyword list both over- and under-selects, and it sets the DENOMINATOR, so getting it wrong skews the whole score."
+    },
+    "ON-08": {
+      "name": "Lists and numbered steps that support answer extraction",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": true,
+      "metric": "Collect content lists - <ul>/<ol> with 2 or more items that are not inside <nav>, <header> or <footer>, so repeated menus are excluded.\nHeuristic baseline: a list is useful if it has 3 or more items and mentions step/how/benefit/includ/deliver/process.\nLLM pass (authoritative when available): up to 30 lists go to the model, which judges whether each is genuinely useful for answering a question rather than decorative filler.\nScore = useful lists / lists assessed x 100.   Score 35 if no content lists exist.",
+      "llm_rationale": "YES. Usefulness of a list is a reading judgment. The keyword test only recognises a list that happens to contain one of six words, so it misses a genuine specification or evaluation-criteria list written without them."
+    },
+    "ON-09": {
+      "name": "Natural, conversational phrasing rather than keyword strings",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": true,
+      "metric": "Lexical half: for each page with at least 40 content words, compute the density of its single most frequent CONTENT word (function words removed). Average across pages and band:\n   <3.5% -> 100,  <6% -> 75,  else 45\nLLM half: excerpts from up to 8 pages go to the model, which returns a naturalness rating 0-100.\nScore = lexical x 0.4 + naturalness x 0.6 when the model is available, else the lexical band alone.   UNKNOWN if no page has enough copy.",
+      "llm_rationale": "YES. Fluency is inherently a language judgment. Density can show that a term repeats, but not whether the prose reads naturally - stiff, machine-written copy can have perfectly ordinary term frequencies."
+    },
+    "ON-10": {
+      "name": "Keyword stuffing / unnatural repetition",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "The same measurement as the lexical half of ON-09: peak single CONTENT-word density per page (function words removed), averaged across pages, banded:\n   <3.5% -> 100,  <6% -> 75,  else 45\nUNKNOWN if no page has at least 40 content words.",
+      "llm_rationale": "NO, deliberately. Keyword stuffing is a measurable statistical property, so this half of the pair is kept fully deterministic and reproducible: it cannot drift with model behaviour, and ON-09 and ON-10 do not both move on the same model call.\nThe stopword filter is what makes it work at all. Counting function words made \"the\" the peak term on essentially every English page at 4-7%, which sat above the worst band - so every site scored the same floor and the check reported nothing."
+    },
+    "ON-11": {
+      "name": "Content depth and completeness",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": true,
+      "metric": "The rubric is 8 points a complete service page should cover: problem/need, approach or methodology, what is included, outcomes or benefits, who it is for, pricing or commercial model, proof, and a clear next step.\nHeuristic baseline: keyword presence per rubric point.\nLLM pass (authoritative when available): excerpts from a page-type-spread sample of 12 pages go to the model, which counts how many rubric points each page ACTUALLY covers. The denominator is unchanged - the same pages, out of the same 8 points.\nScore = mean(points covered / 8) x 100.",
+      "llm_rationale": "YES. Whether a page really covers \"outcomes\" or \"proof\" is comprehension, not keyword presence. A case study that describes a measured result covers \"outcomes\" without using the word; a page with a \"Benefits\" heading and no substance does not."
+    },
+    "ON-12": {
+      "name": "Original, citable data point on major pages",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Major pages are home, service, case-study and about pages (not every blog post).\nA statistic is a percentage, an N+ figure, a currency amount, a multiplier (3x), a thousands-separated number, or a scaled figure (2.5 million). Bare four-digit years are explicitly excluded.\nScore = major pages carrying at least one statistic / major pages x 100.",
+      "llm_rationale": "Pattern detection is exact, and the pattern is the fix: the previous rule matched any 2+ digit number, so a copyright year, street number or phone fragment satisfied \"has an original statistic\".\nKnown limitation: this cannot tell an ORIGINAL statistic from one quoted off a third party. That distinction needs a model, or a source check."
+    },
+    "ON-13": {
+      "name": "Named author with role, credentials and real profile",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Collect visible [rel=author], .author or .byline elements and Person nodes in JSON-LD across the crawl.\nScore = 80 if any author signal exists anywhere, else 30.",
+      "llm_rationale": "Selector and schema presence are exact.\nKnown limitation: this is a site-level yes/no. It does not check per-page coverage, nor that the named person has real credentials or a reachable profile, which is what the parameter actually asks for."
+    },
+    "ON-14": {
+      "name": "Named clients, quantified outcomes, deployment detail",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Per page: 25 if the copy mentions a client/customer/partner, + 30 if it contains a quantified figure, + 25 if it describes deployment (deploy/implementation/production/rolled out), + 20 bonus when both a client mention and a figure are present.\nScore = mean across pages.   Confidence 0.65.",
+      "llm_rationale": "Regex signals are deterministic.\nKnown limitation: this cannot distinguish a NAMED client from the generic word \"client\", which is precisely what the parameter asks for. A model reading the passage would do this materially better and is the natural next upgrade."
+    },
+    "ON-15": {
+      "name": "Claims sourced and dated to a primary source",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "A claim is a sentence of more than 6 words containing a statistic (same pattern as ON-12, years excluded). A claim counts as sourced if the sentence contains link anchor text from that page, or the words source / according to / report.\nScore = sourced claims / claims x 100.   Score 35 if no claims were found.   Confidence 0.55.",
+      "llm_rationale": "Regex and anchor-text matching are deterministic.\nKnown limitation: this detects that SOMETHING source-like sits near the claim. It does not verify the source is primary, is dated, or actually supports the claim - all of which the parameter name asks for and none of which a regex can establish."
+    },
+    "ON-16": {
+      "name": "Reviewer or technical approver named where it matters",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Applicable pages are article and service pages. A page qualifies if its copy matches reviewed by / technically reviewed / approver / medically reviewed / fact-checked.\nScore = applicable pages with a reviewer / applicable pages x 100.\nUNKNOWN when the site has no article or service pages.",
+      "llm_rationale": "Regex presence over an explicitly defined page set is exact.\nNumerator and denominator are now the same set of pages. Previously reviewer signals were counted site-wide but divided by article/service pages only, so a byline elsewhere could push the ratio past 100% - visible only because the result was clamped on the way out."
+    },
+    "ON-17": {
+      "name": "Last substantive update within topic shelf life",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Score = 50 + (pages exposing a published or modified date / pages) x 50.\nConfidence 0.6.",
+      "llm_rationale": "Date metadata presence is exact.\nKnown limitation: the parameter asks for updates WITHIN TOPIC SHELF LIFE, and no age comparison is made at all - a page dated 2009 scores exactly like one dated last week. Closing that needs date arithmetic plus a per-topic shelf-life judgment, not just presence."
+    },
+    "ON-18": {
+      "name": "Buying-journey coverage across discovery to decision",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": true,
+      "metric": "The six buyer-journey stages are awareness, qualification, comparison, objection, trust and decision.\nHeuristic baseline: keyword matching over each page title, opening text and URL.\nLLM pass (authoritative when available): the titles and URLs of a page-type-spread sample of 60 pages go to the model, which decides which of the six stages the site has content for.\nScore = stages covered / 6 x 100.",
+      "llm_rationale": "YES. What stage a page serves is a judgment about purpose. A pricing page aids comparison whether or not it contains the word \"vs\"; a security page handles objections without using the word \"objection\"."
+    },
+    "ON-19": {
+      "name": "Best X for Y and X vs Y pages per industry/market",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Match each page URL and title against best ... for / vs / versus / alternative.\nScore = 80 if 3 or more such pages exist; 45 if at least one; else 15.   Confidence 0.7.",
+      "llm_rationale": "URL and title pattern matching is exact.\nKnown limitation: this counts whether such pages EXIST, not whether they cover the industries and markets that matter to this business."
+    },
+    "ON-20": {
+      "name": "No two pages competing for the same question (cannibalization)",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Compare page titles as token sets (4+ character tokens) using Jaccard similarity. Two pages compete when similarity >= 0.7 and the titles are not identical strings.\nComparison uses an exact prefix filter, not all pairs, so the result is identical to comparing every pair but runs in seconds at the 2500-page crawl ceiling.\nClean share = 1 - (pages involved in a competing pair / pages compared), then banded:\n   100% -> 100,  >=95% -> 90,  >=85% -> 75,  >=70% -> 60,  else 40\nUNKNOWN if no page has a title.   Confidence 0.6.",
+      "llm_rationale": "NO. Set similarity is exact, reproducible and cheap. Sending thousands of title pairs to a model would be slow, costly and non-deterministic for a measurement that has a precise mathematical definition.\nBanding by share rather than a flat penalty per pair is the fix: 12 points per pair meant nine overlapping titles bottomed out the check whether the site had 20 pages or 2000."
+    },
+    "ON-21": {
+      "name": "No thin or near-duplicate pages diluting the topic",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Thin pages are non-utility pages under 180 words. Near-duplicates are pages whose first 400 characters overlap at Jaccard >= 0.72, found with the same exact prefix filter as ON-20.\nClean share = 1 - (pages that are thin or duplicated / pages assessed), then banded:\n   >=95% -> 100,  >=85% -> 85,  >=70% -> 70,  >=50% -> 55,  else 40\nUNKNOWN if there are no content pages.",
+      "llm_rationale": "NO. Word counts and set similarity are exact.\nScoring by share is the fix: the old absolute penalty (8 points per thin page, 10 per duplicate pair) hit its cap at eight thin pages, so a 2000-page site with eight thin pages scored identically to a 10-page site that was almost entirely thin."
+    },
+    "ON-22": {
+      "name": "Brand named alongside category, industry and geography",
+      "section": "on_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Derive the site own category terms from its navigation and service-page titles, and its geographies from its structured data and address text, plus a generic reach list (global, worldwide, United States, Europe ...).\nA page qualifies when its copy contains a brand term AND a category term AND a geography term.\nScore = qualifying pages / pages x 100.   Confidence 0.7.",
+      "llm_rationale": "Term presence checked against vocabularies derived from the site itself is deterministic, and deriving them per scan keeps the check valid for any business rather than hard-coding one company terms.\nKnown limitation: co-occurrence anywhere on the page is weaker than the parameter intent, which is the brand named TOGETHER WITH its category and geography in the same statement."
+    },
+    "OFF-01": {
+      "name": "Wikidata entry present and accurate",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Query the Wikidata wbsearchentities API with the company name. Pick the hit whose label or description contains the brand term or an organisation word (company, business, corporation, firm ...); otherwise fall back to the first hit.\nScore = 0 if there are no hits at all; else 70 base, +20 if the brand appears in the entity label, +10 if the entity has a description. Capped at 100.\nUNKNOWN if the Wikidata API is unreachable.",
+      "llm_rationale": "NO. The response is structured JSON with explicit label and description fields, so matching is a direct field comparison.\nThe registry previously declared this AI-assisted; no model call was ever wired. The registry now matches the code. Entity disambiguation here is simpler than in OFF-02 because Wikidata returns an explicit entity type."
+    },
+    "OFF-02": {
+      "name": "Wikipedia or comparable reference source",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": true,
+      "metric": "Query the Wikipedia search API with the company name.\nHeuristic baseline: 80 if a result title contains the company first word, else 20.\nLLM pass (authoritative when available): the model decides whether any result is genuinely a reference page about THIS specific company rather than a different company or a disambiguation page, and rates entity accuracy and source authority 0-100.\nScore = 50 + source authority x 0.3 + entity accuracy x 0.2 when the page is about the company; 20 when it is not. Capped at 100.\nUNKNOWN if the Wikipedia API is unreachable.",
+      "llm_rationale": "YES. Telling a page genuinely about this company from a same-named company, a disambiguation page or an unrelated topic is exactly what substring matching gets wrong, and it flips the score between 80 and 20."
+    },
+    "OFF-03": {
+      "name": "Google Knowledge Panel presence and consistency",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Google Knowledge Panel UI cannot be scraped reliably, so a confidently brand-matched Wikidata entity is used as the proxy signal.\nUNKNOWN when no Wikidata entity confidently matches the brand, or the API is unreachable.\nOtherwise Score = 50 + 30 if the entity has a description + 20 if the brand appears in its label. Capped at 100.   Confidence 0.4.",
+      "llm_rationale": "NO. The check reads a structured API. The real limitation is the DATA SOURCE - the live Knowledge Panel is not accessible - and a language model cannot observe a page it has no access to. Asking one whether a panel exists would produce a confident guess, not a measurement."
+    },
+    "OFF-04": {
+      "name": "Company profiles complete and consistent across LinkedIn/Crunchbase/Bloomberg/ZoomInfo",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Run a DuckDuckGo HTML search for the exact company name restricted to linkedin.com, crunchbase.com, bloomberg.com and zoominfo.com, then match the hostnames behind the result redirect links.\nScore = platforms with at least one result / 4 x 100.   Confidence 0.4.\nUNKNOWN when DuckDuckGo returns anything other than a clean HTTP 200 (a 202 shell page is a bot-detection challenge, not zero results).",
+      "llm_rationale": "NO. Hostname matching on result URLs is exact.\nThe parameter asks for profile COMPLETENESS, which needs a licensed company-data API. A model cannot substitute for data the system does not have - it would infer field completeness it never saw. The check is therefore scored and labelled as a presence signal only."
+    },
+    "OFF-05": {
+      "name": "Company name, address and details identical across sources",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Compare the site own name, domain and derived office locations against the top Wikidata hit.\nScore = 70 if the brand term appears in the Wikidata entity label, else 40.   Confidence 0.5.",
+      "llm_rationale": "NO. The blocker is missing directory records to compare against, not the comparison itself. With only one external record available, name/address/detail consistency ACROSS SOURCES - what the parameter actually asks for - cannot be established by any means, model included."
+    },
+    "OFF-06": {
+      "name": "Certifications verifiable off-site (CMMI, ISO, partner tiers)",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "Scan the site copy for certification claims: certified/accredited, compliance, licensed, an ISO standard number, or a partner tier (certified/authorized/premier/gold/platinum/elite partner).\nScore = 40 if no claim is found; 55 if claims are found, reflecting claimed-but-unverified.\nConfidence 0.4.",
+      "llm_rationale": "NO, and deliberately so. The parameter asks whether certifications are VERIFIABLE OFF-SITE. Issuer registries are not queried, and asking a language model to confirm a certification is the textbook way to manufacture a false positive - it would produce a plausible answer with no underlying record. The honest result is a capped score that states the claim is unverified."
+    },
+    "OFF-07": {
+      "name": "G2, Clutch, Gartner Peer Insights and TrustRadius completeness",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "DuckDuckGo HTML search for the exact company name restricted to g2.com, clutch.co, gartner.com and trustradius.com; match hostnames behind the result links.\nScore = platforms found / 4 x 100.   Confidence 0.4.\nUNKNOWN when DuckDuckGo does not return a clean 200.",
+      "llm_rationale": "NO. Hostname matching is exact. Profile completeness within each platform needs that platform API; presence is what is actually observable here, and the score says so."
+    },
+    "OFF-08": {
+      "name": "Review volume, recency and velocity versus competitors",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "DuckDuckGo HTML search for company reviews across the same four review platforms; count matching result URLs.\nScore = min(60, 15 + hits x 15) - capped at 60 because recency, velocity and a competitor benchmark cannot be measured from a search-result count.   Confidence 0.3.",
+      "llm_rationale": "NO. What is missing is licensed review data (counts, dates, trend, competitor set). A model cannot invent it.\nNote the consequence: this parameter cannot exceed 60, so it can never return PASS. That is an accurate statement about measurement coverage, and it does structurally limit the Off-Page pillar until a review API is connected."
+    },
+    "OFF-09": {
+      "name": "Category placement matching how the company positions itself",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": true,
+      "metric": "DuckDuckGo HTML search across the four review platforms; extract result titles and snippets. Derive the site own business categories from its navigation and service pages.\nHeuristic baseline: 65 if any derived category string appears literally in the snippets, else 35.\nLLM pass (authoritative when available): the model decides whether the third-party snippets place the company in the same or a clearly equivalent category.\nScore = 85 if it matches, 30 if it does not.   Score 30 if no snippets are returned.",
+      "llm_rationale": "YES. Category equivalence is semantic. \"Custom software development\" and \"bespoke software engineering services\" are the same category and share almost no literal tokens, so substring matching reports a mismatch that is not real."
+    },
+    "OFF-10": {
+      "name": "Reddit, Stack Overflow, Quora and industry forums presence",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "DuckDuckGo HTML search for the exact company name restricted to reddit.com, stackoverflow.com and quora.com; count matching result URLs.\nScore = 15 if no hits; 40 if 1-2; 65 if 3 or more.   Confidence 0.35.",
+      "llm_rationale": "NO. This counts results, which is exact.\nKnown limitation: whether each mention is substantive or spam is not judged. A model could assess the mentions it can see, but the search endpoint returns only titles and snippets, so the input needed for that judgment is not available."
+    },
+    "OFF-11": {
+      "name": "YouTube presence and authority footprint",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "DuckDuckGo HTML search for the exact company name restricted to youtube.com; count result URLs.\nScore = 15 if none; 45 if 1-2; 65 if 3 or more.   Confidence 0.35.",
+      "llm_rationale": "NO. Counting results is exact.\nKnown limitation: transcript and caption availability - part of the parameter intent - is not verified, which would need the YouTube API."
+    },
+    "OFF-12": {
+      "name": "Podcast, webinar and conference footprint indexed/transcribed",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "DuckDuckGo HTML search for the company name together with podcast, webinar or conference; count the approximate number of results.\nScore = 60 if 3 or more; 30 if at least one; else 15.   Confidence 0.35.",
+      "llm_rationale": "NO. Result counting is exact.\nThe registry previously declared this AI-assisted; no model call exists and the registry now matches the code. Whether appearances are indexed and transcribed would need the source platforms, not a model."
+    },
+    "OFF-13": {
+      "name": "Quality and topical relevance of sites linking to the company",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "DuckDuckGo HTML search for the domain excluding the site own host; count distinct external pages that mention it.\nScore = min(55, 10 + external pages x 9) - capped at 55 because link authority, topical relevance and follow/nofollow status require a backlink index.   Confidence 0.25.",
+      "llm_rationale": "NO. The parameter asks about QUALITY and RELEVANCE of linking sites, which requires a backlink index (Ahrefs, Moz, Majestic). A model has no access to link graphs and would be guessing.\nNote the consequence: capped at 55, this parameter can never return PASS until a backlink provider is connected."
+    },
+    "OFF-14": {
+      "name": "Unlinked brand mentions and earned news by market",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "DuckDuckGo HTML search for the exact company name excluding the site own domain; count distinct external mentioning pages.\nScore = 15 if none; 40 if 1-3; 65 if 4 or more.   Confidence 0.3.",
+      "llm_rationale": "NO. Counting off-domain mentions is exact.\nKnown limitation: whether each mention OMITS a link back - the \"unlinked\" half of the parameter - is not individually verified, which would require fetching and parsing each mentioning page."
+    },
+    "OFF-15": {
+      "name": "Third-party sites actually cited by AI assistants for target topics",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": true,
+      "metric": "Derive the site primary topic from its own navigation and service pages. Ask the model which real, specific websites an AI assistant would most likely reference when answering a buyer question about that topic, and whether this site would plausibly be among them.\nScore = 85 if the site is included; 30 if sources are named without it; 15 if none are named.\nUNKNOWN when LLM scoring is disabled or the call fails.   Confidence 0.4.",
+      "llm_rationale": "YES, necessarily. The parameter is literally \"which third-party sites do AI assistants cite for these topics\", and the only way to approximate that is to ask an assistant. There is no deterministic data source for it.\nStated limitation: this is a single-model approximation using this tool own LLM, not a multi-assistant citation audit, which is why confidence is held at 0.4."
+    },
+    "OFF-16": {
+      "name": "Presence on best/top/leading service lists",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "DuckDuckGo HTML search for best {primary topic} together with the company name; test whether the brand term appears in the returned SERP HTML.\nScore = 50 if mentioned, else 20.   Confidence 0.35.",
+      "llm_rationale": "NO. A substring test over returned HTML is exact.\nKnown limitation: this detects that the brand appears somewhere in the results, not that it is listed ON an authoritative best/top list. Confirming the latter means fetching and reading each candidate page - a data-collection gap first, and only then a judgment a model could help with."
+    },
+    "OFF-17": {
+      "name": "Presence on alternatives-to-competitor pages",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": false,
+      "metric": "DuckDuckGo HTML search for the company name together with alternatives / alternative to; count result URLs whose address contains \"alternative\".\nScore = 90 if 2 or more; 60 if at least one; else 20.   Confidence 0.35.",
+      "llm_rationale": "NO. URL pattern matching is exact.\nKnown limitation: no competitor list is configured, so this measures inclusion on alternatives-style pages generally rather than against named competitors."
+    },
+    "OFF-18": {
+      "name": "Analyst, directory and trade-press coverage + description accuracy",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": true,
+      "metric": "DuckDuckGo HTML search for the company name together with gartner / forrester / idc / analyst report / industry report; extract result titles and snippets.\nHeuristic baseline: 55 when any snippets are returned, 20 when none are.\nLLM pass (authoritative when available): the model judges whether the snippets describe THIS company accurately, rather than confusing it with another or repeating outdated facts.\nScore = 80 if accurate, 40 if not.   Confidence 0.55 with the model, 0.35 without.",
+      "llm_rationale": "YES. Detecting a snippet that describes a different company with a similar name, or repeats a stale fact, requires reading and understanding the text. Counting results can only establish that coverage exists, not that it is correct - and \"description accuracy\" is half the parameter."
+    }
+  }
+}

@@ -1,29 +1,33 @@
 from __future__ import annotations
 
 import re
-from collections import Counter, defaultdict
+from collections import defaultdict
 
 from ..llm.client import judge
 from ..llm.prompts import (
-    JOURNEY_RUBRIC,
     SERVICE_PAGE_RUBRIC,
     SYSTEM,
     on03_prompt,
     on04_prompt,
+    on07_prompt,
+    on08_prompt,
     on09_prompt,
     on11_prompt,
     on18_prompt,
 )
 from .common import (
+    band,
     derive_site_categories,
     derive_site_geographies,
     flatten_schema,
     heading_blocks,
     is_question,
     ms_since,
+    near_duplicate_pairs,
     primary_brand,
     result,
     timed,
+    top_term_density,
     word_count,
 )
 
@@ -31,8 +35,13 @@ from .common import (
 _FILLER_OPENINGS = ("welcome to", "in today's", "in today’s", "we are a leading", "leveraging cutting")
 
 # Peak single-term density bands, shared by ON-09 (naturalness) and ON-10 (stuffing) so the
-# same rule cannot drift between them.
-_DENSITY_BANDS = ((0.025, 100), (0.04, 75))
+# same rule cannot drift between them. Measured over content words only (see
+# common.content_words): when function words were included, the most frequent token on
+# essentially every English page was "the" at 4-7%, which sits above the worst band -- so
+# every site on every scan scored the floor and the check told us nothing about stuffing.
+# Read best-first as (ceiling, points): a peak term under 3.5% of content words is normal
+# prose, 3.5-6% is repetitive, above that is stuffing.
+_DENSITY_BANDS = ((0.035, 100), (0.06, 75))
 _DENSITY_FLOOR = 45
 
 # How many pages to put in front of the model for whole-site judgments. Spread across page
@@ -110,11 +119,13 @@ def _question_blocks(ctx):
                 continue
             wc = word_count(block["answer"])
             direct = wc >= 20
-            window = 40 <= wc <= 80
+            # The target window is the registry's own 40-60 words, not 40-80. The wider
+            # band it used handed full marks to answers the parameter defines as too long.
+            window = 40 <= wc <= 60
             quality = 70 if direct else 30
             if window:
                 quality += 30
-            elif 20 <= wc <= 120:
+            elif 25 <= wc <= 90:
                 quality += 15
             answers.append({
                 "url": url,
@@ -127,6 +138,14 @@ def _question_blocks(ctx):
 
 
 _NAV_LABEL_RE = re.compile(r"^(home|about|about us|contact|contact us|services?|solutions?|products?|blog|careers?|pricing)$", re.I)
+
+# What share of a page's real headings should be phrased as buyer questions. Scoring the
+# raw share meant full marks required ~90% of every H1-H3 to be a question, which no
+# well-written page does (section labels, product names and the H1 itself are not
+# questions), so the check could only ever return FAIL. A third of headings framed as
+# questions is the realistic target these bands score against.
+_QUESTION_HEADING_BANDS = ((0.33, 100.0), (0.20, 85.0), (0.10, 65.0), (0.03, 45.0))
+_QUESTION_HEADING_FLOOR = 25.0
 
 
 async def on_01(spec, ctx):
@@ -143,9 +162,10 @@ async def on_01(spec, ctx):
     if not rows:
         return result(spec, score=30, evidence={"note": "No eligible H1-H3 headings found on service/solution pages."}, recommendation="Phrase key H2s on service pages as the questions buyers actually ask.", checked=ctx.origin, duration_ms=ms_since(t))
     hits = sum(1 for r in rows if r["question"])
-    score = hits / len(rows) * 100
+    share = hits / len(rows)
+    score = band(share, _QUESTION_HEADING_BANDS, _QUESTION_HEADING_FLOOR)
     rec = "Phrase more H2/H3 headings as buyer questions (How/What/Why/Which…) rather than generic labels." if score < 90 else None
-    return result(spec, score=score, evidence={"headings": rows[:16], "question_headings": hits, "eligible_headings": len(rows)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.75)
+    return result(spec, score=score, evidence={"headings": rows[:16], "question_headings": hits, "eligible_headings": len(rows), "question_share": round(share, 3)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.75)
 
 
 async def on_02(spec, ctx):
@@ -252,8 +272,13 @@ async def on_04(spec, ctx):
 async def on_05(spec, ctx):
     t = timed()
     services = [p for p in ctx.pages if p.page_type in {"service", "home"} or re.search(r"service|solution", p.result.final_url, re.I)]
+    if not services:
+        # The parameter is "FAQ on every service and solution page". With no such page to
+        # inspect there is nothing to score; grading every crawled page instead (the old
+        # `or ctx.pages` fallback) demanded an FAQ on contact and careers pages too.
+        return result(spec, score=None, unknown=True, evidence={"note": "No service or solution pages were identified on this site, so there were no pages this check applies to."}, recommendation="If the site offers services, give each service page a visible FAQ section and FAQPage schema.", checked=ctx.origin, error="no service or solution pages found", duration_ms=ms_since(t))
     rows = []
-    for page in services or ctx.pages:
+    for page in services:
         has_h = any(re.search(r"\bfaqs?\b|frequently asked", h["text"], re.I) for h in page.headings)
         has_schema = any("FAQPage" in str(i.get("@type")) for i in flatten_schema(page.schema_blocks))
         rows.append({"url": page.result.final_url, "faq_heading": has_h, "faq_schema": has_schema})
@@ -281,24 +306,50 @@ async def on_06(spec, ctx):
 
 async def on_07(spec, ctx):
     t = timed()
+    tables_by_url = {}
     eligible = []
     for page in ctx.pages:
         blob = f"{page.title} {page.text[:500]} {page.result.final_url}".lower()
         intent = any(k in blob for k in ("vs", "compar", "alternative", "pricing", "feature", "capability"))
         tables = len(page.soup.find_all("table")) if page.soup else 0
+        tables_by_url[page.result.final_url] = tables
         if intent or page.page_type == "service":
             eligible.append({"url": page.result.final_url, "intent": intent, "tables": tables})
     if not eligible:
         return result(spec, score=40, evidence={}, recommendation="Add comparison/specification tables on evaluation pages.", checked=ctx.origin, duration_ms=ms_since(t))
     score = sum(1 for e in eligible if e["tables"] > 0) / len(eligible) * 100
+    confidence = 0.65
+    evidence = {"pages": eligible[:12], "method": "heuristic"}
+
+    # Whether a page is one where a buyer is actually evaluating options is a judgment
+    # about purpose, not vocabulary: a pricing page qualifies without containing "vs", and
+    # a blog post titled "X vs Y" may not. The model picks the denominator; the numerator
+    # stays the same measured fact -- does that page carry a real HTML table.
+    candidates = [{"url": p.result.final_url, "title": p.title or "", "excerpt": (p.text or "")[:600]}
+                  for p in _spread_by_page_type(ctx.pages, 24) if p.text]
+    if candidates:
+        llm_res = await judge(on07_prompt(candidates), system=SYSTEM)
+        verdicts = (llm_res.parsed or {}).get("results") if llm_res.ok else None
+        if isinstance(verdicts, list) and verdicts:
+            judged = [v for v in verdicts if v.get("evaluation_intent") and v.get("url") in tables_by_url]
+            if judged:
+                score = sum(1 for v in judged if tables_by_url[v["url"]] > 0) / len(judged) * 100
+                confidence = 0.8
+                evidence["method"] = "llm"
+                evidence["llm"] = {"evaluation_pages": len(judged), "assessed": len(verdicts),
+                                   "with_tables": sum(1 for v in judged if tables_by_url[v["url"]] > 0)}
+        elif not llm_res.ok:
+            evidence["llm_unavailable"] = llm_res.error
+
     rec = "Add real HTML comparison tables where buyers evaluate capabilities or alternatives." if score < 90 else None
-    return result(spec, score=score, evidence={"pages": eligible[:12]}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.65)
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
 async def on_08(spec, ctx):
     t = timed()
     useful = total = 0
     samples = []
+    candidates: list[dict] = []
     for page in ctx.pages:
         if not page.soup:
             continue
@@ -314,9 +365,30 @@ async def on_08(spec, ctx):
             useful += int(good)
             if len(samples) < 8:
                 samples.append({"url": page.result.final_url, "items": items[:6], "useful": good})
-    score = useful / total * 100 if total else 35
+            if len(candidates) < 30:
+                candidates.append({"url": page.result.final_url, "items": items[:10]})
+    if not total:
+        return result(spec, score=35, evidence={"lists": 0, "note": "No content lists were found outside navigation."}, recommendation="Use lists for procedures, benefits and evaluation criteria.", checked=ctx.origin, duration_ms=ms_since(t))
+    score = useful / total * 100
+    confidence = 0.7
+    evidence = {"lists": total, "useful": useful, "samples": samples, "method": "heuristic"}
+
+    # Whether a list actually helps answer a question is a reading judgment. The keyword
+    # test above only recognises a list that happens to contain "step" or "benefit", so it
+    # misses a genuine specification or criteria list that uses none of those words.
+    if candidates:
+        llm_res = await judge(on08_prompt(candidates), system=SYSTEM)
+        verdicts = (llm_res.parsed or {}).get("results") if llm_res.ok else None
+        if isinstance(verdicts, list) and verdicts:
+            score = sum(1 for v in verdicts if v.get("useful")) / len(verdicts) * 100
+            confidence = 0.8
+            evidence["method"] = "llm"
+            evidence["llm"] = {"useful": sum(1 for v in verdicts if v.get("useful")), "assessed": len(verdicts)}
+        elif not llm_res.ok:
+            evidence["llm_unavailable"] = llm_res.error
+
     rec = "Use lists for procedures, benefits and evaluation criteria — not decorative nav repeats." if score < 90 else None
-    return result(spec, score=score, evidence={"lists": total, "useful": useful, "samples": samples}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
 async def on_09(spec, ctx):
@@ -324,12 +396,10 @@ async def on_09(spec, ctx):
     rows = []
     samples = []
     for page in ctx.pages:
-        words = re.findall(r"[A-Za-z]{3,}", (page.text or "").lower())
-        if len(words) < 40:
+        dens, top = top_term_density(page.text)
+        if dens is None:
             continue
-        counts = Counter(words)
-        dens = counts.most_common(1)[0][1] / len(words)
-        rows.append({"url": page.result.final_url, "max_density": round(dens, 4)})
+        rows.append({"url": page.result.final_url, "max_density": round(dens, 4), "top_terms": top})
         if len(samples) < 8 and page.text:
             samples.append({"url": page.result.final_url, "excerpt": page.text[:400]})
     if not rows:
@@ -359,13 +429,13 @@ async def on_10(spec, ctx):
     t = timed()
     rows = []
     for page in ctx.pages:
-        words = re.findall(r"[A-Za-z]{3,}", (page.text or "").lower())
-        if len(words) < 40:
+        dens, top = top_term_density(page.text)
+        if dens is None:
             continue
-        counts = Counter(words)
-        dens = counts.most_common(1)[0][1] / len(words)
-        rows.append({"url": page.result.final_url, "top": counts.most_common(5), "max_density": round(dens, 4)})
-    avg_d = sum(r["max_density"] for r in rows) / len(rows) if rows else 0
+        rows.append({"url": page.result.final_url, "top": top, "max_density": round(dens, 4)})
+    if not rows:
+        return result(spec, score=None, unknown=True, evidence={}, recommendation="No page copy available to evaluate.", checked=ctx.origin, error="no page text", duration_ms=ms_since(t))
+    avg_d = sum(r["max_density"] for r in rows) / len(rows)
     score = density_score(avg_d)
     rec = "Reduce repeated phrases that look like keyword stuffing." if score < 90 else None
     return result(spec, score=score, evidence={"pages": rows[:10], "average_max_density": round(avg_d, 4)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
@@ -405,6 +475,27 @@ async def on_11(spec, ctx):
     return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
+# What counts as a citable data point: a percentage, a "500+", a currency figure, a
+# multiplier, or a number large enough to be written with thousands separators. The plain
+# `\d{2,}` this replaces matched every year, street number, phone fragment and list index
+# on the page, so a copyright footer alone satisfied "has an original statistic".
+_STAT_RE = re.compile(
+    r"\d+(?:\.\d+)?\s?%"
+    r"|\b\d{1,3}(?:,\d{3})+\+?\b"
+    r"|\b\d+(?:\.\d+)?\s?(?:x|×)\b"
+    r"|[$£€]\s?\d[\d,.]*\s?(?:k|m|bn|b|million|billion|crore|lakh)?\b"
+    r"|\b\d{2,}\+"
+    r"|\b\d+(?:\.\d+)?\s?(?:million|billion|trillion|crore|lakh)\b",
+    re.I,
+)
+# A bare four-digit year is a date, not a statistic, even when it survives the patterns above.
+_YEAR_ONLY_RE = re.compile(r"^(?:19|20)\d{2}$")
+
+
+def _statistics(text: str) -> list[str]:
+    return [m.group(0).strip() for m in _STAT_RE.finditer(text or "") if not _YEAR_ONLY_RE.match(m.group(0).strip())]
+
+
 async def on_12(spec, ctx):
     t = timed()
     rows = []
@@ -413,7 +504,7 @@ async def on_12(spec, ctx):
     # every crawled page and made the denominator the whole site.
     major_types = {"home", "service", "case_study", "about"}
     for page in ctx.pages:
-        nums = re.findall(r"\b\d{2,}(?:\.\d+)?%?\b|\b\d+\+\b", page.text or "")
+        nums = _statistics(page.text)
         rows.append({
             "url": page.result.final_url,
             "stats": nums[:8],
@@ -463,7 +554,7 @@ async def on_15(spec, ctx):
     samples = []
     for page in ctx.pages:
         for sent in re.split(r"(?<=[.!?])\s+", page.text or ""):
-            if re.search(r"\b\d{2,}\b", sent) and len(sent.split()) > 6:
+            if _statistics(sent) and len(sent.split()) > 6:
                 claims += 1
                 hrefs = [l for l in page.links if l["text"] and l["text"].lower()[:40] in sent.lower()]
                 if hrefs or re.search(r"source|according to|report", sent, re.I):
@@ -477,16 +568,22 @@ async def on_15(spec, ctx):
     return result(spec, score=score, evidence={"claims": claims, "sourced": sourced, "samples": samples}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.55)
 
 
+_REVIEWER_RE = re.compile(r"reviewed by|technically reviewed|approver|medically reviewed|medical review|fact[- ]checked", re.I)
+
+
 async def on_16(spec, ctx):
     t = timed()
-    hits = []
-    for page in ctx.pages:
-        if re.search(r"reviewed by|technically reviewed|approver|medical review", page.text or "", re.I):
-            hits.append(page.result.final_url)
+    # Numerator and denominator must be the same set of pages. Previously the numerator
+    # counted reviewer signals anywhere on the site while the denominator counted only
+    # article/service pages, so reviewer bylines on other pages inflated the ratio past
+    # 100% -- visible only because the result was clamped on the way out.
     need = [p for p in ctx.pages if p.page_type in {"article", "service"}]
-    score = (len(hits) / max(1, len(need))) * 100 if need else (60 if hits else 25)
+    if not need:
+        return result(spec, score=None, unknown=True, evidence={"note": "No article or service pages were found, so there were no pages making the kind of expertise claim this check applies to."}, recommendation="Name a reviewer or technical approver on pages that make expertise claims.", checked=ctx.origin, error="no pages this check applies to", duration_ms=ms_since(t))
+    hits = [p.result.final_url for p in need if _REVIEWER_RE.search(p.text or "")]
+    score = len(hits) / len(need) * 100
     rec = "Name a reviewer or technical approver on pages that make expertise claims." if score < 90 else None
-    return result(spec, score=min(100, score), evidence={"reviewer_pages": hits, "evaluated": len(need)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    return result(spec, score=score, evidence={"reviewer_pages": hits[:12], "pages_with_reviewer": len(hits), "evaluated": len(need)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
 
 
 async def on_17(spec, ctx):
@@ -553,39 +650,47 @@ async def on_19(spec, ctx):
 async def on_20(spec, ctx):
     t = timed()
     titles = [(p.result.final_url, (p.title or "").lower().strip()) for p in ctx.pages if p.title]
-    pairs = []
-    for i, (u1, t1) in enumerate(titles):
-        w1 = set(re.findall(r"[a-z0-9]{4,}", t1))
-        for u2, t2 in titles[i + 1:]:
-            w2 = set(re.findall(r"[a-z0-9]{4,}", t2))
-            if not w1 or not w2:
-                continue
-            sim = len(w1 & w2) / len(w1 | w2)
-            if sim >= 0.7 and t1 != t2:
-                pairs.append({"a": u1, "b": u2, "similarity": round(sim, 2), "titles": [t1, t2]})
-    score = 100 if not pairs else max(40, 100 - len(pairs) * 12)
+    if not titles:
+        return result(spec, score=None, unknown=True, evidence={}, recommendation="No page titles were available to compare.", checked=ctx.origin, error="no page titles", duration_ms=ms_since(t))
+    by_url = dict(titles)
+    pairs = [p for p in near_duplicate_pairs(titles, 0.7) if by_url.get(p["a"]) != by_url.get(p["b"])]
+    for p in pairs:
+        p["titles"] = [by_url.get(p["a"], ""), by_url.get(p["b"], "")]
+    # Scored as a share of the site, not as a raw count. A fixed 12 points per pair meant
+    # nine overlapping titles bottomed out the check whether the site had 20 pages or 2000.
+    cannibalized = len({u for p in pairs for u in (p["a"], p["b"])})
+    share = cannibalized / len(titles)
+    score = band(1 - share, _CANNIBALIZATION_BANDS, _CANNIBALIZATION_FLOOR)
     rec = "Consolidate pages that compete for the same buyer question." if pairs else None
-    return result(spec, score=score, evidence={"overlapping_pairs": pairs[:10]}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.6)
+    return result(spec, score=score, evidence={"overlapping_pairs": pairs[:10], "pairs_found": len(pairs), "pages_affected": cannibalized, "pages_compared": len(titles)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.6)
 
 
 async def on_21(spec, ctx):
     t = timed()
-    thin = []
-    for page in ctx.pages:
-        if page.page_type != "utility" and page.word_count < 180:
-            thin.append({"url": page.result.final_url, "words": page.word_count})
-    titles = [(p.result.final_url, p.text[:400]) for p in ctx.pages if p.text]
-    dups = []
-    for i, (u1, a) in enumerate(titles):
-        wa = set(a.lower().split())
-        for u2, b in titles[i + 1:]:
-            wb = set(b.lower().split())
-            if len(wa & wb) / max(1, len(wa | wb)) > 0.72:
-                dups.append([u1, u2])
-    score = 100 - min(60, len(thin) * 8 + len(dups) * 10)
+    scorable = [p for p in ctx.pages if p.page_type != "utility"]
+    if not scorable:
+        return result(spec, score=None, unknown=True, evidence={}, recommendation="No content pages were available to assess.", checked=ctx.origin, error="no content pages", duration_ms=ms_since(t))
+    thin = [{"url": p.result.final_url, "words": p.word_count} for p in scorable if p.word_count < 180]
+    excerpts = [(p.result.final_url, p.text[:400]) for p in scorable if p.text]
+    dups = near_duplicate_pairs(excerpts, 0.72)
+    duplicated = {u for d in dups for u in (d["a"], d["b"])}
+    # Proportional, like ON-20: the old absolute penalty (8 points per thin page, 10 per
+    # duplicate pair) hit its 60-point cap at eight thin pages, so a 2000-page site with
+    # eight thin pages scored identically to a 10-page site that was almost entirely thin.
+    affected = len({t["url"] for t in thin} | duplicated)
+    share = affected / len(scorable)
+    score = band(1 - share, _DILUTION_BANDS, _DILUTION_FLOOR)
     rec = "Merge or expand thin/near-duplicate pages so topics are not diluted." if score < 90 else None
-    return result(spec, score=score, evidence={"thin": thin[:12], "near_duplicates": dups[:8]}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    return result(spec, score=score, evidence={"thin": thin[:12], "thin_count": len(thin), "near_duplicates": dups[:8], "duplicate_pairs": len(dups), "pages_affected": affected, "pages_assessed": len(scorable)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
 
+
+# Both duplicate checks score the share of the site that is *clean*, read best-first as
+# (minimum clean share, points), so the penalty scales with the site instead of with a
+# raw count of findings.
+_CANNIBALIZATION_BANDS = ((1.0, 100.0), (0.95, 90.0), (0.85, 75.0), (0.70, 60.0))
+_CANNIBALIZATION_FLOOR = 40.0
+_DILUTION_BANDS = ((0.95, 100.0), (0.85, 85.0), (0.70, 70.0), (0.50, 55.0))
+_DILUTION_FLOOR = 40.0
 
 _GENERIC_REACH_TERMS = ("united states", "usa", "uk", "europe", "asia", "north america", "global", "worldwide", "nationwide")
 

@@ -11,6 +11,27 @@ from ..llm.prompts import SYSTEM, off02_prompt, off09_prompt, off18_prompt
 from .common import derive_site_categories, derive_site_geographies, ms_since, primary_brand, result, timed
 
 
+# Every off-page search goes through one endpoint. It was written out in full at twelve
+# separate call sites, so changing provider (or adding a key/proxy) meant twelve edits and
+# any one of them could be missed.
+DDG_HTML_ENDPOINT = "https://html.duckduckgo.com/html/"
+
+# Public read-only APIs used for entity lookups. Same reason: named once, not inline.
+WIKIDATA_API = "https://www.wikidata.org/w/api.php"
+WIKIPEDIA_API = "https://en.wikipedia.org/w/api.php"
+
+
+def _ddg_url(query: str) -> str:
+    """A DuckDuckGo HTML search URL for an already URL-encoded query string."""
+    return f"{DDG_HTML_ENDPOINT}?q={query}"
+
+
+def _wikidata_search_url(query: str, limit: int = 5, typed: bool = True) -> str:
+    """Wikidata entity search for an already URL-encoded company name."""
+    kind = "&type=item" if typed else ""
+    return f"{WIKIDATA_API}?action=wbsearchentities&search={query}&language=en&format=json{kind}&limit={limit}"
+
+
 async def _ddg_html(url: str):
     """Fetch DuckDuckGo's HTML search endpoint.
 
@@ -86,7 +107,7 @@ def _extract_snippets(html: str, limit: int = 8) -> list[dict]:
 async def off_01(spec, ctx):
     t = timed()
     q = quote_plus(ctx.company_name)
-    data, meta = await _json(f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={q}&language=en&format=json&type=item&limit=5")
+    data, meta = await _json(_wikidata_search_url(q))
     if data is None:
         return result(spec, score=None, unknown=True, evidence={"provider": "Wikidata", **meta}, recommendation="Connect Wikidata and retry.", checked=meta["url"], error=meta.get("error") or "Wikidata unavailable", duration_ms=ms_since(t))
     hits = data.get("search") or []
@@ -113,7 +134,7 @@ async def off_01(spec, ctx):
 async def off_02(spec, ctx):
     t = timed()
     q = quote_plus(ctx.company_name)
-    data, meta = await _json(f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={q}&utf8=1&format=json")
+    data, meta = await _json(f"{WIKIPEDIA_API}?action=query&list=search&srsearch={q}&utf8=1&format=json")
     if data is None:
         return result(spec, score=None, unknown=True, evidence={"provider": "Wikipedia", **meta}, recommendation="Retry Wikipedia search.", checked=meta["url"], error=meta.get("error") or "Wikipedia unavailable", duration_ms=ms_since(t))
     hits = ((data.get("query") or {}).get("search") or [])
@@ -149,7 +170,7 @@ async def off_02(spec, ctx):
 async def off_03(spec, ctx):
     t = timed()
     q = quote_plus(ctx.company_name)
-    data, meta = await _json(f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={q}&language=en&format=json&type=item&limit=5")
+    data, meta = await _json(_wikidata_search_url(q))
     if data is None:
         return result(spec, score=None, unknown=True, evidence={"provider": "Wikidata (Knowledge Panel proxy)", **meta}, recommendation="Retry once the Wikidata proxy signal is reachable.", checked=meta["url"], error=meta.get("error") or "Wikidata unavailable", duration_ms=ms_since(t))
     hits = data.get("search") or []
@@ -171,7 +192,7 @@ async def off_04(spec, ctx):
     t = timed()
     domains = ("linkedin.com", "crunchbase.com", "bloomberg.com", "zoominfo.com")
     q = quote_plus(f'"{ctx.company_name}"') + "+" + quote_plus("(" + " OR ".join(f"site:{d}" for d in domains) + ")")
-    url = f"https://html.duckduckgo.com/html/?q={q}"
+    url = _ddg_url(q)
     res, err = await _ddg_html(url)
     if res is None:
         return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a licensed company-data API (LinkedIn/Crunchbase/Bloomberg/ZoomInfo).", checked=url, error=err, duration_ms=ms_since(t))
@@ -191,7 +212,7 @@ async def off_05(spec, ctx):
         "locations": derive_site_geographies(ctx),
     }
     q = quote_plus(ctx.company_name)
-    data, meta = await _json(f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={q}&language=en&format=json&limit=1")
+    data, meta = await _json(_wikidata_search_url(q, limit=1, typed=False))
     if data is None:
         return result(spec, score=None, unknown=True, evidence={"canonical": site_bits, **meta}, recommendation="Need external directory records to compare NAP.", checked="nap-consistency", error="External NAP sources unavailable", duration_ms=ms_since(t))
     hits = data.get("search") or []
@@ -226,7 +247,7 @@ _REVIEW_DOMAINS = ("g2.com", "clutch.co", "gartner.com", "trustradius.com")
 async def off_07(spec, ctx):
     t = timed()
     q = quote_plus(f'"{ctx.company_name}"') + "+" + quote_plus("(" + " OR ".join(f"site:{d}" for d in _REVIEW_DOMAINS) + ")")
-    url = f"https://html.duckduckgo.com/html/?q={q}"
+    url = _ddg_url(q)
     res, err = await _ddg_html(url)
     if res is None:
         return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a review-platform API (G2/Clutch/Gartner Peer Insights/TrustRadius).", checked=url, error=err, duration_ms=ms_since(t))
@@ -241,7 +262,7 @@ async def off_07(spec, ctx):
 async def off_08(spec, ctx):
     t = timed()
     q = quote_plus(f'"{ctx.company_name}" reviews') + "+" + quote_plus("(" + " OR ".join(f"site:{d}" for d in _REVIEW_DOMAINS) + ")")
-    url = f"https://html.duckduckgo.com/html/?q={q}"
+    url = _ddg_url(q)
     res, err = await _ddg_html(url)
     if res is None:
         return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a review-platform API for volume/recency/velocity data.", checked=url, error=err, duration_ms=ms_since(t))
@@ -256,7 +277,7 @@ async def off_08(spec, ctx):
 async def off_09(spec, ctx):
     t = timed()
     q = quote_plus(f'"{ctx.company_name}"') + "+" + quote_plus("(" + " OR ".join(f"site:{d}" for d in _REVIEW_DOMAINS) + ")")
-    url = f"https://html.duckduckgo.com/html/?q={q}"
+    url = _ddg_url(q)
     res, err = await _ddg_html(url)
     if res is None:
         return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a directory/category adapter.", checked=url, error=err, duration_ms=ms_since(t))
@@ -288,7 +309,7 @@ async def off_10(spec, ctx):
     t = timed()
     domains = ("reddit.com", "stackoverflow.com", "quora.com")
     q = quote_plus(f'"{ctx.company_name}"') + "+" + quote_plus("(" + " OR ".join(f"site:{d}" for d in domains) + ")")
-    url = f"https://html.duckduckgo.com/html/?q={q}"
+    url = _ddg_url(q)
     res, err = await _ddg_html(url)
     if res is None:
         return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a community-search adapter.", checked=url, error=err, duration_ms=ms_since(t))
@@ -303,7 +324,7 @@ async def off_10(spec, ctx):
 async def off_11(spec, ctx):
     t = timed()
     q = quote_plus(f'"{ctx.company_name}"') + "+" + quote_plus("site:youtube.com")
-    url = f"https://html.duckduckgo.com/html/?q={q}"
+    url = _ddg_url(q)
     res, err = await _ddg_html(url)
     if res is None:
         return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a YouTube search adapter.", checked=url, error=err, duration_ms=ms_since(t))
@@ -317,7 +338,7 @@ async def off_11(spec, ctx):
 async def off_12(spec, ctx):
     t = timed()
     q = quote_plus(f'"{ctx.company_name}" (podcast OR webinar OR conference)')
-    url = f"https://html.duckduckgo.com/html/?q={q}"
+    url = _ddg_url(q)
     res, err = await _ddg_html(url)
     if res is None:
         return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a search/event adapter.", checked=url, error=err, duration_ms=ms_since(t))
@@ -330,7 +351,7 @@ async def off_12(spec, ctx):
 async def off_13(spec, ctx):
     t = timed()
     q = quote_plus(f'"{ctx.domain}"') + "+" + quote_plus(f"-site:{ctx.domain}")
-    url = f"https://html.duckduckgo.com/html/?q={q}"
+    url = _ddg_url(q)
     res, err = await _ddg_html(url)
     if res is None:
         return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a backlink data provider (Ahrefs/Moz/Majestic).", checked=url, error=err, duration_ms=ms_since(t))
@@ -350,7 +371,7 @@ async def off_13(spec, ctx):
 async def off_14(spec, ctx):
     t = timed()
     q = quote_plus(f'"{ctx.company_name}"') + "+" + quote_plus(f"-site:{ctx.domain}")
-    url = f"https://html.duckduckgo.com/html/?q={q}"
+    url = _ddg_url(q)
     res, err = await _ddg_html(url)
     if res is None:
         return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a media-monitoring/search adapter.", checked=url, error=err, duration_ms=ms_since(t))
@@ -389,7 +410,7 @@ async def off_16(spec, ctx):
     categories = derive_site_categories(ctx, limit=1)
     topic = categories[0] if categories else "companies"
     q = quote_plus(f'best {topic} "{ctx.company_name}"')
-    url = f"https://html.duckduckgo.com/html/?q={q}"
+    url = _ddg_url(q)
     res, err = await _ddg_html(url)
     if res is None:
         return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a SERP adapter for list-inclusion checks.", checked=url, error=err, duration_ms=ms_since(t))
@@ -402,7 +423,7 @@ async def off_16(spec, ctx):
 async def off_17(spec, ctx):
     t = timed()
     q = quote_plus(f'"{ctx.company_name}"') + "+" + quote_plus('(alternatives OR "alternative to")')
-    url = f"https://html.duckduckgo.com/html/?q={q}"
+    url = _ddg_url(q)
     res, err = await _ddg_html(url)
     if res is None:
         return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect a SERP adapter for alternatives-page checks.", checked=url, error=err, duration_ms=ms_since(t))
@@ -416,7 +437,7 @@ async def off_17(spec, ctx):
 async def off_18(spec, ctx):
     t = timed()
     q = quote_plus(f'"{ctx.company_name}"') + "+" + quote_plus('(gartner OR forrester OR idc OR "analyst report" OR "industry report")')
-    url = f"https://html.duckduckgo.com/html/?q={q}"
+    url = _ddg_url(q)
     res, err = await _ddg_html(url)
     if res is None:
         return result(spec, score=None, unknown=True, evidence={"provider": "DuckDuckGo HTML", "error": err}, recommendation="Connect an analyst/trade-press monitoring adapter.", checked=url, error=err, duration_ms=ms_since(t))
