@@ -38,12 +38,14 @@ def test_status_counts_and_labels():
     assert label_for_score(28) == "Critical"
 
 
-# Mirrors the shipped registry: 22 technical, 22 on-page, 18 off-page, every weight 1.0.
-SECTION_SIZES = {"technical": 22, "on_page": 22, "off_page": 18}
+# Section sizes of the shipped registry: 22 technical, 20 on-page, 18 off-page, every
+# weight 1.0. The ids below are generated, so they are the right SHAPE and count rather
+# than the exact shipped set -- scoring only ever weights and groups them.
+SECTION_SIZES = {"technical": 22, "on_page": 20, "off_page": 18}
 
 
 def _rows(scores: dict[str, float] | None = None, unknown: set[str] | None = None) -> list[dict]:
-    """A full 62-parameter result set. Anything in `unknown` comes back UNKNOWN/None,
+    """A full 60-parameter result set. Anything in `unknown` comes back UNKNOWN/None,
     anything else scores `scores[id]` (default 50)."""
     scores = scores or {}
     unknown = unknown or set()
@@ -69,7 +71,7 @@ def _reported(rows: list[dict]) -> float:
 
 def test_coefficients_sum_to_one_hundred():
     coeffs = coefficients(_rows())
-    assert len(coeffs) == 62
+    assert len(coeffs) == 60
     assert round(sum(coeffs.values()), 9) == 100.0
 
 
@@ -106,7 +108,7 @@ def test_unknown_rows_hand_their_weight_to_scored_siblings():
     rows = _rows(unknown=half_off_page_missing)
     coeffs = coefficients(rows)
 
-    assert len(coeffs) == 53
+    assert len(coeffs) == 51
     assert round(sum(coeffs.values()), 9) == 100.0
     # 9 of 18 off-page checks left: each survivor is worth double its nominal 1.389
     assert round(coeffs["OFF-10"], 4) == round(WEIGHTS["off_page"] / 9 * 100, 4)
@@ -140,10 +142,10 @@ def test_prioritize_ranks_by_points_and_bands_severity():
     rows = _rows({"ON-05": 0.0, "TECH-04": 85.0})
     issues = prioritize(rows)
 
-    # a total failure of an on-page check costs its full 1.818-point ceiling
+    # a total failure of an on-page check costs its full 2.0-point ceiling
     worst = issues[0]
     assert worst["parameter_id"] == "ON-05"
-    assert worst["score_impact"] == -1.818
+    assert worst["score_impact"] == -2.0
     assert worst["severity"] == "High Impact"
     assert issues == sorted(issues, key=lambda i: i["score_impact"])
 
@@ -175,7 +177,7 @@ def test_severity_drift_is_bounded_when_checks_go_unmeasured():
 
 def test_severity_discriminates_across_all_three_bands():
     """A report with a real spread of scores must not land everything in one band."""
-    rows = _rows({"ON-05": 0.0, "ON-06": 30.0, "TECH-04": 60.0, "TECH-05": 88.0})
+    rows = _rows({"ON-05": 0.0, "ON-12": 30.0, "TECH-04": 60.0, "TECH-05": 88.0})
     bands = {i["severity"] for i in prioritize(rows)}
     assert bands == set(BANDS)
 

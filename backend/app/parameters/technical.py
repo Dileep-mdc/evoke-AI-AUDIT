@@ -80,7 +80,7 @@ async def tech_04(spec, ctx):
     t = timed()
     home = ctx.homepage
     if not home or not home.soup:
-        return result(spec, score=None, unknown=True, evidence={}, recommendation="Homepage was unavailable to render.", checked=ctx.origin, error="no rendered homepage", duration_ms=ms_since(t))
+        return result(spec, score=None, unknown=True, evidence={}, recommendation="Homepage was unavailable.", checked=ctx.origin, error="no homepage", duration_ms=ms_since(t))
     blob = str(home.soup)[:200000].lower()
     matched = [m for m in _OVERLAY_MARKERS if m in blob]
     login_form = bool(home.soup.find("form", attrs={"action": re.compile("login|signin", re.I)}) or home.soup.find("input", attrs={"type": "password"}))
@@ -93,7 +93,7 @@ async def tech_04(spec, ctx):
     if login_form and home.word_count < 80:
         score = min(score, 20)
     rec = "Ensure the main page content is not hidden behind a login, pop-up or cookie wall." if score < 90 else None
-    return result(spec, score=score, evidence={"markers_found": matched, "login_form": login_form, "rendered_word_count": home.word_count}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.55)
+    return result(spec, score=score, evidence={"markers_found": matched, "login_form": login_form, "word_count": home.word_count}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.55)
 
 
 async def tech_05(spec, ctx):
@@ -185,22 +185,26 @@ async def tech_08(spec, ctx):
 
 async def tech_09(spec, ctx):
     t = timed()
-    rows = []
-    for page in ctx.pages[:10]:
-        raw = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>", " ", page.result.text or "", flags=re.I)
-        raw_text = re.sub(r"<[^>]+>", " ", raw)
-        raw_words = len(re.findall(r"\w+", raw_text))
-        rendered = page.word_count
-        ratio = (raw_words / rendered * 100) if rendered else 0
-        # Capped per page, before averaging. Raw HTML routinely holds more words than the
-        # rendered text (hidden nav, inline JSON), so an uncapped page can exceed 100 and,
-        # in the mean, conceal a genuinely JS-only page scoring 20.
-        rows.append({"url": page.result.final_url, "raw_words": raw_words, "rendered_words": rendered, "ratio": round(ratio, 1), "score": min(100.0, ratio)})
-    if not rows:
-        return result(spec, score=None, unknown=True, evidence={}, recommendation="No HTML to compare.", checked=ctx.origin, error="no HTML", duration_ms=ms_since(t))
-    avg = sum(r["score"] for r in rows) / len(rows)
-    rec = "Ensure primary copy is present in raw HTML, not injected only after JavaScript." if avg < 90 else None
-    return result(spec, score=avg, evidence={"pages": rows, "average_ratio": round(sum(r["ratio"] for r in rows) / len(rows), 1)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    # This check is only meaningful with both a raw (pre-JS) and a JavaScript-rendered copy
+    # of a page to compare. This build has no browser-rendering pass (httpx + lxml + Crawlee
+    # only, by design -- see crawler/crawlee_crawl.py), so there is nothing to compare the
+    # raw HTML against and this always reports UNKNOWN rather than a meaningless 100.
+    #
+    # not_applicable, and no error: this is a permanent property of the build, not a failure
+    # that retrying could fix. It is what stops "re-check unscored" from re-running this
+    # parameter, and paying for a model call on it, every single time it is clicked.
+    return result(
+        spec,
+        score=None,
+        unknown=True,
+        evidence={
+            "not_applicable": True,
+            "summary": "Not applicable: this build fetches no JavaScript-rendered copy to compare the raw HTML against.",
+        },
+        recommendation="This check requires comparing raw HTML against a JavaScript-rendered copy of the page, which this build does not fetch.",
+        checked=ctx.origin,
+        duration_ms=ms_since(t),
+    )
 
 
 async def tech_10(spec, ctx):
@@ -401,10 +405,16 @@ async def tech_17(spec, ctx):
     return result(spec, score=score, evidence={"pages": rows[:16]}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
 
 
-async def tech_18(spec, ctx):
-    t = timed()
+def _collect_author_signals(pages) -> list[dict]:
+    """The synchronous per-page schema-walk + CSS-selector scan behind TECH-18.
+
+    Run off the event loop via asyncio.to_thread(): on a large site (1000+
+    pages) this loop alone measured 74-101s with no `await` inside it, which
+    blocks every other parameter scheduled in the same concurrency batch for
+    that whole time, not just this one.
+    """
     authors = []
-    for page in ctx.pages:
+    for page in pages:
         for item in flatten_schema(page.schema_blocks):
             if "Person" in str(item.get("@type")) or item.get("author"):
                 authors.append({"url": page.result.final_url, "item": {k: item.get(k) for k in ("name", "jobTitle", "url", "@type") if item.get(k)}})
@@ -412,6 +422,12 @@ async def tech_18(spec, ctx):
             by = page.soup.select_one("[rel=author], .author, .byline")
             if by:
                 authors.append({"url": page.result.final_url, "visible": by.get_text(" ", strip=True)[:160]})
+    return authors
+
+
+async def tech_18(spec, ctx):
+    t = timed()
+    authors = await asyncio.to_thread(_collect_author_signals, ctx.pages)
     score = 80 if authors else 25
     if any("jobTitle" in (a.get("item") or {}) for a in authors):
         score = 95

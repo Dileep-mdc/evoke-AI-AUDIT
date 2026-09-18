@@ -446,7 +446,9 @@ function ParameterTable({ title, rows, onSelect, tabs, activeTab, onTabChange })
     return [...rows].sort((a, b) => {
       const av = sortValue(a, sort.key);
       const bv = sortValue(b, sort.key);
-      if (typeof av === "string") return av.localeCompare(bv) * sort.dir;
+      // numeric: true so a sub-numbered id sorts by its number, not as text -- otherwise
+      // "ON-5.1" lands after "ON-22" instead of between "ON-05" and "ON-07".
+      if (typeof av === "string") return av.localeCompare(bv, undefined, { numeric: true }) * sort.dir;
       return (av - bv) * sort.dir;
     });
   }, [rows, sort]);

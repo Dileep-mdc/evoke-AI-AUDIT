@@ -11,9 +11,10 @@ from urllib.parse import urldefrag, urlparse
 import trafilatura
 from bs4 import BeautifulSoup
 
-from ..config import BROWSER_UA, LINK_SAMPLE, MAX_PAGES
-from .browser_crawl import crawl_pages
+from ..config import BROWSER_UA, LINK_SAMPLE, MAX_DISCOVERY_ROUNDS, MAX_PAGES
+from .crawlee_crawl import crawl_raw
 from .http import FetchResult, fetch, is_html, join_url, normalize_url, origin_of, same_host
+from .parse import make_soup
 from .robots import RobotsData, fetch_robots
 from .sitemap import fetch_sitemaps
 
@@ -124,28 +125,22 @@ def classify_page(url: str, title: str, text: str) -> str:
     return "other"
 
 
-def parse_page(raw: FetchResult, rendered: FetchResult | None = None) -> Page:
-    """Build a Page from a raw (pre-JS) fetch and its Playwright-rendered counterpart.
+def parse_page(raw: FetchResult) -> Page:
+    """Build a Page from the raw (server-sent, pre-JS) fetch.
 
-    Structural/content extraction (title, headings, links, schema, visible text) reads
-    the rendered HTML, so markup or copy that only appears after JavaScript runs is no
-    longer invisible to the audit. `page.result` stays the raw fetch, since HTTP-layer
-    facts (redirect hops, final URL, byte weight) are unaffected by rendering and several
-    checks specifically compare the raw wire response against the rendered content.
+    All structural/content extraction (title, headings, links, schema, visible text) reads
+    this same response -- there is no separate JavaScript-rendered copy, so content a
+    framework injects only on the client is not visible to this audit.
     """
-    rendered = rendered or raw
     soup = None
     html_source = ""
-    if is_html(rendered) and rendered.text:
-        html_source = rendered.text
-        soup = BeautifulSoup(html_source, "html.parser")
-    elif is_html(raw) and raw.text:
+    if is_html(raw) and raw.text:
         html_source = raw.text
-        soup = BeautifulSoup(html_source, "html.parser")
+        soup = make_soup(html_source)
     page = Page(url=raw.url, result=raw, soup=soup)
     if not soup:
         return page
-    base_url = rendered.final_url or raw.final_url
+    base_url = raw.final_url
     title_el = soup.find("title")
     page.title = title_el.get_text(strip=True) if title_el else ""
     canon = soup.find("link", rel=lambda v: v and "canonical" in v)
@@ -223,10 +218,9 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
     domain = urlparse(origin).netloc.lower()
     bump(2)
 
-    # Lightweight, non-rendered probe of the homepage purely to discover its internal
-    # links for seeding crawl priority. The homepage Page used everywhere else below
-    # comes from the main rendered batch, so it gets the same JS-rendered fidelity as
-    # every other page instead of this quick unrendered peek.
+    # Lightweight probe of the homepage purely to discover its internal links for seeding
+    # crawl priority. The homepage Page used everywhere else below comes from the main
+    # crawl batch instead of this quick early peek.
     #
     # Some sites only listen on "www." (or, less often, only on the bare domain) and
     # simply refuse -- or never resolve -- a connection on the other. A hard connection
@@ -250,7 +244,7 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
 
     home_links: list[str] = []
     if is_html(seed_probe) and seed_probe.text:
-        probe_soup = BeautifulSoup(seed_probe.text, "html.parser")
+        probe_soup = make_soup(seed_probe.text)
         for a in probe_soup.find_all("a", href=True):
             abs_url = join_url(seed_probe.final_url, a["href"])
             if abs_url and same_host(abs_url, origin):
@@ -265,7 +259,7 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
         # The scrape phase owns the 10-16% band of overall scan progress.
         bump(10 + int(pct / 100 * 6))
 
-    fetched = await crawl_pages(targets, on_progress=on_scrape_progress)
+    fetched = await crawl_raw(targets, user_agent=BROWSER_UA, on_progress=on_scrape_progress)
     bump(16)
 
     pages_by_target: dict[str, Page] = {}
@@ -273,15 +267,13 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
 
     async def _parse_batch(url_list: list[str], fetched_pairs: dict) -> None:
         for u in url_list:
-            pair = fetched_pairs.get(u)
-            if not pair or "raw" not in pair:
+            raw = fetched_pairs.get(u)
+            if raw is None:
                 errors.append(f"{u}: no response from scraper")
                 continue
-            raw = pair["raw"]
-            rendered = pair.get("rendered") or raw
             if raw.error:
                 errors.append(f"{u}: {raw.error}")
-            pages_by_target[u] = await asyncio.to_thread(parse_page, raw, rendered)
+            pages_by_target[u] = await asyncio.to_thread(parse_page, raw)
 
     await _parse_batch(targets, fetched)
 
@@ -290,7 +282,7 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
     # same-host links actually found on the pages fetched so far -- in batches, across a
     # few rounds -- so site coverage doesn't depend on the sitemap succeeding.
     visited = set(all_targets)
-    for _ in range(6):
+    for _ in range(MAX_DISCOVERY_ROUNDS):
         if len(pages_by_target) >= MAX_PAGES:
             break
         discovered: list[str] = []
@@ -304,7 +296,7 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
             break
         discovered = discovered[: MAX_PAGES - len(pages_by_target)]
         all_targets.extend(discovered)
-        batch_fetched = await crawl_pages(discovered)
+        batch_fetched = await crawl_raw(discovered, user_agent=BROWSER_UA)
         await _parse_batch(discovered, batch_fetched)
     bump(18)
 

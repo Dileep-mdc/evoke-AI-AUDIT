@@ -32,16 +32,6 @@ def off02_prompt(company_name: str, hits: list[dict]) -> str:
     )
 
 
-def on09_prompt(samples: list[dict]) -> str:
-    return (
-        "Read these excerpts of website copy and judge, overall, whether the writing reads as "
-        "natural, fluent, conversational language versus stiff, repetitive or stitched-together "
-        "keyword strings (e.g. \"best web design company web design services web design agency\").\n\n"
-        f"Excerpts (JSON array of {{url, excerpt}}):\n{json.dumps(samples)}\n\n"
-        'Reply as JSON: {"naturalness": <float 0-100, 100 = fully natural and fluent>}'
-    )
-
-
 def off09_prompt(company_name: str, categories: list[str], snippets: list[dict]) -> str:
     return (
         f'Given the company "{company_name}", whose own site describes its business using these '
@@ -145,6 +135,99 @@ def on18_prompt(pages: list[dict]) -> str:
         f"Pages (JSON array of {{url, title}}):\n{json.dumps(pages)}\n\n"
         'Reply as JSON: {"stages": {"awareness": <bool>, "qualification": <bool>, '
         '"comparison": <bool>, "objection": <bool>, "trust": <bool>, "decision": <bool>}}'
+    )
+
+
+def on01_prompt(headings: list[dict]) -> str:
+    return (
+        "For each heading below, decide whether it is a question a real BUYER researching this "
+        "kind of purchase would actually ask -- not merely whether it has the grammatical form of "
+        "a question. \"What We Do\" has the form and is not a buyer question. \"How long does "
+        "implementation take?\" is one. \"Pricing for mid-market teams\" answers one without being "
+        "phrased as a question, and also counts.\n\n"
+        f"Headings (JSON array of {{url, heading}}):\n{json.dumps(headings)}\n\n"
+        'Reply as JSON: {"results": [{"heading": <string>, "buyer_question": <bool>}, ...]} '
+        "with one entry per heading given, in the same order."
+    )
+
+
+def on12_prompt(pages: list[dict]) -> str:
+    return (
+        "Each page below contains one or more statistics. For each page, decide whether at least "
+        "one of them is ORIGINAL to the company whose website this is -- its own research, survey, "
+        "benchmark, or a result it measured for a client -- rather than a figure quoted from a "
+        "third party such as an analyst firm, a news outlet or an industry report.\n\n"
+        f"Pages (JSON array of {{url, statistics, excerpt}}):\n{json.dumps(pages)}\n\n"
+        'Reply as JSON: {"results": [{"url": <string>, "original": <bool>}, ...]} '
+        "with one entry per page given, in the same order."
+    )
+
+
+def on13_prompt(bylines: list[dict]) -> str:
+    return (
+        "Each entry below is author or byline text taken from a page. For each, decide whether it "
+        "names a specific real person -- not a company name, and not a generic label such as "
+        "\"Admin\", \"Staff Writer\" or \"Editorial Team\" -- and whether it also states that "
+        "person's role, job title or professional credentials.\n\n"
+        f"Bylines (JSON array of {{url, byline}}):\n{json.dumps(bylines)}\n\n"
+        'Reply as JSON: {"results": [{"url": <string>, "named_person": <bool>, '
+        '"has_role_or_credentials": <bool>}, ...]} with one entry per byline given, in the '
+        "same order."
+    )
+
+
+def on14_prompt(pages: list[dict]) -> str:
+    return (
+        "For each page excerpt below, judge the strength of the proof it offers on three points:\n"
+        "  names_client       - does it name a SPECIFIC client organisation, rather than only "
+        "using the generic words client, customer or partner?\n"
+        "  quantified_outcome - does it state a measured result, a number tied to an outcome, "
+        "rather than an unquantified claim?\n"
+        "  deployment_detail  - does it describe how the work was actually delivered, deployed or "
+        "run in production?\n\n"
+        f"Pages (JSON array of {{url, excerpt}}):\n{json.dumps(pages)}\n\n"
+        'Reply as JSON: {"results": [{"url": <string>, "names_client": <bool>, '
+        '"quantified_outcome": <bool>, "deployment_detail": <bool>}, ...]} '
+        "with one entry per page given, in the same order."
+    )
+
+
+def on15_prompt(claims: list[dict]) -> str:
+    return (
+        "Each entry below is a sentence from a website stating a factual claim that contains a "
+        "statistic, together with any link anchor text found beside it. For each, decide whether "
+        "the claim is genuinely attributed to a source a reader could go and check -- a named "
+        "organisation, publication, study or dated report -- rather than merely sitting near the "
+        "words \"source\", \"according to\" or \"report\" with nothing identifiable behind them.\n\n"
+        f"Claims (JSON array of {{sentence, nearby_links}}):\n{json.dumps(claims)}\n\n"
+        'Reply as JSON: {"results": [{"sentence": <string>, "sourced": <bool>}, ...]} '
+        "with one entry per claim given, in the same order."
+    )
+
+
+def on19_prompt(pages: list[dict]) -> str:
+    return (
+        "Decide which of these pages are built to answer a HIGH-INTENT comparison query -- the "
+        "kind of \"best X for Y\", \"X vs Y\" or \"alternatives to X\" page a buyer already "
+        "evaluating options would search for. A general service page does not qualify, and "
+        "neither does an article that merely mentions a competitor in passing.\n\n"
+        f"Pages (JSON array of {{url, title}}):\n{json.dumps(pages)}\n\n"
+        'Reply as JSON: {"results": [{"url": <string>, "comparison_page": <bool>}, ...]} '
+        "with one entry per page given, in the same order."
+    )
+
+
+def on20_prompt(pairs: list[dict]) -> str:
+    return (
+        "Each pair below is two pages from the same website whose titles are textually similar. "
+        "For each pair, decide whether the two pages would genuinely COMPETE for the same buyer "
+        "question, so that a search engine or AI assistant would have no clear reason to prefer "
+        "one over the other. Pages that share wording but answer different questions -- a service "
+        "page and a case study about that service, or the same service for two different "
+        "industries -- do NOT compete.\n\n"
+        f"Pairs (JSON array of {{a, b, title_a, title_b}}):\n{json.dumps(pairs)}\n\n"
+        'Reply as JSON: {"results": [{"a": <string>, "b": <string>, "competing": <bool>}, ...]} '
+        "with one entry per pair given, in the same order."
     )
 
 

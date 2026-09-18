@@ -7,6 +7,22 @@ from typing import Any, Optional
 
 from ..errors import humanize_error
 
+_ID_DIGITS_RE = re.compile(r"(\d+)")
+
+
+def parameter_sort_key(parameter_id: str) -> tuple:
+    """Order parameter ids the way they read rather than the way they sort as text.
+
+    Ids are mostly PREFIX-NN, which sorts correctly as a plain string -- until one is
+    sub-numbered. "ON-5.1" as text lands after "ON-22" and before "TECH-01"; comparing its
+    digit runs as numbers puts it back where it belongs, between ON-05 and ON-07.
+    """
+    return tuple(
+        (1, int(part)) if part.isdigit() else (0, part)
+        for part in _ID_DIGITS_RE.split(parameter_id or "")
+        if part
+    )
+
 
 def evidence_summary(spec: dict, evidence: dict, *, score: Optional[float], error: Optional[str], unknown: bool) -> str:
     if error:

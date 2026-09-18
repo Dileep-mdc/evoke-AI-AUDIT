@@ -4,14 +4,11 @@ httpx
 beautifulsoup4
 pydantic
 reportlab
-python-multipart
 protego
-urllib3
 pytest
 openai
 python-dotenv
 openpyxl
-scrapy
-scrapy-playwright
-playwright
 trafilatura
+lxml
+crawlee

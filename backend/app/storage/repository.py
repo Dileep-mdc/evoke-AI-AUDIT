@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone
 
 from ..db import get_db
+from ..parameters.common import parameter_sort_key
 
 
 def _now() -> str:
@@ -81,7 +82,7 @@ class ScanRepository:
     def parameters(self, scan_id: str) -> list[dict]:
         with get_db() as conn:
             rows = conn.execute(
-                "SELECT * FROM parameter_results WHERE scan_id=? ORDER BY parameter_id", (scan_id,)
+                "SELECT * FROM parameter_results WHERE scan_id=?", (scan_id,)
             ).fetchall()
         out = []
         for r in rows:
@@ -91,6 +92,10 @@ class ScanRepository:
             except Exception:
                 item["evidence"] = {"raw": item["evidence"]}
             out.append(item)
+        # This is the order the report and the UI table are rendered in, so it sorts here
+        # rather than in SQL: SQLite's text collation puts a sub-numbered id such as ON-5.1
+        # after ON-22 instead of after ON-05.
+        out.sort(key=lambda item: parameter_sort_key(item["parameter_id"]))
         return out
 
     def parameter(self, scan_id: str, parameter_id: str) -> dict | None:
@@ -134,7 +139,7 @@ class ScanRepository:
                     (report.get("category_scores") or {}).get("on_page"),
                     (report.get("category_scores") or {}).get("off_page"),
                     (report.get("coverage") or {}).get("known"),
-                    (report.get("coverage") or {}).get("scorable_parameters", 62),
+                    (report.get("coverage") or {}).get("scorable_parameters", 60),
                     scan_id,
                 ),
             )

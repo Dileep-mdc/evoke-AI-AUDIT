@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from collections import defaultdict
 
@@ -7,13 +8,19 @@ from ..llm.client import judge
 from ..llm.prompts import (
     SERVICE_PAGE_RUBRIC,
     SYSTEM,
+    on01_prompt,
     on03_prompt,
     on04_prompt,
     on07_prompt,
     on08_prompt,
-    on09_prompt,
     on11_prompt,
+    on12_prompt,
+    on13_prompt,
+    on14_prompt,
+    on15_prompt,
     on18_prompt,
+    on19_prompt,
+    on20_prompt,
 )
 from .common import (
     band,
@@ -34,11 +41,11 @@ from .common import (
 # Openings that say nothing about the business. Only used when the model is unavailable.
 _FILLER_OPENINGS = ("welcome to", "in today's", "in today’s", "we are a leading", "leveraging cutting")
 
-# Peak single-term density bands, shared by ON-09 (naturalness) and ON-10 (stuffing) so the
-# same rule cannot drift between them. Measured over content words only (see
-# common.content_words): when function words were included, the most frequent token on
-# essentially every English page was "the" at 4-7%, which sits above the worst band -- so
-# every site on every scan scored the floor and the check told us nothing about stuffing.
+# Peak single-term density bands behind ON-10 (keyword stuffing). Measured over content
+# words only (see common.content_words): when function words were included, the most
+# frequent token on essentially every English page was "the" at 4-7%, which sits above the
+# worst band -- so every site on every scan scored the floor and the check told us nothing
+# about stuffing.
 # Read best-first as (ceiling, points): a peak term under 3.5% of content words is normal
 # prose, 3.5-6% is repetitive, above that is stuffing.
 _DENSITY_BANDS = ((0.035, 100), (0.06, 75))
@@ -164,8 +171,32 @@ async def on_01(spec, ctx):
     hits = sum(1 for r in rows if r["question"])
     share = hits / len(rows)
     score = band(share, _QUESTION_HEADING_BANDS, _QUESTION_HEADING_FLOOR)
+    confidence = 0.75
+    evidence = {"headings": rows[:16], "question_headings": hits, "eligible_headings": len(rows),
+                "question_share": round(share, 3), "method": "heuristic"}
+
+    # The regex detects question FORM, which is not what the parameter asks about. "What We
+    # Do" passes it and no buyer ever typed it; "Pricing for mid-market teams" fails it and
+    # answers a question buyers ask constantly. Intent is a reading judgment, so the model
+    # makes it where available. Strided, not head-40, so one heading-heavy page cannot fill
+    # the whole sample.
+    step = max(1, len(rows) // 40)
+    candidates = [{"url": r["url"], "heading": r["heading"]} for r in rows[::step]][:40]
+    llm_res = await judge(on01_prompt(candidates), system=SYSTEM)
+    verdicts = (llm_res.parsed or {}).get("results") if llm_res.ok else None
+    if isinstance(verdicts, list) and verdicts:
+        buyer = sum(1 for v in verdicts if v.get("buyer_question"))
+        share = buyer / len(verdicts)
+        score = band(share, _QUESTION_HEADING_BANDS, _QUESTION_HEADING_FLOOR)
+        confidence = 0.85
+        evidence["method"] = "llm"
+        evidence["question_share"] = round(share, 3)
+        evidence["llm"] = {"buyer_questions": buyer, "assessed": len(verdicts)}
+    elif not llm_res.ok:
+        evidence["llm_unavailable"] = llm_res.error
+
     rec = "Phrase more H2/H3 headings as buyer questions (How/What/Why/Which…) rather than generic labels." if score < 90 else None
-    return result(spec, score=score, evidence={"headings": rows[:16], "question_headings": hits, "eligible_headings": len(rows), "question_share": round(share, 3)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.75)
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
 async def on_02(spec, ctx):
@@ -287,7 +318,7 @@ async def on_05(spec, ctx):
     return result(spec, score=score, evidence={"pages": rows[:16]}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
 
 
-async def on_06(spec, ctx):
+async def on_05_1(spec, ctx):
     t = timed()
     rows = []
     for page in ctx.pages:
@@ -391,40 +422,6 @@ async def on_08(spec, ctx):
     return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
-async def on_09(spec, ctx):
-    t = timed()
-    rows = []
-    samples = []
-    for page in ctx.pages:
-        dens, top = top_term_density(page.text)
-        if dens is None:
-            continue
-        rows.append({"url": page.result.final_url, "max_density": round(dens, 4), "top_terms": top})
-        if len(samples) < 8 and page.text:
-            samples.append({"url": page.result.final_url, "excerpt": page.text[:400]})
-    if not rows:
-        return result(spec, score=None, unknown=True, evidence={}, recommendation="No page copy available to evaluate.", checked=ctx.origin, error="no page text", duration_ms=ms_since(t))
-    avg_d = sum(r["max_density"] for r in rows) / len(rows)
-    lexical = density_score(avg_d)
-    score = lexical
-    confidence = 0.55
-    evidence = {"pages": rows[:10], "average_max_density": round(avg_d, 4), "method": "heuristic"}
-
-    if samples:
-        llm_res = await judge(on09_prompt(samples), system=SYSTEM)
-        if llm_res.ok and llm_res.parsed and isinstance(llm_res.parsed.get("naturalness"), (int, float)):
-            naturalness = float(llm_res.parsed["naturalness"])
-            score = lexical * 0.4 + naturalness * 0.6
-            confidence = 0.75
-            evidence["method"] = "llm"
-            evidence["llm"] = llm_res.parsed
-        elif not llm_res.ok:
-            evidence["llm_unavailable"] = llm_res.error
-
-    rec = "Rewrite stiff or repetitive copy into natural, conversational sentences." if score < 90 else None
-    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
-
-
 async def on_10(spec, ctx):
     t = timed()
     rows = []
@@ -510,26 +507,91 @@ async def on_12(spec, ctx):
             "stats": nums[:8],
             "count": len(nums),
             "major": page.page_type in major_types,
+            "excerpt": (page.text or "")[:600],
         })
     major = [r for r in rows if r["major"]] or rows
     hit = sum(1 for r in major if r["count"] >= 1)
-    score = hit / max(1, len(major)) * 100
+    carry = hit / max(1, len(major))
+    score = carry * 100
+    confidence = 0.85
+    evidence = {"pages": [{k: v for k, v in r.items() if k != "excerpt"} for r in major[:12]],
+                "major_pages": len(major), "method": "heuristic"}
+
+    # The pattern proves a statistic is PRESENT, never that it is the company's own -- a
+    # figure quoted off an analyst firm satisfies it and not the parameter, which asks for
+    # an ORIGINAL data point. The model judges originality on the pages that have a
+    # statistic; the denominator stays every major page, so only the numerator moves.
+    with_stats = [r for r in major if r["count"] >= 1][:24]
+    if with_stats:
+        llm_res = await judge(on12_prompt([{"url": r["url"], "statistics": r["stats"], "excerpt": r["excerpt"]}
+                                           for r in with_stats]), system=SYSTEM)
+        verdicts = (llm_res.parsed or {}).get("results") if llm_res.ok else None
+        if isinstance(verdicts, list) and verdicts:
+            original = sum(1 for v in verdicts if v.get("original"))
+            score = carry * (original / len(verdicts)) * 100
+            confidence = 0.8
+            evidence["method"] = "llm"
+            evidence["llm"] = {"original": original, "assessed": len(verdicts),
+                               "pages_with_a_statistic": hit}
+        elif not llm_res.ok:
+            evidence["llm_unavailable"] = llm_res.error
+
     rec = "Add original, citable statistics on major pages with a source or date." if score < 90 else None
-    return result(spec, score=score, evidence={"pages": major[:12], "major_pages": len(major)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
+
+
+def _collect_thought_leadership_signals(pages) -> list[dict]:
+    """The synchronous per-page CSS-selector + schema-walk behind ON-13.
+
+    Same shape as technical._collect_author_signals and the same reason it
+    runs off the event loop: an unyielding per-page loop over a large site
+    otherwise stalls every parameter sharing its concurrency batch, not just
+    this one.
+    """
+    signals = []
+    for page in pages:
+        element = page.soup.select_one("[rel=author], .author, .byline") if page.soup else None
+        if element:
+            # The byline TEXT, not just the fact a matching element exists: whether it names
+            # a real person with a role is the question, and that cannot be asked of a bool.
+            signals.append({"url": page.result.final_url, "visible_author": True,
+                            "byline": element.get_text(" ", strip=True)[:160]})
+        for item in flatten_schema(page.schema_blocks):
+            if "Person" in str(item.get("@type")):
+                named = " - ".join(str(item[k]) for k in ("name", "jobTitle") if item.get(k))
+                signals.append({"url": page.result.final_url, "schema": item.get("name"),
+                                "byline": named[:160]})
+    return signals
 
 
 async def on_13(spec, ctx):
     t = timed()
-    signals = []
-    for page in ctx.pages:
-        if page.soup and page.soup.select_one("[rel=author], .author, .byline"):
-            signals.append({"url": page.result.final_url, "visible_author": True})
-        for item in flatten_schema(page.schema_blocks):
-            if "Person" in str(item.get("@type")):
-                signals.append({"url": page.result.final_url, "schema": item.get("name")})
-    score = 80 if signals else 30
+    signals = await asyncio.to_thread(_collect_thought_leadership_signals, ctx.pages)
+    score = 80.0 if signals else 30.0
+    confidence = 0.85
+    evidence = {"signals": signals[:10], "method": "heuristic"}
+
+    # Presence of a .byline element is not the parameter, which asks for a NAMED person with
+    # a role and real credentials. "Posted by Admin" satisfies the selector and nothing else,
+    # so where the model is available it reads the byline text and decides.
+    bylines = [{"url": s["url"], "byline": s["byline"]} for s in signals if s.get("byline")][:20]
+    if bylines:
+        llm_res = await judge(on13_prompt(bylines), system=SYSTEM)
+        verdicts = (llm_res.parsed or {}).get("results") if llm_res.ok else None
+        if isinstance(verdicts, list) and verdicts:
+            named = sum(1 for v in verdicts if v.get("named_person"))
+            with_role = sum(1 for v in verdicts if v.get("named_person") and v.get("has_role_or_credentials"))
+            # Half the marks for naming a real person, half for stating their role. Floored
+            # at the no-byline score: markup that names nobody is no worse than no markup.
+            score = max(30.0, named / len(verdicts) * 50 + with_role / len(verdicts) * 50)
+            confidence = 0.8
+            evidence["method"] = "llm"
+            evidence["llm"] = {"named_people": named, "with_role_or_credentials": with_role, "assessed": len(verdicts)}
+        elif not llm_res.ok:
+            evidence["llm_unavailable"] = llm_res.error
+
     rec = "Name an author with role, credentials and a real profile on thought-leadership pages." if score < 90 else None
-    return result(spec, score=score, evidence={"signals": signals[:10]}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
 async def on_14(spec, ctx):
@@ -540,11 +602,37 @@ async def on_14(spec, ctx):
         clients = bool(re.search(r"\b(client|customer|partner)\b", text, re.I))
         numbers = bool(re.search(r"\b\d{2,}\s?%|\b\d+\+", text))
         deploy = bool(re.search(r"deploy|implementation|production|rolled out", text, re.I))
-        score = clients * 25 + numbers * 30 + deploy * 25 + (20 if clients and numbers else 0)
-        rows.append({"url": page.result.final_url, "client": clients, "quantified": numbers, "deployment": deploy, "score": score})
-    avg = sum(r["score"] for r in rows) / max(1, len(rows))
-    rec = "Name clients, quantify outcomes and describe deployment context on case-study pages." if avg < 90 else None
-    return result(spec, score=avg, evidence={"pages": rows[:12]}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.65)
+        page_score = clients * 25 + numbers * 30 + deploy * 25 + (20 if clients and numbers else 0)
+        rows.append({"url": page.result.final_url, "client": clients, "quantified": numbers, "deployment": deploy, "score": page_score})
+    score = sum(r["score"] for r in rows) / max(1, len(rows))
+    confidence = 0.65
+    evidence = {"pages": rows[:12], "method": "heuristic"}
+
+    # The regex cannot tell a NAMED client from the generic word "client", which is the
+    # whole of what the parameter asks for -- and it counts any two-digit number as a
+    # quantified outcome. The model re-scores a page-type spread on the same three signals
+    # with the same weights, so only the reading of each signal changes, not the rubric.
+    sample = [{"url": p.result.final_url, "excerpt": (p.text or "")[:700]}
+              for p in _spread_by_page_type(ctx.pages, 20) if p.text]
+    if sample:
+        llm_res = await judge(on14_prompt(sample), system=SYSTEM)
+        verdicts = (llm_res.parsed or {}).get("results") if llm_res.ok else None
+        if isinstance(verdicts, list) and verdicts:
+            judged = []
+            for v in verdicts:
+                named, quantified, deployed = bool(v.get("names_client")), bool(v.get("quantified_outcome")), bool(v.get("deployment_detail"))
+                judged.append(named * 25 + quantified * 30 + deployed * 25 + (20 if named and quantified else 0))
+            score = sum(judged) / len(judged)
+            confidence = 0.8
+            evidence["method"] = "llm"
+            evidence["llm"] = {"assessed": len(verdicts),
+                               "named_client": sum(1 for v in verdicts if v.get("names_client")),
+                               "quantified_outcome": sum(1 for v in verdicts if v.get("quantified_outcome"))}
+        elif not llm_res.ok:
+            evidence["llm_unavailable"] = llm_res.error
+
+    rec = "Name clients, quantify outcomes and describe deployment context on case-study pages." if score < 90 else None
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
 async def on_15(spec, ctx):
@@ -552,11 +640,14 @@ async def on_15(spec, ctx):
     claims = 0
     sourced = 0
     samples = []
+    candidates = []
     for page in ctx.pages:
         for sent in re.split(r"(?<=[.!?])\s+", page.text or ""):
             if _statistics(sent) and len(sent.split()) > 6:
                 claims += 1
                 hrefs = [l for l in page.links if l["text"] and l["text"].lower()[:40] in sent.lower()]
+                if len(candidates) < 24:
+                    candidates.append({"sentence": sent[:300], "nearby_links": [l["text"][:60] for l in hrefs[:4]]})
                 if hrefs or re.search(r"source|according to|report", sent, re.I):
                     sourced += 1
                     if len(samples) < 8:
@@ -564,26 +655,27 @@ async def on_15(spec, ctx):
                 elif len(samples) < 8:
                     samples.append({"sentence": sent[:220], "sourced": False})
     score = sourced / claims * 100 if claims else 35
+    confidence = 0.55
+    evidence = {"claims": claims, "sourced": sourced, "samples": samples, "method": "heuristic"}
+
+    # The regex only establishes that something source-LIKE sits near the claim: the bare
+    # word "report" anywhere in the sentence satisfies it, and a link whose anchor text
+    # happens to appear in the sentence satisfies it too. Whether a reader could actually
+    # go and check the source is a reading judgment, so the model makes it.
+    if candidates:
+        llm_res = await judge(on15_prompt(candidates), system=SYSTEM)
+        verdicts = (llm_res.parsed or {}).get("results") if llm_res.ok else None
+        if isinstance(verdicts, list) and verdicts:
+            attributed = sum(1 for v in verdicts if v.get("sourced"))
+            score = attributed / len(verdicts) * 100
+            confidence = 0.75
+            evidence["method"] = "llm"
+            evidence["llm"] = {"sourced": attributed, "assessed": len(verdicts), "claims_found": claims}
+        elif not llm_res.ok:
+            evidence["llm_unavailable"] = llm_res.error
+
     rec = "Cite dated primary sources next to material claims and statistics." if score < 90 else None
-    return result(spec, score=score, evidence={"claims": claims, "sourced": sourced, "samples": samples}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.55)
-
-
-_REVIEWER_RE = re.compile(r"reviewed by|technically reviewed|approver|medically reviewed|medical review|fact[- ]checked", re.I)
-
-
-async def on_16(spec, ctx):
-    t = timed()
-    # Numerator and denominator must be the same set of pages. Previously the numerator
-    # counted reviewer signals anywhere on the site while the denominator counted only
-    # article/service pages, so reviewer bylines on other pages inflated the ratio past
-    # 100% -- visible only because the result was clamped on the way out.
-    need = [p for p in ctx.pages if p.page_type in {"article", "service"}]
-    if not need:
-        return result(spec, score=None, unknown=True, evidence={"note": "No article or service pages were found, so there were no pages making the kind of expertise claim this check applies to."}, recommendation="Name a reviewer or technical approver on pages that make expertise claims.", checked=ctx.origin, error="no pages this check applies to", duration_ms=ms_since(t))
-    hits = [p.result.final_url for p in need if _REVIEWER_RE.search(p.text or "")]
-    score = len(hits) / len(need) * 100
-    rec = "Name a reviewer or technical approver on pages that make expertise claims." if score < 90 else None
-    return result(spec, score=score, evidence={"reviewer_pages": hits[:12], "pages_with_reviewer": len(hits), "evaluated": len(need)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
 async def on_17(spec, ctx):
@@ -599,16 +691,28 @@ async def on_17(spec, ctx):
     return result(spec, score=score, evidence={"dated_pages": dated, "samples": rows[:12]}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.6)
 
 
-async def on_18(spec, ctx):
-    t = timed()
+def _journey_stage_coverage(pages, journey: dict) -> dict:
+    """The synchronous per-page keyword scan behind ON-18's heuristic path.
+
+    A 6-stage x N-page x ~keywords scan with no `await` inside it -- same
+    event-loop-blocking shape as the two helpers above, moved off the loop
+    for the same reason. The model call further down stays untouched -- it's
+    already real, non-blocking I/O.
+    """
     covered = defaultdict(list)
-    corpus = [(p.result.final_url, f"{p.title} {p.text[:1000]}".lower()) for p in ctx.pages]
-    brand = primary_brand(ctx)
-    journey = {**JOURNEY, "comparison": JOURNEY["comparison"] + ((f"why {brand}",) if brand else ())}
+    corpus = [(p.result.final_url, f"{p.title} {p.text[:1000]}".lower()) for p in pages]
     for stage, keys in journey.items():
         for url, blob in corpus:
             if any(k in blob or k in url.lower() for k in keys):
                 covered[stage].append(url)
+    return covered
+
+
+async def on_18(spec, ctx):
+    t = timed()
+    brand = primary_brand(ctx)
+    journey = {**JOURNEY, "comparison": JOURNEY["comparison"] + ((f"why {brand}",) if brand else ())}
+    covered = await asyncio.to_thread(_journey_stage_coverage, ctx.pages, journey)
     stages = len(JOURNEY)
     score = len([s for s in JOURNEY if covered[s]]) / stages * 100
     confidence = 0.7
@@ -643,8 +747,30 @@ async def on_19(spec, ctx):
         if re.search(r"best .+(for)| vs |versus|alternative", blob):
             patterns.append({"url": page.result.final_url, "title": page.title})
     score = 80 if len(patterns) >= 3 else (45 if patterns else 15)
+    confidence = 0.7
+    evidence = {"matches": patterns[:12], "matched_pages": len(patterns), "method": "heuristic"}
+
+    # The token match both over- and under-selects. A blog post titled "Docker vs Podman" is
+    # not a buyer comparison page, and "Choosing an ERP for manufacturers" is one while
+    # matching none of the tokens. Which pages serve a high-intent comparison query is a
+    # judgment about purpose, so the model makes it and the same three tiers are applied.
+    sample = [{"url": p.result.final_url, "title": p.title or ""}
+              for p in _spread_by_page_type(ctx.pages, 30) if p.title]
+    if sample:
+        llm_res = await judge(on19_prompt(sample), system=SYSTEM)
+        verdicts = (llm_res.parsed or {}).get("results") if llm_res.ok else None
+        if isinstance(verdicts, list) and verdicts:
+            found = [v for v in verdicts if v.get("comparison_page")]
+            score = 80 if len(found) >= 3 else (45 if found else 15)
+            confidence = 0.8
+            evidence["method"] = "llm"
+            evidence["llm"] = {"comparison_pages": len(found), "assessed": len(verdicts),
+                               "pages": [v.get("url") for v in found[:10]]}
+        elif not llm_res.ok:
+            evidence["llm_unavailable"] = llm_res.error
+
     rec = "Create Best X for Y and X vs Y pages for priority industries and services." if score < 90 else None
-    return result(spec, score=score, evidence={"matches": patterns}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.7)
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
 async def on_20(spec, ctx):
@@ -661,8 +787,35 @@ async def on_20(spec, ctx):
     cannibalized = len({u for p in pairs for u in (p["a"], p["b"])})
     share = cannibalized / len(titles)
     score = band(1 - share, _CANNIBALIZATION_BANDS, _CANNIBALIZATION_FLOOR)
-    rec = "Consolidate pages that compete for the same buyer question." if pairs else None
-    return result(spec, score=score, evidence={"overlapping_pairs": pairs[:10], "pairs_found": len(pairs), "pages_affected": cannibalized, "pages_compared": len(titles)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.6)
+    confidence = 0.6
+    competing_pairs = pairs
+    evidence = {"overlapping_pairs": pairs[:10], "pairs_found": len(pairs), "pages_affected": cannibalized,
+                "pages_compared": len(titles), "method": "heuristic"}
+
+    # Title overlap is a candidate filter, not the finding. A service page and the case study
+    # about that service share most of their tokens without competing, and so do the same
+    # service written for two different industries. The model confirms which candidates
+    # really answer the same buyer question; unconfirmed pairs stop counting against the
+    # site. Pairs past the sample keep their heuristic verdict rather than being dropped.
+    assessed, beyond = pairs[:20], pairs[20:]
+    if assessed:
+        llm_res = await judge(on20_prompt([{"a": p["a"], "b": p["b"], "title_a": p["titles"][0], "title_b": p["titles"][1]}
+                                           for p in assessed]), system=SYSTEM)
+        verdicts = (llm_res.parsed or {}).get("results") if llm_res.ok else None
+        if isinstance(verdicts, list) and verdicts:
+            confirmed = {(v.get("a"), v.get("b")) for v in verdicts if v.get("competing")}
+            competing_pairs = [p for p in assessed if (p["a"], p["b"]) in confirmed] + beyond
+            cannibalized = len({u for p in competing_pairs for u in (p["a"], p["b"])})
+            score = band(1 - cannibalized / len(titles), _CANNIBALIZATION_BANDS, _CANNIBALIZATION_FLOOR)
+            confidence = 0.8
+            evidence.update(method="llm", overlapping_pairs=competing_pairs[:10],
+                            pairs_found=len(competing_pairs), pages_affected=cannibalized,
+                            llm={"candidate_pairs": len(assessed), "confirmed": len(competing_pairs) - len(beyond)})
+        elif not llm_res.ok:
+            evidence["llm_unavailable"] = llm_res.error
+
+    rec = "Consolidate pages that compete for the same buyer question." if competing_pairs else None
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
 async def on_21(spec, ctx):
@@ -712,8 +865,8 @@ async def on_22(spec, ctx):
 
 
 HANDLERS = {
-    "ON-01": on_01, "ON-02": on_02, "ON-03": on_03, "ON-04": on_04, "ON-05": on_05, "ON-06": on_06,
-    "ON-07": on_07, "ON-08": on_08, "ON-09": on_09, "ON-10": on_10, "ON-11": on_11, "ON-12": on_12,
-    "ON-13": on_13, "ON-14": on_14, "ON-15": on_15, "ON-16": on_16, "ON-17": on_17, "ON-18": on_18,
+    "ON-01": on_01, "ON-02": on_02, "ON-03": on_03, "ON-04": on_04, "ON-05": on_05, "ON-5.1": on_05_1,
+    "ON-07": on_07, "ON-08": on_08, "ON-10": on_10, "ON-11": on_11, "ON-12": on_12,
+    "ON-13": on_13, "ON-14": on_14, "ON-15": on_15, "ON-17": on_17, "ON-18": on_18,
     "ON-19": on_19, "ON-20": on_20, "ON-21": on_21, "ON-22": on_22,
 }

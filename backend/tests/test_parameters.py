@@ -10,6 +10,7 @@ import re
 
 import pytest
 
+from app.crawler.parse import make_soup
 from app.parameters.common import (
     band,
     content_words,
@@ -19,7 +20,7 @@ from app.parameters.common import (
 from app.parameters.onpage import density_score
 
 
-# --- keyword density (ON-09 / ON-10) ---------------------------------------------------
+# --- keyword density (ON-10) -----------------------------------------------------------
 
 NORMAL_PROSE = (
     "The consultancy helps enterprises modernise legacy platforms. The team works with "
@@ -128,17 +129,17 @@ import asyncio  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 from app.parameters.engine import load_registry  # noqa: E402
-from app.parameters.onpage import on_16  # noqa: E402
-from app.parameters.technical import tech_09, tech_17, tech_19, tech_21  # noqa: E402
+from app.parameters.onpage import _journey_stage_coverage, _collect_thought_leadership_signals, on_13  # noqa: E402
+from app.parameters.technical import _collect_author_signals, tech_09, tech_17, tech_18, tech_19, tech_21  # noqa: E402
 
 SPECS = {p["parameter_id"]: p for p in load_registry()}
 
 
-def _page(url="https://x/p", *, html="", text="", words=0, hreflang=(), schema=(), page_type="other"):
+def _page(url="https://x/p", *, html="", text="", words=0, hreflang=(), schema=(), page_type="other", title=""):
     return SimpleNamespace(
         url=url,
         result=SimpleNamespace(final_url=url, text=html, status_code=200, error=None, ok=True, hops=0, elapsed_ms=100, content=b""),
-        soup=None,
+        soup=make_soup(html) if html else None,
         text=text,
         word_count=words,
         hreflang=list(hreflang),
@@ -148,7 +149,7 @@ def _page(url="https://x/p", *, html="", text="", words=0, hreflang=(), schema=(
         links=[],
         images=[],
         dates={},
-        title="",
+        title=title,
         meta_description="",
         canonical="",
         blocked_reason="",
@@ -177,13 +178,12 @@ def test_tech21_scores_when_hreflang_is_actually_present():
     assert out["status"] == "PASS" and out["score"] == 100
 
 
-def test_tech09_caps_each_page_so_one_page_cannot_mask_another():
-    """Raw HTML often holds more words than rendered text, so an uncapped page exceeds 100
-    and, in the mean, hides a genuinely JS-only page."""
-    rich = _page("https://x/a", html="<p>" + " ".join(["word"] * 900) + "</p>", words=100)   # ratio ~900%
-    js_only = _page("https://x/b", html="<div></div>", words=100)                            # ratio ~0%
-    out = _run(tech_09(SPECS["TECH-09"], _ctx([rich, js_only])))
-    assert out["score"] <= 55, "a 900% page must not average away a 0% page"
+def test_tech09_is_unknown_without_a_rendered_copy():
+    """This build has no JavaScript-rendering pass, so TECH-09 -- raw HTML vs. rendered word
+    count -- has nothing to compare and must report UNKNOWN rather than a meaningless score."""
+    page = _page("https://x/a", html="<p>hello</p>", words=100)
+    out = _run(tech_09(SPECS["TECH-09"], _ctx([page])))
+    assert out["score"] is None and out["status"] == "UNKNOWN"
 
 
 def test_tech17_faqpage_does_not_satisfy_every_page_type():
@@ -206,18 +206,53 @@ def test_tech19_with_no_markup_is_unknown_not_forty():
     assert out["status"] == "UNKNOWN" and out["score"] is None
 
 
-def test_on16_cannot_exceed_its_own_denominator():
-    """Reviewer signals were counted site-wide but divided by article/service pages only,
-    so bylines elsewhere pushed the ratio past 100% before it was clamped."""
+# --- event-loop-blocking per-page loops now run via asyncio.to_thread ------------------
+#
+# TECH-18, ON-13 and ON-18's heuristic pass were measured at 74-101s each on a 1057-page
+# scan, with no `await` inside their per-page loop -- meaning every other parameter
+# scheduled in the same PARAMETER_CONCURRENCY batch sat frozen behind them too, not just
+# these three. Extracted into plain helpers run through asyncio.to_thread(); these tests
+# pin that the extraction changed *where* the loop runs, not what it computes.
+
+def test_collect_author_signals_matches_the_original_loop_shape():
+    schema_page = _page("https://x/a", schema=[{"@type": "Person", "name": "Jane Roe", "jobTitle": "CTO"}])
+    visible_page = _page("https://x/b", html='<div class="byline">By John Doe</div>')
+    plain_page = _page("https://x/c")
+    signals = _collect_author_signals([schema_page, visible_page, plain_page])
+    assert {"url": "https://x/a", "item": {"name": "Jane Roe", "jobTitle": "CTO", "@type": "Person"}} in signals
+    assert any(s.get("url") == "https://x/b" and s.get("visible") == "By John Doe" for s in signals)
+    assert len(signals) == 2, "the page with no author signal must not appear"
+
+
+def test_tech18_runs_the_extracted_helper_through_a_thread_and_scores_the_same():
+    pages = [_page("https://x/a", schema=[{"@type": "Person", "name": "Jane Roe", "jobTitle": "CTO"}])]
+    out = _run(tech_18(SPECS["TECH-18"], _ctx(pages)))
+    assert out["score"] == 95, "a jobTitle-carrying author signal must still score 95 after the move to a thread"
+
+
+def test_collect_thought_leadership_signals_matches_the_original_loop_shape():
+    visible_page = _page("https://x/a", html='<div class="author">Jane Roe</div>')
+    schema_page = _page("https://x/b", schema=[{"@type": "Person", "name": "John Doe"}])
+    plain_page = _page("https://x/c")
+    signals = _collect_thought_leadership_signals([visible_page, schema_page, plain_page])
+    assert {"url": "https://x/a", "visible_author": True, "byline": "Jane Roe"} in signals
+    assert {"url": "https://x/b", "schema": "John Doe", "byline": "John Doe"} in signals
+    assert len(signals) == 2
+
+
+def test_on13_runs_the_extracted_helper_through_a_thread_and_scores_the_same():
+    pages = [_page("https://x/a", html='<div class="author">Jane Roe</div>')]
+    out = _run(on_13(SPECS["ON-13"], _ctx(pages)))
+    assert out["score"] == 80, "a real author signal must still score 80 after the move to a thread"
+
+
+def test_journey_stage_coverage_matches_the_original_loop_shape():
+    journey = {"awareness": ("guide",), "decision": ("contact",)}
     pages = [
-        _page("https://x/a", text="Reviewed by Dr Jane Roe", page_type="article"),
-        _page("https://x/b", text="Reviewed by Dr Jane Roe", page_type="about"),
-        _page("https://x/c", text="no reviewer here", page_type="service"),
+        _page("https://x/a", title="A Guide to Widgets", text="guide"),
+        _page("https://x/b", title="Contact Us", text="contact"),
     ]
-    out = _run(on_16(SPECS["ON-16"], _ctx(pages)))
-    assert out["score"] == 50, "1 of the 2 article/service pages has a reviewer"
-
-
-def test_on16_is_unknown_when_no_page_makes_an_expertise_claim():
-    out = _run(on_16(SPECS["ON-16"], _ctx([_page(page_type="utility")])))
-    assert out["status"] == "UNKNOWN"
+    covered = _journey_stage_coverage(pages, journey)
+    assert covered["awareness"] == ["https://x/a"]
+    assert covered["decision"] == ["https://x/b"]
+    assert "comparison" not in covered, "a stage with no matching page must not appear at all"

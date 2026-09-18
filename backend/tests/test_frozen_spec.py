@@ -20,67 +20,121 @@ FROZEN = json.loads((PARAMS / "frozen_spec.json").read_text(encoding="utf-8"))
 IDS = [p["parameter_id"] for p in REGISTRY]
 
 
-def handlers_calling_the_model() -> set[str]:
-    """Parameter IDs whose handler really contains a judge() call, read from source."""
-    using = set()
+def handler_bodies() -> list[tuple[str, str]]:
+    """(parameter id, handler source body) for every registered handler.
+
+    The id is read from each module's HANDLERS table rather than derived from the function
+    name: a sub-numbered parameter like ON-5.1 cannot be spelled as an identifier, so the
+    two stopped lining up.
+    """
+    out = []
     for module in ("technical", "onpage", "offpage"):
         source = (PARAMS / f"{module}.py").read_text(encoding="utf-8")
+        table = re.search(r"\nHANDLERS = \{(.*?)\n\}", source, re.S).group(1)
+        ids = {func: pid for pid, func in re.findall(r'"([^"]+)":\s*(\w+)', table)}
         for match in re.finditer(r"\nasync def (\w+)\(spec, ctx\):(.*?)(?=\nasync def |\nHANDLERS)", source, re.S):
-            if "judge(" in match.group(2):
-                using.add(match.group(1).upper().replace("_", "-"))
-    return using
+            pid = ids.get(match.group(1))
+            if pid:
+                out.append((pid, match.group(2)))
+    return out
 
 
-def test_registry_ai_required_matches_the_code():
-    """16 parameters used to declare ai_required "Yes" while calling no model at all, so
-    every report built from the registry overstated how much of the audit was AI-assisted."""
-    calling = handlers_calling_the_model()
-    wrong = {
-        p["parameter_id"]: (p["ai_required"], p["parameter_id"] in calling)
-        for p in REGISTRY
-        if (p["ai_required"] == "Yes") != (p["parameter_id"] in calling)
-    }
-    assert not wrong, f"registry ai_required disagrees with the handlers: {wrong}"
+def handlers_calling_the_model() -> set[str]:
+    """Parameter IDs whose handler really contains a judge() call, read from source."""
+    return {pid for pid, body in handler_bodies() if "judge(" in body}
+
+
+def test_every_parameter_is_model_scored():
+    """Every parameter's score comes from the model, so every parameter says so.
+
+    The claim is made sixty times here and implemented once, in the engine: run_one() hands
+    each handler's curated data to score_parameter() regardless of which handler produced
+    it. A parameter cannot opt out, which is the whole point of scoring there rather than
+    inside sixty separate handlers.
+    """
+    not_declared = [p["parameter_id"] for p in REGISTRY if p["ai_required"] != "Yes"]
+    assert not not_declared, f"registry does not declare these as model-scored: {not_declared}"
+    not_frozen = [pid for pid, e in FROZEN["parameters"].items() if not e["uses_llm"]]
+    assert not not_frozen, f"frozen spec does not declare these as model-scored: {not_frozen}"
+
+
+def test_the_engine_really_routes_every_parameter_through_the_model():
+    """The sixty claims above are all false the moment this one function stops doing it."""
+    engine = (PARAMS / "engine.py").read_text(encoding="utf-8")
+    assert "score_parameter(" in engine, "engine.py no longer asks the model to score anything"
+    assert "apply_judgement" in engine
+    assert "await apply_judgement(spec, await evaluate(spec, ctx))" in engine, \
+        "run_one no longer applies the model judgement to every evaluated parameter"
+
+
+def test_a_scan_still_completes_with_no_model_available():
+    """ENABLE_LLM_SCORING defaults to false and a key may be missing, so the rules-based
+    score has to survive as the fallback -- otherwise every parameter of every scan would
+    come back UNKNOWN out of the box."""
+    engine = (PARAMS / "engine.py").read_text(encoding="utf-8")
+    assert "deterministic" in engine, "engine.py records no rules-based fallback method"
+    assert "rules_based_score" in engine, "engine.py does not preserve the rules-based score"
+    scoring = (PARAMS.parent / "llm" / "scoring.py").read_text(encoding="utf-8")
+    assert 'method="deterministic"' in scoring, "scoring.py has no fallback when the model fails"
 
 
 def test_automation_level_matches_ai_required():
     for p in REGISTRY:
-        expected = "LLM-assisted (heuristic fallback)" if p["ai_required"] == "Yes" else "Deterministic (rule-based)"
-        assert p["automation_level"] == expected, p["parameter_id"]
+        assert p["automation_level"] == "LLM-scored (rules-based fallback)", p["parameter_id"]
 
 
 def test_every_parameter_has_a_scoring_formula():
     """formulas.json feeds the Scoring Formula column of every per-scan workbook. It covered
-    41 of 62, so a third of the rows silently fell back to a one-line summary."""
+    41 of them, so a third of the rows silently fell back to a one-line summary."""
     missing = [i for i in IDS if not FORMULAS.get(i, "").strip()]
     assert not missing, f"no scoring formula recorded for: {missing}"
     assert set(FORMULAS) == set(IDS)
 
 
-def test_frozen_spec_covers_every_parameter_with_both_columns():
+def test_frozen_spec_covers_every_parameter_with_every_column():
+    """The four columns of docs/Parameter-Logic.xlsx are built from these fields, so a
+    parameter added to the engine without its document copy fails here rather than shipping
+    as a blank cell."""
     frozen = FROZEN["parameters"]
     assert set(frozen) == set(IDS)
     for pid, entry in frozen.items():
+        assert entry["definition"].strip(), f"{pid} has no definition"
+        assert entry["metric_brief"].strip(), f"{pid} has no brief metric explanation"
         assert entry["metric"].strip(), f"{pid} has no metric description"
         assert entry["llm_rationale"].strip(), f"{pid} has no LLM rationale"
 
 
-def test_frozen_spec_llm_flags_match_the_code():
+def test_the_brief_explanation_is_actually_brief():
+    """The brief column is the one a reader skims. The exact formula stays in `metric` and
+    reaches clients through each scan's own metrics workbook, so this one stays short."""
+    too_long = {
+        pid: len(entry["metric_brief"])
+        for pid, entry in FROZEN["parameters"].items()
+        if len(entry["metric_brief"]) > 480
+    }
+    assert not too_long, f"brief metric explanation runs long for: {too_long}"
+
+
+def test_dedicated_llm_pass_flags_match_the_code():
+    """Separate from scoring: eighteen handlers run their own classification pass before
+    they score, and that flag still has to match what the source actually does."""
     calling = handlers_calling_the_model()
     wrong = {
-        pid: (entry["uses_llm"], pid in calling)
+        pid: (entry["dedicated_llm_pass"], pid in calling)
         for pid, entry in FROZEN["parameters"].items()
-        if entry["uses_llm"] != (pid in calling)
+        if entry["dedicated_llm_pass"] != (pid in calling)
     }
     assert not wrong, f"frozen spec disagrees with the handlers: {wrong}"
 
 
-def test_exactly_the_expected_twelve_parameters_use_a_model():
-    """Pins the AI surface area. Adding or removing a model call is a deliberate decision
-    that must update this list and the parameter workbook alongside it."""
+def test_exactly_the_expected_eighteen_parameters_run_a_dedicated_model_pass():
+    """Pins the extra AI surface area on top of universal scoring. Every entry here is a
+    second model call per scan, so the list growing is something to notice, not wave
+    through."""
     assert handlers_calling_the_model() == {
         "TECH-11",
-        "ON-03", "ON-04", "ON-07", "ON-08", "ON-09", "ON-11", "ON-18",
+        "ON-01", "ON-03", "ON-04", "ON-07", "ON-08", "ON-11", "ON-12", "ON-13", "ON-14",
+        "ON-15", "ON-18", "ON-19", "ON-20",
         "OFF-02", "OFF-09", "OFF-15", "OFF-18",
     }
 
@@ -90,12 +144,8 @@ def test_every_llm_parameter_still_scores_without_a_model():
     deterministic fallback, which shows up in source as a heuristic score computed before
     judge() is awaited -- except OFF-15, whose entire question is "what would an assistant
     cite", and which correctly returns UNKNOWN instead of inventing a number."""
-    for module in ("technical", "onpage", "offpage"):
-        source = (PARAMS / f"{module}.py").read_text(encoding="utf-8")
-        for match in re.finditer(r"\nasync def (\w+)\(spec, ctx\):(.*?)(?=\nasync def |\nHANDLERS)", source, re.S):
-            pid = match.group(1).upper().replace("_", "-")
-            body = match.group(2)
-            if "judge(" not in body or pid == "OFF-15":
-                continue
-            assert "llm_unavailable" in body, f"{pid} does not record why the model was unavailable"
-            assert body.index("score") < body.index("judge("), f"{pid} has no pre-model fallback score"
+    for pid, body in handler_bodies():
+        if "judge(" not in body or pid == "OFF-15":
+            continue
+        assert "llm_unavailable" in body, f"{pid} does not record why the model was unavailable"
+        assert body.index("score") < body.index("judge("), f"{pid} has no pre-model fallback score"

@@ -39,16 +39,17 @@ TECHNICAL = {
         "checks against a fetched file.")),
 
     "TECH-04": dict(llm=False, metric=(
-        "Scan the rendered homepage HTML for overlay markers (cookie, consent, gdpr, onetrust, cookiebot, "
+        "Scan the raw homepage HTML for overlay markers (cookie, consent, gdpr, onetrust, cookiebot, "
         "trustarc, cookieyes, modal, overlay, paywall) and for a login form or password input.\n"
-        "Score = 100 if neither is present; 70 if markers are present but at least 150 rendered words "
+        "Score = 100 if neither is present; 70 if markers are present but at least 150 words "
         "still survive; 20 otherwise. Capped at 20 when a login form is present and the page yields "
         "under 80 words.\n"
         "Confidence 0.55."),
         why=(
-        "Decided from DOM markers plus the rendered word count. The low confidence reflects that a marker "
+        "Decided from DOM markers plus the word count. The low confidence reflects that a marker "
         "in the HTML does not prove an overlay actually covers content; proving that needs visual or "
-        "viewport analysis, not a language model.")),
+        "viewport analysis, not a language model. This build runs no JavaScript, so an overlay that "
+        "only mounts on the client never reaches the HTML this inspects.")),
 
     "TECH-05": dict(llm=False, metric=(
         "Read the XML sitemap(s) discovered from robots.txt and the well-known locations. Fetch the first "
@@ -87,14 +88,17 @@ TECHNICAL = {
         why="URL scheme and meta-tag presence are read directly from the response and the DOM."),
 
     "TECH-09": dict(llm=False, metric=(
-        "For each of the first 10 pages, strip <script> and <style> from the RAW (pre-JavaScript) HTML, "
-        "strip the remaining tags, and count the words left. Compare that with the rendered word count.\n"
-        "Per-page ratio = raw words / rendered words x 100, capped at 100 per page.\n"
-        "Score = mean of the per-page capped ratios."),
+        "Always UNKNOWN in this build: this check requires comparing raw HTML against a JavaScript-"
+        "rendered copy of the page, which this build does not fetch (httpx + lxml + Crawlee only, no "
+        "browser rendering).\n"
+        "Historical formula, for when a rendered copy was available: for each of the first 10 pages, "
+        "strip <script> and <style> from the RAW HTML, strip the remaining tags, and count the words "
+        "left; per-page ratio = raw words / rendered words x 100, capped at 100 per page; score = mean "
+        "of the per-page capped ratios."),
         why=(
-        "A word count on two versions of the same document. The per-page cap matters: raw HTML routinely "
-        "carries more words than the rendered text (hidden navigation, inline JSON), so an uncapped page "
-        "can exceed 100 and conceal a genuinely JavaScript-only page inside the average.")),
+        "Not evaluated. The comparison needs two versions of the same document and this build produces "
+        "only one, so the check reports UNKNOWN rather than the meaningless 100 it would score by "
+        "comparing the raw HTML against itself.")),
 
     "TECH-10": dict(llm=False, metric=(
         "Per page, start at 100. Subtract 40 if there is no H1, or 25 if there is more than one. Subtract "
