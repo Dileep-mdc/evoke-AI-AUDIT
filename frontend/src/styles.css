@@ -342,3 +342,13 @@ tr.clickable:hover { background: #f8fafc; }
   .rail { display: none; }
   .stage { padding: 16px; }
 }
+
+/* Citations: the sources behind every score */
+.citation-cell { max-width: 220px; overflow-wrap: anywhere; font-size: 12.5px; }
+.citation-cell a, .citations a { color: #4f46e5; text-decoration: none; }
+.citation-cell a:hover, .citations a:hover { text-decoration: underline; }
+.citation-more { color: #6b7280; white-space: nowrap; }
+.citations { margin: 12px 0 16px; }
+.citations h4 { margin: 0 0 6px; font-size: 13px; }
+.citations ol { margin: 0 0 8px; padding-left: 20px; font-size: 12.5px; line-height: 1.6; overflow-wrap: anywhere; }
+.citation-detail { color: #6b7280; }

@@ -102,6 +102,46 @@ def result(
     }
 
 
+def scorable_pages(ctx) -> list:
+    """The pages a content parameter may legitimately score, and nothing else.
+
+    `ctx.pages` is the crawl's full record, which deliberately includes pages that failed:
+    parse_page() returns a Page for a timeout or a 404 so the failure is visible, and
+    detect_bot_block() marks a Cloudflare interstitial that came back as a normal 200.
+
+    Handlers were consuming that list raw and disagreeing about it. Some filtered on
+    `result.ok`, some on `word_count`, most not at all -- so a fetch failure DEFLATED ON-21
+    (a zero-word page is "thin content") while it INFLATED TECH-07 (the timed-out pages are
+    exactly the slow ones, and filtering them out left only the fast pages in the average).
+    Neither effect was recorded anywhere.
+
+    One rule, applied everywhere: a page counts if it was actually retrieved and is not a bot
+    challenge. Anything excluded here is a crawl finding, reported by the failures file and by
+    TECH's own reachability checks -- not a content finding to be folded into a content score.
+    """
+    pages = []
+    for page in getattr(ctx, "pages", None) or []:
+        outcome = getattr(page, "result", None)
+        if outcome is None or not getattr(outcome, "ok", False):
+            continue
+        if getattr(page, "blocked_reason", ""):
+            # Scored as page copy before this, so "Just a moment... please enable JavaScript"
+            # counted as the site's content on every on-page parameter.
+            continue
+        pages.append(page)
+    return pages
+
+
+def excluded_page_counts(ctx) -> dict:
+    """Why pages were left out, so a handler's evidence can say so instead of just shrinking."""
+    all_pages = getattr(ctx, "pages", None) or []
+    failed = sum(1 for p in all_pages if not getattr(getattr(p, "result", None), "ok", False))
+    blocked = sum(1 for p in all_pages
+                  if getattr(getattr(p, "result", None), "ok", False) and getattr(p, "blocked_reason", ""))
+    return {"pages_crawled": len(all_pages), "pages_excluded_fetch_failed": failed,
+            "pages_excluded_bot_blocked": blocked}
+
+
 def timed() -> float:
     return time.perf_counter()
 
@@ -308,6 +348,28 @@ _NAV_STOPWORDS = {
 }
 
 
+_TITLE_LEAD_RE = re.compile(r"^(?:(?:top|best|leading|trusted|premier|expert|#1|the|our)\s+)+")
+_TITLE_TAIL_RE = re.compile(
+    r"(?:\s+(?:for|in the|on|across|with)\s+.*$)"
+    r"|(?:\s+(?:services?|solutions?|providers?|company|companies|partner|experts?))+$"
+)
+
+
+def core_concept(title: str) -> str:
+    """The concept a service-page title names, without the SEO wrapping around it.
+
+    Titles like "Best AI Governance Consulting Services for Enterprises" were used whole as
+    the site's concepts, and ON-03, ON-04 and ON-22 then searched page copy for that exact
+    phrase -- which almost no page contains, so a site that explains AI governance on dozens
+    of pages was scored as never mentioning it. "ai governance consulting" is what a page says.
+    """
+    t = title.split("|")[0].split(" - ")[0].split(",")[0].strip().lower()
+    t = _TITLE_LEAD_RE.sub("", t)
+    while (shorter := _TITLE_TAIL_RE.sub("", t).strip(" &-:")) != t:
+        t = shorter
+    return t
+
+
 def derive_site_categories(ctx, limit: int = 10) -> list[str]:
     """The business categories/concepts this specific site covers, derived from its own
     navigation and service pages -- never a fixed, one-company keyword list, since every
@@ -315,7 +377,7 @@ def derive_site_categories(ctx, limit: int = 10) -> list[str]:
     candidates: list[str] = []
     for page in getattr(ctx, "pages", None) or []:
         if getattr(page, "page_type", None) == "service" and getattr(page, "title", ""):
-            t = page.title.split("|")[0].split(" - ")[0].strip().lower()
+            t = core_concept(page.title)
             if t and t not in _NAV_STOPWORDS and 3 <= len(t) <= 60:
                 candidates.append(t)
     homepage = getattr(ctx, "homepage", None)

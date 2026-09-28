@@ -1,7 +1,12 @@
+import logging
+import shutil
 import sqlite3
 from contextlib import contextmanager
+from pathlib import Path
 
-from .config import DB_PATH
+from .config import DATA_DIR, DB_PATH, LEGACY_DATA_DIR
+
+log = logging.getLogger("db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS scans (
@@ -105,10 +110,96 @@ def get_db():
         conn.close()
 
 
+def migrate_legacy_data_dir() -> None:
+    """Move data written by an earlier build, back when DATA_DIR was always backend/data.
+
+    Runs before the schema is touched, so the database that gets opened is the migrated one
+    rather than a fresh empty file beside it -- which is what makes the move invisible: the
+    scan history and the saved crawl output are simply still there after the upgrade.
+
+    Deliberately conservative. Nothing is overwritten (a name already present in the new
+    directory wins), and a failure is logged and swallowed rather than raised: a file that is
+    locked -- which, in a synced folder, is the expected failure -- must not stop the server
+    from starting. Whatever did not move is left where it is and retried next launch.
+    """
+    legacy = LEGACY_DATA_DIR
+    if legacy.resolve() == DATA_DIR.resolve() or not legacy.is_dir():
+        return
+    moved = _move_contents(legacy, DATA_DIR)
+    if moved:
+        log.info("Moved %d file(s) from %s to %s", moved, legacy, DATA_DIR)
+
+
+def _move_contents(src_dir: Path, dest_dir: Path) -> int:
+    """Move everything under src_dir into dest_dir, recursing into directories that already
+    exist on the other side. Returns how many files were moved.
+
+    Recursing matters, and skipping a directory that already exists would be a silent
+    data-loss bug rather than a cosmetic one: scan_output/ is created at import time by
+    scan_output.py, so by the time this runs the destination directory reliably exists and is
+    empty. Treating "it exists" as "already migrated" would strand every saved crawl in the
+    synced folder forever, while reporting success.
+    """
+    moved = 0
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for src in src_dir.iterdir():
+        # -wal and -shm are live SQLite sidecars; they belong to whichever process last had
+        # the database open and are rebuilt on demand. Carrying a half-synced pair across is
+        # how the destination gets corrupted, so they are skipped and left to expire.
+        if src.name.endswith(("-wal", "-shm", "-journal")):
+            continue
+        dest = dest_dir / src.name
+        if src.is_dir():
+            moved += _move_contents(src, dest)
+            continue
+        if dest.exists():
+            continue
+        try:
+            shutil.move(str(src), str(dest))
+            moved += 1
+        except OSError as exc:
+            log.warning("Could not move %s out of the synced folder: %s", src.name, exc)
+    return moved
+
+
 def init_db() -> None:
+    migrate_legacy_data_dir()
     with get_db() as conn:
         conn.executescript(SCHEMA)
     fail_interrupted_scans()
+
+
+def vacuum() -> None:
+    """Reclaim the space deleted rows leave behind.
+
+    SQLite never returns freed pages to the filesystem on its own; it keeps them on a
+    freelist and reuses them. On this database that reached 32% of the file, because every
+    scan writes a multi-megabyte report_json and a row per crawled page, and nothing ever
+    shrank it back. Called after a scan finishes, when the write load is over.
+
+    VACUUM cannot run inside a transaction, so this opens its own connection with autocommit
+    rather than going through get_db().
+    """
+    conn = connect()
+    try:
+        conn.isolation_level = None
+        conn.execute("VACUUM")
+    except sqlite3.Error as exc:
+        log.warning("VACUUM skipped: %s", exc)
+    finally:
+        conn.close()
+
+
+def discard_scan_pages(scan_id: str) -> int:
+    """Drop the crawled-page rows belonging to one scan, and say how many went.
+
+    Pages are saved immediately after the crawl, before any parameter is evaluated, so a scan
+    that dies during evaluation still leaves a full page table behind -- 1,064 rows, for a
+    run that produced no report at all. Those rows are unreachable (nothing renders a failed
+    scan's pages) and pure weight, so a failed scan clears its own.
+    """
+    with get_db() as conn:
+        return conn.execute("DELETE FROM pages WHERE scan_id=?", (scan_id,)).rowcount
 
 
 def fail_interrupted_scans() -> None:

@@ -30,7 +30,8 @@ from typing import Awaitable, Callable
 from ..config import JUDGEMENT_TIMEOUT, PARAMETER_CONCURRENCY, PARAMETER_TIMEOUT, REGISTRY_PATH
 from ..errors import humanize_error
 from ..llm.scoring import curate, score_parameter
-from .common import status_from_score
+from .citations import build_citations
+from .common import excluded_page_counts, status_from_score
 from .offpage import HANDLERS as OFF
 from .onpage import HANDLERS as ON
 from .spec import spec_for
@@ -62,6 +63,15 @@ async def evaluate(spec: dict, ctx) -> dict:
         }
     try:
         out = await asyncio.wait_for(handler(spec, ctx), timeout=PARAMETER_TIMEOUT)
+        # Attached centrally rather than by sixty handlers: how big the crawl was, and how
+        # much of it was unusable. Every parameter's numbers have to be read against these --
+        # "12 pages scored" means something different out of 30 than out of 1,100 -- and the
+        # workbook's "Which Pages Were Used" column is assembled from them. setdefault, so a
+        # handler that already recorded its own figure keeps it.
+        out["evidence"] = out.get("evidence") or {}
+        for key, value in excluded_page_counts(ctx).items():
+            if value:
+                out["evidence"].setdefault(key, value)
         out["evaluated_at"] = now
         return out
     except asyncio.TimeoutError:
@@ -121,6 +131,20 @@ async def apply_judgement(spec: dict, row: dict) -> dict:
     # joins the pillar average, so inventing one here would fabricate audit evidence for a
     # check that never actually ran.
     unscorable = rules_score is None or row.get("status") == "UNKNOWN"
+    # ...and it is not asked at all. It used to be, on the argument that its account of what
+    # was missing was worth having. In practice it invented one: ON-13 timed out before
+    # inspecting a single page, and the model -- shown only the words "did not complete
+    # within 60s" -- wrote "There are no visible author signals or bylines to assess" into
+    # the client report. That is a finding about a check that never ran. The deterministic
+    # summary already says what happened, truthfully, so it is what stands.
+    if unscorable:
+        evidence["scoring_method"] = "deterministic"
+        evidence["llm_skipped"] = "not sent for judgement: the rules-based pass could not evaluate this parameter"
+        row["evidence"] = evidence
+        row["score"] = None
+        row["status"] = "UNKNOWN"
+        row["confidence"] = 0.0
+        return row
     # Recorded before the call, not after, so a judgement that times out or raises still
     # shows the reader what was going to be graded -- the one column this whole pass exists
     # to produce. The rules-based summary is kept for the same reason: once the model's
@@ -160,10 +184,12 @@ async def apply_judgement(spec: dict, row: dict) -> dict:
     if judgement.explanation:
         evidence["explanation"] = judgement.explanation
         evidence["summary"] = judgement.explanation
+    if judgement.reasoning:
+        # Kept beside the explanation, not merged into it: the explanation is what the client
+        # reads, the reasoning is what an auditor re-reads when the number looks wrong.
+        evidence["model_reasoning"] = judgement.reasoning
 
-    if unscorable:
-        score = None
-    elif judgement.score is None:
+    if judgement.score is None:
         # The model declined to grade data the rules-based pass could score. Its null is not
         # allowed to stand, because an UNKNOWN row is dropped from the pillar denominators
         # and from the issues list -- so the parameter would disappear from the audit rather
@@ -194,7 +220,10 @@ async def apply_judgement(spec: dict, row: dict) -> dict:
 
 
 async def run_one(spec: dict, ctx) -> dict:
-    return await apply_judgement(spec, await evaluate(spec, ctx))
+    row = await apply_judgement(spec, await evaluate(spec, ctx))
+    # Every score carries its sources -- whichever pass, rules or model, produced the number.
+    row["evidence"] = {**(row.get("evidence") or {}), "citations": build_citations(row)}
+    return row
 
 
 async def run_all_parameters(ctx, specs: list[dict], on_each: Callable[[dict], Awaitable[None]] | None = None) -> list[dict]:

@@ -151,6 +151,56 @@ function EvidenceValue({ value, keyHint }) {
   return <span>{String(value)}</span>;
 }
 
+function citationsOf(evidence) {
+  const ev = parseEvidence(evidence);
+  return ev && Array.isArray(ev.citations) ? ev.citations : [];
+}
+
+function shortSource(source) {
+  try {
+    const u = new URL(source);
+    const path = u.pathname.length > 1 ? u.pathname : "";
+    return u.hostname.replace(/^www\./, "") + path;
+  } catch {
+    return source;
+  }
+}
+
+function SourceLink({ source }) {
+  if (!/^https?:\/\//i.test(source)) return <span>{source}</span>;
+  return (
+    <a href={source} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} title={source}>
+      {shortSource(source)}
+    </a>
+  );
+}
+
+const CITATIONS_SHOWN = 25;
+
+function CitationList({ citations }) {
+  const [all, setAll] = useState(false);
+  if (!citations.length) return null;
+  const shown = all ? citations : citations.slice(0, CITATIONS_SHOWN);
+  return (
+    <div className="citations">
+      <h4>Citations ({citations.length})</h4>
+      <ol>
+        {shown.map((c, i) => (
+          <li key={i}>
+            <SourceLink source={c.source} />
+            {c.detail && <span className="citation-detail"> — {c.detail}</span>}
+          </li>
+        ))}
+      </ol>
+      {citations.length > CITATIONS_SHOWN && (
+        <button className="btn btn-ghost" onClick={() => setAll(!all)}>
+          {all ? "Show fewer" : `Show all ${citations.length}`}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function EvidencePanel({ evidence, error }) {
   const ev = parseEvidence(evidence);
   const isPlainObject = ev && typeof ev === "object" && !Array.isArray(ev);
@@ -159,7 +209,7 @@ function EvidencePanel({ evidence, error }) {
   const rawSummary = isPlainObject && typeof ev.summary === "string" ? ev.summary : null;
   const summary = rawSummary && !duplicatesError(rawSummary) ? rawSummary : null;
   const detailRows = isPlainObject
-    ? Object.entries(ev).filter(([k, v]) => k !== "summary" && k !== "trace" && !duplicatesError(v))
+    ? Object.entries(ev).filter(([k, v]) => k !== "summary" && k !== "trace" && k !== "citations" && !duplicatesError(v))
     : [];
   const json = JSON.stringify(ev, null, 2);
   const hasEvidence = summary || detailRows.length > 0;
@@ -174,6 +224,7 @@ function EvidencePanel({ evidence, error }) {
         </div>
       )}
       {summary && <p className="evidence-lead">{summary}</p>}
+      <CitationList citations={citationsOf(evidence)} />
       {detailRows.length > 0 && (
         <dl className="ev-dl evidence-structured">
           {detailRows.map(([k, v]) => (
@@ -273,7 +324,7 @@ function Landing() {
   async function start() {
     const target = url.trim();
     if (!target) {
-      setError("Enter a public website URL to start a report.");
+      setError("Enter a website URL, or the path of a saved site folder, to start a report.");
       return;
     }
     setBusy(true);
@@ -304,7 +355,7 @@ function Landing() {
         <input
           value={url}
           onChange={(e) => setUrl(e.target.value)}
-          placeholder="Enter Your Website"
+          placeholder="Enter your website or a saved site folder path"
           onKeyDown={(e) => e.key === "Enter" && start()}
         />
         <button className="btn-hero-primary" onClick={start} disabled={busy}>
@@ -424,12 +475,14 @@ const SORT_COLUMNS = [
   { key: "score", label: "Score" },
   { key: "issues", label: "Issues" },
   { key: "recommendation", label: "Recommended Fix" },
+  { key: "citation", label: "Citation" },
 ];
 
 function sortValue(p, key) {
   if (key === "score") return p.score ?? -1;
   if (key === "issues") return issueText(p);
   if (key === "recommendation") return p.recommendation || "";
+  if (key === "citation") return citationsOf(p.evidence).length;
   if (key === "parameter_id") return p.parameter_id || "";
   return p.name || "";
 }
@@ -488,6 +541,18 @@ function ParameterTable({ title, rows, onSelect, tabs, activeTab, onTabChange })
                 <td><span className={`points ${tone}`}>{p.score == null ? "—" : `${fmt(p.score, 0)}%`}</span></td>
                 <td className="issue-cell">{issueText(p)}</td>
                 <td>{p.recommendation || "—"}</td>
+                <td className="citation-cell">
+                  {(() => {
+                    const cites = citationsOf(p.evidence);
+                    if (!cites.length) return "—";
+                    return (
+                      <>
+                        <SourceLink source={cites[0].source} />
+                        {cites.length > 1 && <span className="citation-more"> +{cites.length - 1} more</span>}
+                      </>
+                    );
+                  })()}
+                </td>
               </tr>
             );
           })}
@@ -659,7 +724,6 @@ function Dashboard() {
           <div className="page-head">
             <div>
               <h1>{report.domain}</h1>
-              <p>A snapshot of your brand’s visibility across AI platforms.</p>
             </div>
             <div className="head-actions">
               {unscoredCount > 0 && (

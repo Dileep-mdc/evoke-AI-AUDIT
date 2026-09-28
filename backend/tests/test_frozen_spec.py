@@ -39,9 +39,16 @@ def handler_bodies() -> list[tuple[str, str]]:
     return out
 
 
+# The three ways a handler can run its own classification pass. judge() is the single call;
+# judge_all()/judge_one() are the full-coverage batched forms that replaced the capped
+# samples. Matching only "judge(" silently stopped finding the on-page handlers the moment
+# they moved to batching, which would have let the frozen-spec flags drift unnoticed.
+MODEL_CALLS = ("judge(", "judge_all(", "judge_one(")
+
+
 def handlers_calling_the_model() -> set[str]:
-    """Parameter IDs whose handler really contains a judge() call, read from source."""
-    return {pid for pid, body in handler_bodies() if "judge(" in body}
+    """Parameter IDs whose handler really runs its own model pass, read from source."""
+    return {pid for pid, body in handler_bodies() if any(call in body for call in MODEL_CALLS)}
 
 
 def test_every_parameter_is_model_scored():
@@ -145,7 +152,8 @@ def test_every_llm_parameter_still_scores_without_a_model():
     judge() is awaited -- except OFF-15, whose entire question is "what would an assistant
     cite", and which correctly returns UNKNOWN instead of inventing a number."""
     for pid, body in handler_bodies():
-        if "judge(" not in body or pid == "OFF-15":
+        if not any(call in body for call in MODEL_CALLS) or pid == "OFF-15":
             continue
         assert "llm_unavailable" in body, f"{pid} does not record why the model was unavailable"
-        assert body.index("score") < body.index("judge("), f"{pid} has no pre-model fallback score"
+        first_call = min(body.index(call) for call in MODEL_CALLS if call in body)
+        assert body.index("score") < first_call, f"{pid} has no pre-model fallback score"

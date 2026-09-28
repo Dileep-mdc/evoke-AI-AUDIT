@@ -1,0 +1,91 @@
+{
+  "_comment": [
+    "Every number that decides a score, declared in one place instead of scattered as literals",
+    "across three handler modules. These are the audit's methodology: what counts as a thin",
+    "page, where the keyword-stuffing line sits, how a share of clean pages maps to points.",
+    "They cannot be removed -- a scoring engine has to encode its scoring -- but they should be",
+    "readable, reviewable and changeable without editing a handler, which is what this file is",
+    "for. Anything here can be overridden per-deployment via SCORING_RULES_PATH.",
+    "",
+    "Bands read best-first as [minimum value, points]. The first band whose threshold the",
+    "measured value meets wins; a value below every band gets `floor`."
+  ],
+
+  "bands": {
+    "question_headings": {
+      "_what": "ON-01. Share of eligible headings phrased as a buyer question.",
+      "_why": "Scoring the raw share meant full marks required ~90% of every H1-H3 to be a question, which no well-written page does, so the check could only ever FAIL. A third is the realistic target.",
+      "bands": [[0.33, 100.0], [0.20, 85.0], [0.10, 65.0], [0.03, 45.0]],
+      "floor": 25.0
+    },
+    "keyword_density": {
+      "_what": "ON-10. Peak single-term density, measured over content words only.",
+      "_why": "With function words included the most frequent token on essentially every English page was 'the' at 4-7%, above the worst band, so every site scored the floor and the check said nothing.",
+      "bands": [[0.035, 100], [0.06, 75]],
+      "floor": 45,
+      "direction": "lower_is_better"
+    },
+    "cannibalization": {
+      "_what": "ON-20. Share of the site NOT competing with itself for the same buyer question.",
+      "_why": "A fixed penalty per pair meant nine overlapping titles bottomed out the check whether the site had 20 pages or 2000. Proportional scales the penalty with the site.",
+      "bands": [[1.0, 100.0], [0.95, 90.0], [0.85, 75.0], [0.70, 60.0]],
+      "floor": 40.0
+    },
+    "dilution": {
+      "_what": "ON-21. Share of the site that is neither thin nor near-duplicate.",
+      "_why": "Same reason as cannibalization: the old absolute penalty hit its cap at eight thin pages.",
+      "bands": [[0.95, 100.0], [0.85, 85.0], [0.70, 70.0], [0.50, 55.0]],
+      "floor": 40.0
+    },
+    "text_to_code": {
+      "_what": "TECH-13. Visible text as a percentage of total HTML weight.",
+      "bands": [[25.0, 100.0], [15.0, 85.0], [10.0, 70.0], [5.0, 45.0]],
+      "floor": 20.0
+    }
+  },
+
+  "thresholds": {
+    "thin_page_words": {
+      "_what": "ON-21. Below this word count a page counts as thin.",
+      "value": 180
+    },
+    "near_duplicate_body_similarity": {
+      "_what": "ON-21. Jaccard overlap of page text above which two pages are near-duplicates.",
+      "value": 0.72
+    },
+    "competing_title_similarity": {
+      "_what": "ON-20. Jaccard overlap of titles above which two pages become candidates for competing. A candidate filter only -- the model confirms which genuinely compete.",
+      "value": 0.7
+    },
+    "min_content_words_for_density": {
+      "_what": "ON-10, TECH-11. Below this, a page has too little prose for density or section-length to mean anything.",
+      "value": 40
+    },
+    "answer_direct_words": {
+      "_what": "ON-02. An answer under a question heading must reach this length to count as a direct answer at all.",
+      "value": 20
+    },
+    "answer_ideal_words": {
+      "_what": "ON-02. The registry's own 40-60 word target for a self-contained answer.",
+      "min": 40,
+      "max": 60
+    },
+    "answer_acceptable_words": {
+      "_what": "ON-02. Partial credit band around the ideal.",
+      "min": 25,
+      "max": 90
+    },
+    "comparison_pages_for_full_credit": {
+      "_what": "ON-19. How many genuine comparison pages a site needs before the check stops penalising it.",
+      "value": 3
+    },
+    "useful_list_min_items": {
+      "_what": "ON-08. A list shorter than this is a fragment, not a procedure or criteria set.",
+      "value": 3
+    },
+    "redirect_chain_hops": {
+      "_what": "TECH-06, TECH-20. At or above this many hops a redirect counts as a chain.",
+      "value": 3
+    }
+  }
+}

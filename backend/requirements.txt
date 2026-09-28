@@ -11,4 +11,4 @@ python-dotenv
 openpyxl
 trafilatura
 lxml
-crawlee
+playwright

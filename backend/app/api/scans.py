@@ -12,8 +12,10 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from ..config import ENGINE_VERSION
+from ..crawler import snapshot
 from ..crawler.discover import crawl_site
 from ..crawler.http import normalize_url
+from ..db import discard_scan_pages, vacuum
 from ..parameters.engine import load_registry, run_all_parameters
 from ..parameters.scoring import build_report, prioritize
 from ..pdf_export import build_pdf
@@ -71,22 +73,32 @@ def _progress_payload(scan: dict) -> dict:
     }
 
 
-async def execute_scan(scan_id: str, url: str) -> None:
-    log.info("Scan %s starting %s", scan_id, url)
+async def execute_scan(scan_id: str, url: str, folder: str | None = None) -> None:
+    log.info("Scan %s starting %s%s", scan_id, url, f" from saved folder {folder}" if folder else "")
     repo.update(scan_id, status="crawling", progress_percent=2)
 
     def bump(pct: int) -> None:
         repo.update(scan_id, status="crawling", progress_percent=pct)
 
     try:
+        if folder:
+            # Every fetch this scan makes -- crawl, robots.txt, sitemap, the link checks in the
+            # parameters -- now reads the folder; see crawler/snapshot.py.
+            snapshot.activate(snapshot.open_folder(folder))
         ctx = await crawl_site(url, on_progress=bump)
         _cache_ctx(scan_id, ctx)
         repo.save_pages(scan_id, ctx.pages)
         # Both crawl artifacts are written before scoring starts, so the scraped content and
         # the failed-link list survive even if the model calls or the workbook later fail.
         crawl_path = await asyncio.to_thread(save_crawl_output, scan_id, ctx)
+        # Writing the scraped content is tens of megabytes on a large site and takes real
+        # time, so it gets its own step on the bar rather than looking like a stalled crawl.
+        repo.update(scan_id, status="crawling", progress_percent=29)
         await asyncio.to_thread(save_crawl_failures, scan_id, ctx)
-        repo.update(scan_id, status="evaluating", progress_percent=18, domain=ctx.domain, crawl_output_path=str(crawl_path))
+        # The crawl owns 2-30 of the bar and scoring owns the rest. The crawl used to be
+        # squeezed into 2-18, of which fetching, parsing and three rounds of link discovery
+        # all landed on 16 -- so the longest phase of a scan looked frozen on one number.
+        repo.update(scan_id, status="evaluating", progress_percent=30, domain=ctx.domain, crawl_output_path=str(crawl_path))
 
         counts = {"technical": 0, "on_page": 0, "off_page": 0}
         errors = 0
@@ -103,7 +115,7 @@ async def execute_scan(scan_id: str, url: str) -> None:
                 technical_completed=counts["technical"],
                 onpage_completed=counts["on_page"],
                 offpage_completed=counts["off_page"],
-                progress_percent=min(99, 18 + done / len(registry) * 80),
+                progress_percent=min(99, 30 + done / len(registry) * 69),
                 errors_count=errors,
                 status="evaluating",
             )
@@ -115,6 +127,9 @@ async def execute_scan(scan_id: str, url: str) -> None:
         repo.update(scan_id, completed_at=completed, progress_percent=100)
         scan = repo.get(scan_id)
         report = build_report(scan, results, issues)
+        # Which copy of the site was audited: the saved folder or the live web. The dashboard
+        # shows it, since scores from a snapshot describe the site as of the day it was saved.
+        report["snapshot"] = getattr(ctx, "snapshot", None) or {}
         repo.save_report(scan_id, report)
         # The workbook is an artifact of the report, not a precondition for it. Writing it
         # used to sit inside this try, so a locked file on a synced drive -- or any openpyxl
@@ -131,15 +146,35 @@ async def execute_scan(scan_id: str, url: str) -> None:
         # that sees "completed" and immediately requests the report never hits a window
         # where report_json is still empty.
         repo.update(scan_id, status="completed")
+        # The write load is over, so this is the moment to hand back the space deleted rows
+        # are still holding. Off the event loop: VACUUM rewrites the database file.
+        await asyncio.to_thread(vacuum)
     except Exception:
         log.exception("Scan %s failed", scan_id)
         repo.update(scan_id, status="error", errors_count=1)
+        # Pages are saved straight after the crawl, before any parameter runs, so a scan that
+        # dies during evaluation has already written a row per crawled page -- 1,064 of them,
+        # for a run that produced no report. Nothing can ever read them, so they go.
+        try:
+            dropped = await asyncio.to_thread(discard_scan_pages, scan_id)
+            if dropped:
+                log.info("Discarded %d page rows from failed scan %s", dropped, scan_id)
+        except Exception:
+            log.exception("Could not discard page rows for failed scan %s", scan_id)
 
 
 @router.post("/scans")
 async def create_scan(payload: ScanRequest):
     try:
-        url = normalize_url(payload.url)
+        if snapshot.looks_like_folder(payload.url):
+            # A saved copy of a site on disk (see crawler/snapshot.py): the scan audits the
+            # site that folder holds, reading its pages from the folder, not the web.
+            snap = snapshot.open_folder(payload.url)
+            url = normalize_url(f"https://{snap.host}/")
+            folder = str(snap.folder)
+        else:
+            url = normalize_url(payload.url)
+            folder = None
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     domain = urlparse(url).netloc.lower()
@@ -150,15 +185,15 @@ async def create_scan(payload: ScanRequest):
         onpage_total=SECTION_TOTALS["on_page"],
         offpage_total=SECTION_TOTALS["off_page"],
     )
-    task = asyncio.create_task(_run(scan_id, url), name=f"scan-{scan_id}")
+    task = asyncio.create_task(_run(scan_id, url, folder), name=f"scan-{scan_id}")
     _running.add(task)
     task.add_done_callback(_running.discard)
     return _progress_payload(scan)
 
 
-async def _run(scan_id: str, url: str) -> None:
+async def _run(scan_id: str, url: str, folder: str | None = None) -> None:
     try:
-        await execute_scan(scan_id, url)
+        await execute_scan(scan_id, url, folder)
     except Exception:
         log.exception("Scan %s crashed", scan_id)
         repo.update(scan_id, status="error")
@@ -246,6 +281,10 @@ async def rerun_unscored(scan_id: str):
     # the report endpoint refuses a non-completed scan, and so does this one, so the scan
     # could only be freed by restarting the server, which then marks it errored instead.
     try:
+        # A scan audited from a saved folder re-checks against the same folder.
+        folder = (getattr(ctx, "snapshot", None) or {}).get("folder")
+        if folder:
+            snapshot.activate(snapshot.open_folder(folder))
         await run_all_parameters(ctx, failed_specs, on_each)
 
         all_results = repo.parameters(scan_id)

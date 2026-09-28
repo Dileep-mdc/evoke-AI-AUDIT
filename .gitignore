@@ -31,3 +31,10 @@ Thumbs.db
 
 # LibreOffice lock files
 .~lock.*#
+
+# Saved site snapshots / scraped copies (per-customer data, regenerate with backend/snapshot_site.py)
+www.*/
+
+# Local scratch files
+Color.png
+EV caluction.xlsx

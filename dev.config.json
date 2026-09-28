@@ -1,0 +1,6 @@
+{
+  "_comment": "Single source of truth for local dev hosts and ports. Read by start.ps1 and by frontend/vite.config.js, so the launcher and the dev proxy cannot disagree — they did once, and the dashboard proxied to a backend that was not there. Any value here can be overridden per-shell with the matching environment variable (BACKEND_HOST, BACKEND_PORT, FRONTEND_PORT).",
+  "backendHost": "127.0.0.1",
+  "backendPort": 8010,
+  "frontendPort": 5174
+}

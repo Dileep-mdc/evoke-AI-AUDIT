@@ -9,7 +9,15 @@ from typing import Optional
 
 from openai import APIConnectionError, APIError, APITimeoutError, AsyncOpenAI, RateLimitError
 
-from ..config import ENABLE_LLM_SCORING, LLM_CONCURRENCY, LLM_MODEL, LLM_RETRIES, LLM_TIMEOUT, OPENAI_API_KEY
+from ..config import (
+    ENABLE_LLM_SCORING,
+    LLM_CONCURRENCY,
+    LLM_MODEL,
+    LLM_RETRIES,
+    LLM_SCORING_CONCURRENCY,
+    LLM_TIMEOUT,
+    OPENAI_API_KEY,
+)
 
 RETRY_BACKOFF_SECONDS = 0.6
 # Rate limits get their own, longer schedule. Every parameter of a scan is model-scored now,
@@ -43,6 +51,14 @@ def _rate_limit_delay(attempt: int, exc: Exception) -> float:
     return min(RATE_LIMIT_MAX_SLEEP, RATE_LIMIT_BASE_SECONDS * (2 ** attempt) * (0.5 + random.random()))
 
 _semaphore = asyncio.Semaphore(LLM_CONCURRENCY)
+# Reserved for the per-parameter scoring call so a classification fan-out cannot starve it.
+_scoring_semaphore = asyncio.Semaphore(LLM_SCORING_CONCURRENCY)
+
+
+def _lane_semaphore(lane: str) -> asyncio.Semaphore:
+    return _scoring_semaphore if lane == "score" else _semaphore
+
+
 _client: Optional[AsyncOpenAI] = None
 
 
@@ -62,13 +78,21 @@ class LLMResult:
     elapsed_ms: int = 0
 
 
-async def judge(prompt: str, *, system: str = "", json_mode: bool = True) -> LLMResult:
+async def judge(prompt: str, *, system: str = "", json_mode: bool = True, lane: str = "classify") -> LLMResult:
     """Ask the configured LLM to judge something and return its response.
 
     Mirrors crawler/http.py's fetch() shape: bounded retries with backoff on
     transient errors, a single result object the caller checks .ok on. Never
     raises -- a disabled/misconfigured/failing LLM should never crash a scan,
     only cause the caller to fall back to its existing heuristic.
+
+    `lane` picks which concurrency budget the call waits in, and the two must stay separate.
+    Classification fans out: one handler can issue ninety batched calls at once. Scoring does
+    not: it is one call per parameter, and it is the one that produces the number in the
+    report. On a shared semaphore the scoring call queued behind every outstanding
+    classification call and blew JUDGEMENT_TIMEOUT -- a measured run graded only 25 of 60
+    parameters, with 24 timing out, so the report fell back to rules-based scores and looked
+    exactly like a run with no model at all.
     """
     if not ENABLE_LLM_SCORING:
         return LLMResult(ok=False, error="LLM scoring is disabled (ENABLE_LLM_SCORING=false)")
@@ -84,7 +108,7 @@ async def judge(prompt: str, *, system: str = "", json_mode: bool = True) -> LLM
     combined = f"{system}\n\n{prompt}" if system else prompt
     messages = [{"role": "user", "content": combined}]
 
-    async with _semaphore:
+    async with _lane_semaphore(lane):
         started = time.perf_counter()
         last_error = None
         # Rate-limit retries are counted separately so a burst of 429s cannot exhaust the

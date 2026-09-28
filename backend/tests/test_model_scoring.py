@@ -50,7 +50,7 @@ def model_returns(monkeypatch):
     def install(payload: dict):
         seen: list[str] = []
 
-        async def fake_judge(prompt, *, system="", json_mode=True):
+        async def fake_judge(prompt, *, system="", json_mode=True, **kwargs):
             seen.append(prompt)
             return LLMResult(ok=True, text=json.dumps(payload), parsed=payload, elapsed_ms=7)
 
@@ -85,9 +85,53 @@ def test_the_prompt_carries_the_definition_the_metric_and_the_curated_data(model
     prompt = seen[0]
     assert "TECH-01" in prompt
     assert "WHAT THIS PARAMETER MEANS" in prompt and "HOW THE METRIC IS DEFINED" in prompt
-    assert "CURATED DATA" in prompt
-    assert "rules-based pass scored this 70.0" in prompt
+    assert "<CURATED_DATA>" in prompt and "</CURATED_DATA>" in prompt
     assert "GPTBot" in prompt, "the frozen metric for TECH-01 did not reach the prompt"
+
+
+def test_the_prompt_does_not_anchor_the_model_to_the_rules_based_score(model_returns):
+    """The rules-based number must not reach the grader.
+
+    It used to, as `REFERENCE: The rules-based pass scored this 70.0 out of 100` plus a rule
+    saying to keep it unless plainly contradicted. Measured on one real scan, 18 of the 20
+    on-page parameters then returned the rules score to the decimal -- the model was
+    ratifying, not grading. The score is still computed and still used as the fallback when
+    the model is unavailable; it just no longer travels in the prompt.
+    """
+    seen = model_returns({"score": 90, "explanation": "ok", "recommendation": None})
+    spec = next(p for p in REGISTRY if p["parameter_id"] == "TECH-01")
+
+    _run(apply_judgement(spec, _row(spec)))
+
+    prompt = seen[0]
+    assert "REFERENCE" not in prompt
+    assert "rules-based pass scored" not in prompt
+    assert "70.0" not in prompt, "the rules-based score leaked into the prompt"
+
+
+def test_the_prompt_does_not_disclose_the_pass_thresholds(model_returns):
+    """Telling a grader where the pass line sits invites scoring to the line. Status is
+    derived from the number in Python afterwards, so the model never needed the bands."""
+    seen = model_returns({"score": 90, "explanation": "ok", "recommendation": None})
+    spec = next(p for p in REGISTRY if p["parameter_id"] == "TECH-01")
+
+    _run(apply_judgement(spec, _row(spec)))
+
+    assert "SCORING BANDS" not in seen[0]
+    assert "is a pass" not in seen[0]
+
+
+def test_the_model_is_asked_to_reason_before_it_scores(model_returns):
+    """Chat models emit JSON keys in the order requested, so a score written before the
+    explanation is a number the explanation then has to justify."""
+    seen = model_returns({"score": 90, "explanation": "ok", "recommendation": None})
+    spec = next(p for p in REGISTRY if p["parameter_id"] == "TECH-01")
+
+    _run(apply_judgement(spec, _row(spec)))
+
+    shape = seen[0][seen[0].index("Return JSON"):]
+    assert shape.index("reasoning") < shape.index('"score"')
+    assert shape.index("evidence_observed") < shape.index('"score"')
 
 
 def test_every_registry_parameter_can_be_judged(model_returns):
@@ -101,7 +145,7 @@ def test_every_registry_parameter_can_be_judged(model_returns):
 
 
 def test_insufficient_data_stays_unknown_rather_than_being_invented(monkeypatch):
-    async def fake_judge(prompt, *, system="", json_mode=True):
+    async def fake_judge(prompt, *, system="", json_mode=True, **kwargs):
         return LLMResult(ok=True, text="{}", parsed={"score": None, "explanation": "No pages were reachable."}, elapsed_ms=3)
 
     monkeypatch.setattr(llm_scoring, "judge", fake_judge)
@@ -117,7 +161,7 @@ def test_insufficient_data_stays_unknown_rather_than_being_invented(monkeypatch)
 def test_the_rules_based_score_stands_in_when_the_model_is_unavailable(monkeypatch):
     """conftest disables scoring for the whole suite, so this is the path every other test
     in this repo already runs through -- it must leave a complete, honest row."""
-    async def unavailable(prompt, *, system="", json_mode=True):
+    async def unavailable(prompt, *, system="", json_mode=True, **kwargs):
         return LLMResult(ok=False, error="LLM scoring is disabled (ENABLE_LLM_SCORING=false)")
 
     monkeypatch.setattr(llm_scoring, "judge", unavailable)
@@ -133,7 +177,7 @@ def test_the_rules_based_score_stands_in_when_the_model_is_unavailable(monkeypat
 
 
 def test_a_failing_model_never_fails_the_parameter(monkeypatch):
-    async def explode(prompt, *, system="", json_mode=True):
+    async def explode(prompt, *, system="", json_mode=True, **kwargs):
         raise RuntimeError("connection reset")
 
     monkeypatch.setattr(llm_scoring, "judge", explode)
@@ -191,14 +235,16 @@ def test_the_workbook_has_a_sheet_and_a_row_per_parameter_with_the_pipeline_colu
         if ws.cell(row=r, column=1).value == "Parameter ID"
     )
     headers = [ws.cell(row=header_row, column=c).value for c in range(1, len(COLUMNS) + 1)]
-    # The order the audit actually runs in: what it is, what it means, how it is scored, the
-    # data that was graded, the verdict, then what to do about it.
-    assert headers[:10] == [
+    # The order the audit actually runs in: what it is, what it means, how it is scored, which
+    # pages it read and why not the rest, the data that was graded, the verdict, then what to
+    # do about it.
+    assert headers[:11] == [
         "Parameter ID",
         "Parameter",
         "What This Parameter Means",
         "How the Metric Is Calculated",
-        "Curated Input Data (what the model graded)",
+        "What Was Found on Your Site (the exact data scored)",
+        "Which Pages Were Used, and Why the Others Were Not",
         "Score (%)",
         "Status",
         "Scored By",
@@ -210,7 +256,11 @@ def test_the_workbook_has_a_sheet_and_a_row_per_parameter_with_the_pipeline_colu
     assert first["Parameter ID"] == REGISTRY[0]["parameter_id"]
     assert first["What This Parameter Means"].strip(), "definition column is empty"
     assert first["How the Metric Is Calculated"].strip(), "metric column is empty"
-    assert first["Curated Input Data (what the model graded)"] == '{"pages_with_faq": 2, "pages_checked": 10}'
+    # The same payload the model graded, re-presented as lines a client can read rather
+    # than the raw JSON the model was handed.
+    assert first["What Was Found on Your Site (the exact data scored)"] == (
+        "Pages with FAQ: 2\nPages checked: 10"
+    )
     assert first["Scored By"] == "AI model"
     assert first["Explanation"] == "Two of ten service pages carry an FAQ block."
 
@@ -363,7 +413,7 @@ def test_control_characters_in_scraped_text_do_not_kill_the_workbook():
     ws = load_workbook(io.BytesIO(data))["Technical"]
     hr = next(r for r in range(1, 6) if ws.cell(row=r, column=1).value == "Parameter ID")
     headers = [ws.cell(row=hr, column=c).value for c in range(1, len(COLUMNS) + 1)]
-    curated = ws.cell(row=hr + 1, column=headers.index("Curated Input Data (what the model graded)") + 1).value
+    curated = ws.cell(row=hr + 1, column=headers.index("What Was Found on Your Site (the exact data scored)") + 1).value
     assert "Bell" in curated and "form feed" in curated, "content was lost, not just sanitised"
     assert not any(ord(ch) < 32 and ch not in "\t\n\r" for ch in curated)
 
@@ -430,7 +480,7 @@ def test_a_parameter_upgraded_to_pass_drops_its_stale_remediation(model_returns)
 
 def test_curated_data_survives_a_judgement_that_times_out(monkeypatch):
     """The curated-data column is the point of the exercise; a slow model must not blank it."""
-    async def hang(prompt, *, system="", json_mode=True):
+    async def hang(prompt, *, system="", json_mode=True, **kwargs):
         await asyncio.sleep(3600)
 
     monkeypatch.setattr(llm_scoring, "judge", hang)

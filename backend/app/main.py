@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -5,7 +6,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .api.scans import router
+from .crawler.extract import shutdown_pool
+from .crawler.http import aclose_clients
 from .db import init_db
+
+# The crawler and the scoring engine report what they are doing at INFO -- which addresses
+# were unreachable, how long a discovery round took, why a render pass was skipped. Uvicorn
+# configures only its own loggers, so without this none of it reaches the console and a slow
+# scan can only be guessed at from the progress bar.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 init_db()
 
@@ -17,6 +29,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(router)
+
+
+@app.on_event("shutdown")
+async def _close_crawler_connections() -> None:
+    """Return the crawler's pooled HTTP connections on the way out.
+
+    The pool is process-wide and deliberately outlives a single scan -- that is what keeps a
+    crawl from renegotiating TLS for every page -- so something has to hand the sockets back
+    when the server stops rather than leaving them for the garbage collector.
+    """
+    await aclose_clients()
+    shutdown_pool()
 
 
 @app.get("/api/health")

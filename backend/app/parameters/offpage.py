@@ -4,21 +4,23 @@ import json
 import re
 from urllib.parse import quote_plus, unquote, urlparse
 
-from ..config import BROWSER_UA
+from ..config import (
+    BROWSER_UA,
+    DDG_HTML_ENDPOINT,
+    ENTITY_SEARCH_LIMIT,
+    REFERENCE_LANGUAGE,
+    WIKIDATA_API,
+    WIKIPEDIA_API,
+)
 from ..crawler.http import fetch
 from ..llm.client import judge
 from ..llm.prompts import SYSTEM, off02_prompt, off09_prompt, off18_prompt
 from .common import derive_site_categories, derive_site_geographies, ms_since, primary_brand, result, timed
 
 
-# Every off-page search goes through one endpoint. It was written out in full at twelve
-# separate call sites, so changing provider (or adding a key/proxy) meant twelve edits and
-# any one of them could be missed.
-DDG_HTML_ENDPOINT = "https://html.duckduckgo.com/html/"
-
-# Public read-only APIs used for entity lookups. Same reason: named once, not inline.
-WIKIDATA_API = "https://www.wikidata.org/w/api.php"
-WIKIPEDIA_API = "https://en.wikipedia.org/w/api.php"
+# The endpoints themselves now live in config.py: they are the external services this tool
+# depends on, which is deployment information rather than audit logic, and keeping them here
+# meant a provider swap or a regional mirror required editing a parameter handler.
 
 
 def _ddg_url(query: str) -> str:
@@ -26,10 +28,11 @@ def _ddg_url(query: str) -> str:
     return f"{DDG_HTML_ENDPOINT}?q={query}"
 
 
-def _wikidata_search_url(query: str, limit: int = 5, typed: bool = True) -> str:
+def _wikidata_search_url(query: str, limit: int = ENTITY_SEARCH_LIMIT, typed: bool = True) -> str:
     """Wikidata entity search for an already URL-encoded company name."""
     kind = "&type=item" if typed else ""
-    return f"{WIKIDATA_API}?action=wbsearchentities&search={query}&language=en&format=json{kind}&limit={limit}"
+    return (f"{WIKIDATA_API}?action=wbsearchentities&search={query}"
+            f"&language={REFERENCE_LANGUAGE}&format=json{kind}&limit={limit}")
 
 
 async def _ddg_html(url: str):

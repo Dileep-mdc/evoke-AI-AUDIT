@@ -179,11 +179,48 @@ def test_tech21_scores_when_hreflang_is_actually_present():
 
 
 def test_tech09_is_unknown_without_a_rendered_copy():
-    """This build has no JavaScript-rendering pass, so TECH-09 -- raw HTML vs. rendered word
-    count -- has nothing to compare and must report UNKNOWN rather than a meaningless score."""
+    """With no browser available the crawl fetches no rendered copy, so TECH-09 has nothing to
+    compare and must report UNKNOWN rather than a meaningless score."""
     page = _page("https://x/a", html="<p>hello</p>", words=100)
-    out = _run(tech_09(SPECS["TECH-09"], _ctx([page])))
+    ctx = _ctx([page])
+    ctx.render = {"decision": "unavailable", "reason": "playwright is not installed"}
+    out = _run(tech_09(SPECS["TECH-09"], ctx))
     assert out["score"] is None and out["status"] == "UNKNOWN"
+
+
+def test_tech09_scores_100_when_the_probe_shows_the_site_needs_no_rendering():
+    """A server-rendered site is the PASS case, not an unmeasured one: the probe compared the
+    two copies, found them equivalent, and that single comparison is the finding."""
+    ctx = _ctx([_page("https://x/a", html="<p>hello</p>", words=100)])
+    ctx.render = {
+        "decision": "not_needed",
+        "probe_url": "https://x/",
+        "reason": "the rendered homepage carried 410 words against 400 in the raw HTML",
+        "probe": {"raw_words": 400, "rendered_words": 410, "gained_words": 10, "gain_ratio": 0.025},
+    }
+    out = _run(tech_09(SPECS["TECH-09"], ctx))
+    assert out["score"] == 100
+
+
+def test_tech09_scores_the_share_of_text_that_only_exists_after_javascript():
+    """A shell that renders to 1000 words from 100 hides 90% of the page from a crawler that
+    does not execute JavaScript, and must score 10 rather than being reported as healthy."""
+    page = _page("https://x/a", html="<div id='root'></div>", words=1000)
+    page.render = {
+        "content_source": "rendered",
+        "applied": True,
+        "raw_words": 100,
+        "rendered_words": 1000,
+        "gained_words": 900,
+        "gain_ratio": 9.0,
+        "raw_headings": 0,
+        "rendered_headings": 12,
+    }
+    ctx = _ctx([page])
+    ctx.render = {"decision": "applied", "budget": 40}
+    out = _run(tech_09(SPECS["TECH-09"], ctx))
+    assert out["score"] == 10
+    assert out["evidence"]["compared_pages"] == 1
 
 
 def test_tech17_faqpage_does_not_satisfy_every_page_type():
