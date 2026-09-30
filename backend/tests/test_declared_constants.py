@@ -2,7 +2,7 @@
 
 Two different kinds of constant used to sit inline, and both cost something real:
 
-  * Third-party endpoints (DuckDuckGo, Wikidata, Wikipedia) lived in offpage.py, so the full
+  * Third-party endpoints (Google search, Wikidata, Wikipedia) lived in offpage.py, so the full
     set of external services this tool contacts could only be found by grepping, and pointing
     at a mirror or a proxy meant editing a parameter handler.
   * Scoring bands and thresholds -- `word_count < 180`, `(0.035, 100)`, `near_duplicate_pairs
@@ -23,7 +23,7 @@ from app import config
 from app.parameters import rules
 
 PARAMS = Path(__file__).resolve().parents[1] / "app" / "parameters"
-HANDLER_FILES = ("onpage.py", "technical.py", "offpage.py")
+HANDLER_FILES = ("onpage.py", "technical.py", "offpage.py", "offpage_agents.py", "offpage_tools.py", "offpage_scoring.py")
 
 
 def _code_lines(name: str):
@@ -47,7 +47,7 @@ def test_no_third_party_endpoint_is_hardcoded_in_a_handler():
 
 def test_the_endpoints_are_configurable():
     """A deployment must be able to point at a mirror or a proxy without a fork."""
-    for name in ("DDG_HTML_ENDPOINT", "WIKIDATA_API", "WIKIPEDIA_API"):
+    for name in ("GOOGLE_SEARCH_ENDPOINT", "WIKIDATA_API", "WIKIPEDIA_API"):
         assert getattr(config, name).startswith("http"), name
 
 

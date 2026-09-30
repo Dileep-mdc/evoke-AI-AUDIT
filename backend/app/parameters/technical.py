@@ -177,6 +177,19 @@ async def tech_07(spec, ctx):
     return result(spec, score=score, evidence={"pages_measured": len(pages), "avg_latency_ms": round(avg_latency), "avg_page_bytes": round(avg_size), "note": "Latency/weight proxy -- no Lighthouse LCP/INP/CLS run is wired into this build."}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.4)
 
 
+# A fixed layout width of 1000px or more declared as a CSS rule (`min-width: 1200px`), which
+# forces horizontal scrolling on a phone. The "(" guard skips media queries such as
+# `@media (min-width:1200px)`: those are responsive breakpoints, the opposite signal. The
+# old test -- "min-width:" and "1200px" anywhere in the HTML -- fired on any responsive
+# theme, because `@media (min-width:922px)` and `max-width:1200px` satisfy it together.
+_FIXED_MIN_WIDTH = re.compile(r"(?<![\w-])min-width\s*:\s*(?:[1-9]\d{3,})px", re.I)
+_MEDIA_CONDITION = re.compile(r"\(\s*(?:min|max)-width\s*:[^)]*\)", re.I)
+
+
+def has_fixed_width_layout(html: str) -> bool:
+    return bool(_FIXED_MIN_WIDTH.search(_MEDIA_CONDITION.sub("", html or "")))
+
+
 async def tech_08(spec, ctx):
     t = timed()
     home = ctx.homepage
@@ -188,12 +201,12 @@ async def tech_08(spec, ctx):
     if home.soup:
         vp = home.soup.find("meta", attrs={"name": re.compile("viewport", re.I)})
         viewport = bool(vp and "width" in (vp.get("content") or "").lower())
-        overflow = "min-width:" in (home.result.text or "") and "1200px" in (home.result.text or "")
+        overflow = has_fixed_width_layout(home.result.text or "")
     score = (50 if https else 0) + (50 if viewport else 0)
     if overflow:
         score = min(score, 80)
     rec = "Serve HTTPS and include a mobile viewport meta tag." if score < 90 else None
-    return result(spec, score=score, evidence={"final_url": home.result.final_url, "https": https, "viewport": viewport}, recommendation=rec, checked=home.result.final_url, duration_ms=ms_since(t))
+    return result(spec, score=score, evidence={"final_url": home.result.final_url, "https": https, "viewport": viewport, "fixed_width_layout": overflow}, recommendation=rec, checked=home.result.final_url, duration_ms=ms_since(t))
 
 
 async def tech_09(spec, ctx):
@@ -254,7 +267,7 @@ async def tech_09(spec, ctx):
     if not rows:
         # No rendered copy exists to compare against: rendering was switched off, Playwright
         # was not installed, or the browser could not be launched. UNKNOWN rather than a
-        # guess, and not_applicable so "re-check unscored" does not re-run a check whose
+        # guess, and not_applicable so the scan's automatic retry does not re-run a check whose
         # missing input is the crawl, not the model -- re-running it inside this scan cannot
         # produce a rendered copy that was never fetched.
         reason = render.get("reason") or "no JavaScript-rendered copy of any page was fetched."
@@ -454,11 +467,51 @@ async def tech_15(spec, ctx):
     return result(spec, score=score, evidence={"pages_with_dates": found, "samples": rows}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
 
 
+def _organization_nodes(obj, out: list) -> list:
+    """Every Organization node in the JSON-LD, including nested ones such as a Service's
+    `provider` or an Article's `publisher` -- flatten_schema() only follows @graph."""
+    if isinstance(obj, dict):
+        if "Organization" in str(obj.get("@type")) or "Corporation" in str(obj.get("@type")):
+            out.append(obj)
+        for value in obj.values():
+            _organization_nodes(value, out)
+    elif isinstance(obj, list):
+        for value in obj:
+            _organization_nodes(value, out)
+    return out
+
+
+def _homepage_organization(blocks: list) -> dict | None:
+    """The site's own Organization, merged across every homepage node that describes it.
+
+    A site often states itself in pieces -- a Yoast @graph node with name, logo and sameAs,
+    and a Service `provider` repeating the name with url and contactPoint. Reading only the
+    first node scored the fields the site does publish as missing. Nodes are the same
+    organization when they share the first node's @id or its name.
+    """
+    nodes: list = []
+    for block in blocks:
+        if block.get("ok"):
+            _organization_nodes(block.get("data"), nodes)
+    if not nodes:
+        return None
+    first = nodes[0]
+    ident = first.get("@id")
+    name = str(first.get("name") or "").strip().lower()
+    merged: dict = {}
+    for node in nodes:
+        same = (ident and node.get("@id") == ident) or (name and str(node.get("name") or "").strip().lower() == name)
+        if node is first or same:
+            for key, value in node.items():
+                if value and not merged.get(key):
+                    merged[key] = value
+    return merged
+
+
 async def tech_16(spec, ctx):
     t = timed()
     home = ctx.homepage
-    items = flatten_schema(home.schema_blocks) if home else []
-    org = next((i for i in items if "Organization" in str(i.get("@type"))), None)
+    org = _homepage_organization(home.schema_blocks) if home else None
     expected = ["name", "url", "logo", "sameAs"]
     present = [f for f in expected if org and org.get(f)]
     extra = []

@@ -1,7 +1,7 @@
 {
   "freeze_version": "1.0.0",
   "frozen_at": "2026-09-17T11:04:14.659457+00:00",
-  "note": "Frozen parameter logic. Each entry describes what backend/app/parameters/*.py actually does. Every parameter is scored by the model from its curated data; `dedicated_llm_pass` marks the handlers that additionally run their own classification pass before scoring, and tools/build_parameter_workbook.py re-validates that flag against the handler source so it cannot drift.",
+  "note": "Frozen parameter logic. Each entry describes what backend/app/parameters/*.py actually does. Every parameter is scored by the model from its curated data; `dedicated_llm_pass` marks the handlers that additionally run their own classification pass before scoring, and backend/tests/test_frozen_spec.py checks that flag against the handler source so it cannot drift.",
   "parameters": {
     "TECH-01": {
       "name": "AI crawler permissions",
@@ -103,8 +103,8 @@
       "uses_llm": true,
       "dedicated_llm_pass": false,
       "definition": "Whether the site is served over HTTPS and declares a mobile viewport. Both are baseline trust and accessibility signals, and an insecure or non-responsive page is discounted by every major crawler.",
-      "metric_brief": "50 points if the homepage's final URL is HTTPS, plus 50 if a viewport meta tag containing width is present. Capped at 80 when the HTML carries a fixed-width layout signal, a weak indication the page may overflow on mobile.",
-      "metric": "Score = 50 if the homepage final URL is https, + 50 if a viewport meta tag containing \"width\" is present.\nCapped at 80 if the HTML contains both \"min-width:\" and \"1200px\", a weak signal of a fixed-width layout that may overflow on mobile.",
+      "metric_brief": "50 points if the homepage's final URL is HTTPS, plus 50 if a viewport meta tag containing width is present. Capped at 80 when the homepage CSS declares a fixed layout width of 1000px or more, a weak indication the page may overflow on mobile.",
+      "metric": "Score = 50 if the homepage final URL is https, + 50 if a viewport meta tag containing \"width\" is present.\nCapped at 80 if the homepage HTML declares a fixed layout width of 1000px or more as a CSS rule (e.g. \"min-width: 1200px\"), which forces horizontal scrolling on a phone. Media-query breakpoints such as \"@media (min-width: 1200px)\" are responsive and are not counted.",
       "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. URL scheme and meta-tag presence are read directly from the response and the DOM."
     },
     "TECH-09": {
@@ -207,8 +207,8 @@
       "uses_llm": true,
       "dedicated_llm_pass": false,
       "definition": "Whether the homepage carries Organization schema naming the company, its logo, contact details and official profiles. This is the record that lets an assistant resolve the site to a real-world entity rather than treat it as loose text.",
-      "metric_brief": "Find an Organization node in the homepage JSON-LD and check for name, url, logo and sameAs, with address or contact fields as a bonus group. Score is the share of the four expected fields x 80, plus 20 for any address or contact field. 0 if no Organization node exists.",
-      "metric": "Find an Organization node in the homepage JSON-LD. Expected fields are name, url, logo and sameAs; address/location and contactPoint/email/telephone count as a bonus group.\nScore = (expected fields present / 4) x 80 + 20 if any address or contact field is present.\nScore 0 if no Organization node exists.",
+      "metric_brief": "Find the site's Organization in the homepage JSON-LD (merging every node that describes it, nested ones included) and check for name, url, logo and sameAs, with address or contact fields as a bonus group. Score is the share of the four expected fields x 80, plus 20 for any address or contact field. 0 if no Organization node exists.",
+      "metric": "Find the site's Organization in the homepage JSON-LD, merging every Organization node that shares the first one's @id or name, including nested ones such as a Service provider or Article publisher. Expected fields are name, url, logo and sameAs; address/location and contactPoint/email/telephone count as a bonus group.\nScore = (expected fields present / 4) x 80 + 20 if any address or contact field is present.\nScore 0 if no Organization node exists.",
       "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. Checking for named fields in parsed JSON-LD is exact."
     },
     "TECH-17": {
@@ -354,7 +354,7 @@
       "metric": "Identify service and solution pages (page type service or home, or a URL containing service/solution). A page satisfies the check if it has a heading matching FAQ / frequently asked, or carries FAQPage schema.\nScore = qualifying pages / service pages x 100.\nUNKNOWN when the site has no service or solution pages, since there is nothing the check applies to.",
       "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. Heading regex and schema type presence are exact.\nThe UNKNOWN path replaces a fallback that graded EVERY crawled page when no service page was found, which demanded an FAQ section on contact and careers pages too."
     },
-    "ON-5.1": {
+    "ON-06": {
       "name": "FAQ schema validity and answer consistency",
       "section": "on_page",
       "weight": 1.0,
@@ -393,7 +393,7 @@
       "metric": "Collect content lists - <ul>/<ol> with 2 or more items that are not inside <nav>, <header> or <footer>, so repeated menus are excluded.\nHeuristic baseline: a list is useful if it has 3 or more items and mentions step/how/benefit/includ/deliver/process.\nLLM pass (authoritative when available): up to 30 lists go to the model, which judges whether each is genuinely useful for answering a question rather than decorative filler.\nScore = useful lists / lists assessed x 100.   Score 35 if no content lists exist.",
       "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: yes. YES. Usefulness of a list is a reading judgment. The keyword test only recognises a list that happens to contain one of six words, so it misses a genuine specification or evaluation-criteria list written without them."
     },
-    "ON-10": {
+    "ON-09": {
       "name": "Keyword stuffing / unnatural repetition",
       "section": "on_page",
       "weight": 1.0,
@@ -406,7 +406,7 @@
       "metric": "Peak single CONTENT-word density per page (function words removed), averaged across pages, banded:\n   <3.5% -> 100,  <6% -> 75,  else 45\nUNKNOWN if no page has at least 40 content words.",
       "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. NO, deliberately. Keyword stuffing is a measurable statistical property, so the check is kept fully deterministic and reproducible: it cannot drift with model behaviour.\nThe stopword filter is what makes it work at all. Counting function words made \"the\" the peak term on essentially every English page at 4-7%, which sat above the worst band - so every site scored the same floor and the check reported nothing."
     },
-    "ON-11": {
+    "ON-10": {
       "name": "Content depth and completeness",
       "section": "on_page",
       "weight": 1.0,
@@ -419,7 +419,7 @@
       "metric": "The rubric is 8 points a complete service page should cover: problem/need, approach or methodology, what is included, outcomes or benefits, who it is for, pricing or commercial model, proof, and a clear next step.\nHeuristic baseline: keyword presence per rubric point.\nLLM pass (authoritative when available): excerpts from a page-type-spread sample of 12 pages go to the model, which counts how many rubric points each page ACTUALLY covers. The denominator is unchanged - the same pages, out of the same 8 points.\nScore = mean(points covered / 8) x 100.",
       "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: yes. YES. Whether a page really covers \"outcomes\" or \"proof\" is comprehension, not keyword presence. A case study that describes a measured result covers \"outcomes\" without using the word; a page with a \"Benefits\" heading and no substance does not."
     },
-    "ON-12": {
+    "ON-11": {
       "name": "Original, citable data point on major pages",
       "section": "on_page",
       "weight": 1.0,
@@ -432,7 +432,7 @@
       "metric": "Major pages are home, service, case-study and about pages (not every blog post).\nA statistic is a percentage, an N+ figure, a currency amount, a multiplier (3x), a thousands-separated number, or a scaled figure (2.5 million). Bare four-digit years are explicitly excluded.\nHeuristic baseline: Score = major pages carrying at least one statistic / major pages x 100.\nLLM pass (authoritative when available): up to 24 major pages that carry a statistic go to the model with their figures and an excerpt, and it decides whether at least one of them is ORIGINAL to this company rather than quoted off a third party.\nScore = (major pages with a statistic / major pages) x (pages judged original / pages assessed) x 100, so the denominator stays every major page and only the numerator moves.",
       "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: yes. YES. The pattern establishes that a statistic is PRESENT; the parameter asks for an ORIGINAL, citable one. A figure quoted off an analyst firm satisfies the regex and fails the parameter, and telling the two apart means reading the sentence around the number.\nThe pattern itself stays deterministic and is the other half of the fix: the previous rule matched any 2+ digit number, so a copyright year, street number or phone fragment satisfied \"has an original statistic\"."
     },
-    "ON-13": {
+    "ON-12": {
       "name": "Named author with role, credentials and real profile",
       "section": "on_page",
       "weight": 1.0,
@@ -445,7 +445,7 @@
       "metric": "Collect visible [rel=author], .author or .byline elements and Person nodes in JSON-LD across the crawl, capturing the byline TEXT rather than only the fact that an element matched.\nHeuristic baseline: Score = 80 if any author signal exists anywhere, else 30.\nLLM pass (authoritative when available): up to 20 bylines go to the model, which decides for each whether it names a specific real person - not a company, and not a generic label such as \"Admin\" or \"Editorial Team\" - and whether it states that person's role or credentials.\nScore = named people / assessed x 50 + named people who also state a role / assessed x 50, floored at 30: markup that names nobody is no worse than no markup at all.",
       "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: yes. YES. The selector proves a byline element exists, which is not what the parameter asks for. \"Posted by Admin\" and \"Dr Jane Roe, Principal Data Engineer\" both match it and are not remotely the same expertise signal; separating them means reading the text.\nKnown limitation that remains: the linked profile is still not fetched to confirm the person is real and reachable. That is a data-collection gap, not a judgment a model can close."
     },
-    "ON-14": {
+    "ON-13": {
       "name": "Named clients, quantified outcomes, deployment detail",
       "section": "on_page",
       "weight": 1.0,
@@ -458,7 +458,7 @@
       "metric": "Heuristic baseline, per page: 25 if the copy mentions a client/customer/partner, + 30 if it contains a quantified figure, + 25 if it describes deployment (deploy/implementation/production/rolled out), + 20 bonus when both a client mention and a figure are present. Score = mean across pages.\nLLM pass (authoritative when available): a page-type-spread sample of 20 pages goes to the model, which judges the same three signals by reading them - does the page NAME a specific client organisation, is the outcome genuinely quantified, is deployment actually described.\nScore = mean of the same 25/30/25/+20 rubric applied to the model's verdicts, so the rubric is unchanged and only the reading of each signal improves.",
       "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: yes. YES. The regex cannot distinguish a NAMED client from the generic word \"client\", which is precisely what the parameter asks for, and it counts any two-digit number as a quantified outcome - so a phone number or a street number scores the same as a measured result."
     },
-    "ON-15": {
+    "ON-14": {
       "name": "Claims sourced and dated to a primary source",
       "section": "on_page",
       "weight": 1.0,
@@ -467,11 +467,11 @@
       "uses_llm": true,
       "dedicated_llm_pass": true,
       "definition": "Whether factual claims sit next to a citation. An unsourced statistic is a claim an assistant has no reason to repeat. Without the model the check establishes only that something source-like sits near the claim, not that a reader could check it.",
-      "metric_brief": "A claim is a sentence of more than 6 words containing a statistic, using the ON-12 pattern with years excluded. The heuristic counts a claim as sourced on nearby link anchor text or the words source, according to, or report; when available the model reads up to 24 claims and decides which are attributed to a source a reader could actually check. 35 when no claims are found.",
-      "metric": "A claim is a sentence of more than 6 words containing a statistic (same pattern as ON-12, years excluded).\nHeuristic baseline: a claim counts as sourced if the sentence contains link anchor text from that page, or the words source / according to / report. Score = sourced claims / claims x 100.\nLLM pass (authoritative when available): up to 24 claims go to the model together with any adjacent link anchor text, and it decides whether each is attributed to a source a reader could actually check - a named organisation, publication, study or dated report.\nScore = attributed claims / claims assessed x 100.   Score 35 if no claims were found.",
+      "metric_brief": "A claim is a sentence of more than 6 words containing a statistic, using the ON-11 pattern with years excluded. The heuristic counts a claim as sourced on nearby link anchor text or the words source, according to, or report; when available the model reads up to 24 claims and decides which are attributed to a source a reader could actually check. 35 when no claims are found.",
+      "metric": "A claim is a sentence of more than 6 words containing a statistic (same pattern as ON-11, years excluded).\nHeuristic baseline: a claim counts as sourced if the sentence contains link anchor text from that page, or the words source / according to / report. Score = sourced claims / claims x 100.\nLLM pass (authoritative when available): up to 24 claims go to the model together with any adjacent link anchor text, and it decides whether each is attributed to a source a reader could actually check - a named organisation, publication, study or dated report.\nScore = attributed claims / claims assessed x 100.   Score 35 if no claims were found.",
       "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: yes. YES. The regex establishes only that something source-LIKE sits near the claim: the bare word \"report\" anywhere in the sentence satisfies it, as does a link whose anchor text happens to appear in the text. Whether the source is identifiable and checkable - which is the parameter - requires reading the sentence."
     },
-    "ON-17": {
+    "ON-15": {
       "name": "Last substantive update within topic shelf life",
       "section": "on_page",
       "weight": 1.0,
@@ -484,7 +484,7 @@
       "metric": "Score = 50 + (pages exposing a published or modified date / pages) x 50.\nConfidence 0.6.",
       "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. Date metadata presence is exact.\nKnown limitation: the parameter asks for updates WITHIN TOPIC SHELF LIFE, and no age comparison is made at all - a page dated 2009 scores exactly like one dated last week. Closing that needs date arithmetic plus a per-topic shelf-life judgment, not just presence."
     },
-    "ON-18": {
+    "ON-16": {
       "name": "Buying-journey coverage across discovery to decision",
       "section": "on_page",
       "weight": 1.0,
@@ -497,7 +497,7 @@
       "metric": "The six buyer-journey stages are awareness, qualification, comparison, objection, trust and decision.\nHeuristic baseline: keyword matching over each page title, opening text and URL.\nLLM pass (authoritative when available): the titles and URLs of a page-type-spread sample of 60 pages go to the model, which decides which of the six stages the site has content for.\nScore = stages covered / 6 x 100.",
       "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: yes. YES. What stage a page serves is a judgment about purpose. A pricing page aids comparison whether or not it contains the word \"vs\"; a security page handles objections without using the word \"objection\"."
     },
-    "ON-19": {
+    "ON-17": {
       "name": "Best X for Y and X vs Y pages per industry/market",
       "section": "on_page",
       "weight": 1.0,
@@ -510,7 +510,7 @@
       "metric": "Heuristic baseline: match each page URL and title against best ... for / vs / versus / alternative.\nLLM pass (authoritative when available): the titles and URLs of a page-type-spread sample of 30 pages go to the model, which decides which are genuinely built to answer a high-intent comparison query rather than merely containing the words.\nScore = 80 if 3 or more such pages are found; 45 if at least one; else 15.",
       "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: yes. YES. The token match both over- and under-selects, and it is the whole measurement. A blog post titled \"Docker vs Podman\" matches and is not a buyer comparison page; \"Choosing an ERP for manufacturers\" is one and matches nothing. Which pages serve a high-intent comparison query is a judgment about purpose.\nKnown limitation that remains: this counts whether such pages EXIST, not whether they cover the industries and markets that matter to this business - that needs a target list the audit is not given."
     },
-    "ON-20": {
+    "ON-18": {
       "name": "No two pages competing for the same question (cannibalization)",
       "section": "on_page",
       "weight": 1.0,
@@ -523,7 +523,7 @@
       "metric": "Compare page titles as token sets (4+ character tokens) using Jaccard similarity. Two pages are CANDIDATES to compete when similarity >= 0.7 and the titles are not identical strings.\nComparison uses an exact prefix filter, not all pairs, so the result is identical to comparing every pair but runs in seconds at the 2500-page crawl ceiling.\nLLM pass (authoritative when available): up to 20 candidate pairs go to the model, which confirms which of them really answer the same buyer question. Unconfirmed pairs stop counting against the site; candidates past the sample keep their heuristic verdict rather than being silently dropped.\nClean share = 1 - (pages in a competing pair / pages compared), then banded:\n   100% -> 100,  >=95% -> 90,  >=85% -> 75,  >=70% -> 60,  else 40\nUNKNOWN if no page has a title.",
       "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: yes. YES. Set similarity is exact, but it is a CANDIDATE FILTER, not the finding. A service page and the case study about that service share most of their tokens without competing, and so does the same service written for two different industries. Whether two pages really compete for one buyer question is a judgment the similarity score cannot make, and it sets the whole penalty.\nThe model only ever narrows the candidate set, so the check cannot invent cannibalisation that the deterministic filter did not find.\nBanding by share rather than a flat penalty per pair stays: 12 points per pair meant nine overlapping titles bottomed out the check whether the site had 20 pages or 2000."
     },
-    "ON-21": {
+    "ON-19": {
       "name": "No thin or near-duplicate pages diluting the topic",
       "section": "on_page",
       "weight": 1.0,
@@ -532,11 +532,11 @@
       "uses_llm": true,
       "dedicated_llm_pass": false,
       "definition": "Whether the site carries pages too thin or too similar to stand on their own. They dilute the topical signal of the pages that do deserve to be cited.",
-      "metric_brief": "Thin pages are non-utility pages under 180 words; near-duplicates are pages whose first 400 characters overlap at Jaccard 0.72 or above, found with the same prefix filter as ON-20. The clean share is banded into five tiers. UNKNOWN when there are no content pages.",
-      "metric": "Thin pages are non-utility pages under 180 words. Near-duplicates are pages whose first 400 characters overlap at Jaccard >= 0.72, found with the same exact prefix filter as ON-20.\nClean share = 1 - (pages that are thin or duplicated / pages assessed), then banded:\n   >=95% -> 100,  >=85% -> 85,  >=70% -> 70,  >=50% -> 55,  else 40\nUNKNOWN if there are no content pages.",
+      "metric_brief": "Thin pages are non-utility pages under 180 words; near-duplicates are pages whose first 400 characters overlap at Jaccard 0.72 or above, found with the same prefix filter as ON-18. The clean share is banded into five tiers. UNKNOWN when there are no content pages.",
+      "metric": "Thin pages are non-utility pages under 180 words. Near-duplicates are pages whose first 400 characters overlap at Jaccard >= 0.72, found with the same exact prefix filter as ON-18.\nClean share = 1 - (pages that are thin or duplicated / pages assessed), then banded:\n   >=95% -> 100,  >=85% -> 85,  >=70% -> 70,  >=50% -> 55,  else 40\nUNKNOWN if there are no content pages.",
       "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. NO. Word counts and set similarity are exact.\nScoring by share is the fix: the old absolute penalty (8 points per thin page, 10 per duplicate pair) hit its cap at eight thin pages, so a 2000-page site with eight thin pages scored identically to a 10-page site that was almost entirely thin."
     },
-    "ON-22": {
+    "ON-20": {
       "name": "Brand named alongside category, industry and geography",
       "section": "on_page",
       "weight": 1.0,
@@ -550,32 +550,19 @@
       "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. Term presence checked against vocabularies derived from the site itself is deterministic, and deriving them per scan keeps the check valid for any business rather than hard-coding one company terms.\nKnown limitation: co-occurrence anywhere on the page is weaker than the parameter intent, which is the brand named TOGETHER WITH its category and geography in the same statement."
     },
     "OFF-01": {
-      "name": "Wikidata entry present and accurate",
+      "name": "Wikidata/Wikipedia entry present",
       "section": "off_page",
       "weight": 1.0,
       "pass_threshold": 90,
       "partial_threshold": 60,
       "uses_llm": true,
       "dedicated_llm_pass": false,
-      "definition": "Whether the company exists as a structured entity in Wikidata. Wikidata is a primary source for entity resolution: it is how an assistant confirms the company is a real, distinct organisation rather than a name on a page.",
-      "metric_brief": "Query the Wikidata search API for the company name and pick the hit whose label or description contains the brand term or an organisation word. 0 with no hits; otherwise 70 base, plus 20 if the brand appears in the label and 10 if the entity has a description. UNKNOWN if the API is unreachable.",
-      "metric": "Query the Wikidata wbsearchentities API with the company name. Pick the hit whose label or description contains the brand term or an organisation word (company, business, corporation, firm ...); otherwise fall back to the first hit.\nScore = 0 if there are no hits at all; else 70 base, +20 if the brand appears in the entity label, +10 if the entity has a description. Capped at 100.\nUNKNOWN if the Wikidata API is unreachable.",
-      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. NO. The response is structured JSON with explicit label and description fields, so matching is a direct field comparison.\nThe registry previously declared this AI-assisted; no model call was ever wired. The registry now matches the code. Entity disambiguation here is simpler than in OFF-02 because Wikidata returns an explicit entity type."
+      "definition": "Whether the company has a Wikidata entry and a Wikipedia article. These are the records AI assistants use to recognise a company as a real-world entity, and reference sources carry disproportionate weight because assistants treat them as corroboration rather than marketing.",
+      "metric_brief": "Yes/no presence check on the company name: 100 when the company is on both Wikidata (an entry whose label carries the brand) and Wikipedia (an article whose title carries the brand), 0 when either is missing. No page data is fetched and no model is asked.",
+      "metric": "Search Wikidata (wbsearchentities) and Wikipedia (search API) for the company name. Nothing else is fetched and no model is asked.\nOn Wikidata = a search result whose label contains the brand term. On Wikipedia = a search result whose title contains the brand term.\nScore = 100 when the company is on both, 0 when either is missing.\nUNKNOWN only when a source that could still decide the result is unreachable (one confirmed absence already gives 0).\nName fallback: when a search for the full company name returns nothing, it is repeated once with the trailing legal form removed (plc, Inc, Ltd, LLC, Corp, GmbH, Private Limited ...), since directories list the trading name. A failed search is not retried.",
+      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. Presence is read from the search result names; the check is yes or no."
     },
     "OFF-02": {
-      "name": "Wikipedia or comparable reference source",
-      "section": "off_page",
-      "weight": 1.0,
-      "pass_threshold": 90,
-      "partial_threshold": 60,
-      "uses_llm": true,
-      "dedicated_llm_pass": true,
-      "definition": "Whether an independent reference page describes the company. Reference sources carry disproportionate weight because assistants treat them as corroboration rather than marketing.",
-      "metric_brief": "Query the Wikipedia search API. The heuristic scores 80 when a result title contains the company's first word, else 20. When available the model decides whether any result is genuinely about this company rather than a same-named one or a disambiguation page, and rates entity accuracy and source authority. UNKNOWN if the API is unreachable.",
-      "metric": "Query the Wikipedia search API with the company name.\nHeuristic baseline: 80 if a result title contains the company first word, else 20.\nLLM pass (authoritative when available): the model decides whether any result is genuinely a reference page about THIS specific company rather than a different company or a disambiguation page, and rates entity accuracy and source authority 0-100.\nScore = 50 + source authority x 0.3 + entity accuracy x 0.2 when the page is about the company; 20 when it is not. Capped at 100.\nUNKNOWN if the Wikipedia API is unreachable.",
-      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: yes. YES. Telling a page genuinely about this company from a same-named company, a disambiguation page or an unrelated topic is exactly what substring matching gets wrong, and it flips the score between 80 and 20."
-    },
-    "OFF-03": {
       "name": "Google Knowledge Panel presence and consistency",
       "section": "off_page",
       "weight": 1.0,
@@ -583,38 +570,25 @@
       "partial_threshold": 60,
       "uses_llm": true,
       "dedicated_llm_pass": false,
-      "definition": "Whether the company has a knowledge-graph entity behind search. The Google Knowledge Panel itself cannot be scraped reliably, so a confidently brand-matched Wikidata entity stands in as a proxy signal and confidence is held at 0.4.",
-      "metric_brief": "Reuse the Wikidata entity resolved for OFF-01. UNKNOWN when no entity confidently matches the brand or the API is unreachable; otherwise 50 base, plus 30 if the entity has a description and 20 if the brand appears in its label.",
-      "metric": "Google Knowledge Panel UI cannot be scraped reliably, so a confidently brand-matched Wikidata entity is used as the proxy signal.\nUNKNOWN when no Wikidata entity confidently matches the brand, or the API is unreachable.\nOtherwise Score = 50 + 30 if the entity has a description + 20 if the brand appears in its label. Capped at 100.   Confidence 0.4.",
-      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. NO. The check reads a structured API. The real limitation is the DATA SOURCE - the live Knowledge Panel is not accessible - and a language model cannot observe a page it has no access to. Asking one whether a panel exists would produce a confident guess, not a measurement."
+      "definition": "Whether the company has the entity record a Google Knowledge Panel is built from, and whether its identity fields are consistent. The panel itself cannot be read reliably, so the Wikidata entity that feeds it is used as the proxy.",
+      "metric_brief": "Reuse the Wikidata search from OFF-01 and take the entity whose label or description carries the brand. 50 base, plus 30 if the entity has a description and 20 if the brand is in its label. 0 when no entity matches; UNKNOWN only when Wikidata is unreachable.",
+      "metric": "Search Wikidata for the company name (the same lookup as OFF-01, made once per scan). Take the first entity whose label or description contains the brand term.\nScore = 0 when no entity matches the brand: there is no record for a Knowledge Panel to be built from.\nOtherwise score = 50 + 30 if the entity has a description + 20 if the brand term is in its label (max 100).\nUNKNOWN only when Wikidata is unreachable.\nName fallback: when a search for the full company name returns nothing, it is repeated once with the trailing legal form removed (plc, Inc, Ltd, LLC, Corp, GmbH, Private Limited ...), since directories list the trading name. A failed search is not retried.",
+      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. Matching the brand in a structured entity label is exact."
+    },
+    "OFF-03": {
+      "name": "Company profiles complete, with name, address and details consistent across own and third-party websites",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": true,
+      "dedicated_llm_pass": false,
+      "definition": "Whether the company has profiles on the major business directories, and whether those profiles show the same name and locations as the company's own website. Consistent identity details across sources let an assistant resolve the company confidently instead of merging or confusing it with another.",
+      "metric_brief": "One web search for the exact company name on LinkedIn, Crunchbase, Bloomberg and ZoomInfo. Presence: profiles found / 4 x 70. Consistency: + 15 x share of found profiles whose listing shows the company name, + 15 x share showing one of the site's own office locations. UNKNOWN when the web search fails.",
+      "metric": "One web search (Google Custom Search API, or OpenAI web search when Google is not configured): \"<company name>\" (site:linkedin.com OR site:crunchbase.com OR site:bloomberg.com OR site:zoominfo.com). A platform is found when at least one result link is on it.\nPresence = platforms found / 4 x 70.\nName consistency = share of found platforms whose result titles/snippets contain the company name or brand term.\nLocation consistency = share of found platforms whose result titles/snippets mention one of the office locations the site itself states (from its structured data and address text).\nScore = presence + name consistency x 15 + location consistency x 15.\nUNKNOWN when the web search fails (not configured, quota used up or unreachable).\nName fallback: when a search for the full company name returns nothing, it is repeated once with the trailing legal form removed (plc, Inc, Ltd, LLC, Corp, GmbH, Private Limited ...), since directories list the trading name. A failed search is not retried.",
+      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. Hostname and text matching on the result listings is exact."
     },
     "OFF-04": {
-      "name": "Company profiles complete and consistent across LinkedIn/Crunchbase/Bloomberg/ZoomInfo",
-      "section": "off_page",
-      "weight": 1.0,
-      "pass_threshold": 90,
-      "partial_threshold": 60,
-      "uses_llm": true,
-      "dedicated_llm_pass": false,
-      "definition": "Whether the company is discoverable on the major business-data platforms, a common corroboration path for firmographic facts. Field-level profile completeness is not verified -- that needs a licensed company-data API -- so this is scored and reported as a presence signal only.",
-      "metric_brief": "One search for the exact company name scoped to linkedin.com, crunchbase.com, bloomberg.com and zoominfo.com, matching the hostnames behind the result links. Score is platforms with at least one result over 4. UNKNOWN when the search endpoint returns anything other than a clean HTTP 200, since a 202 shell page is a bot challenge rather than zero results.",
-      "metric": "Run a DuckDuckGo HTML search for the exact company name restricted to linkedin.com, crunchbase.com, bloomberg.com and zoominfo.com, then match the hostnames behind the result redirect links.\nScore = platforms with at least one result / 4 x 100.   Confidence 0.4.\nUNKNOWN when DuckDuckGo returns anything other than a clean HTTP 200 (a 202 shell page is a bot-detection challenge, not zero results).",
-      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. NO. Hostname matching on result URLs is exact.\nThe parameter asks for profile COMPLETENESS, which needs a licensed company-data API. A model cannot substitute for data the system does not have - it would infer field completeness it never saw. The check is therefore scored and labelled as a presence signal only."
-    },
-    "OFF-05": {
-      "name": "Company name, address and details identical across sources",
-      "section": "off_page",
-      "weight": 1.0,
-      "pass_threshold": 90,
-      "partial_threshold": 60,
-      "uses_llm": true,
-      "dedicated_llm_pass": false,
-      "definition": "Whether the company's identity details agree wherever they appear; conflicting names or addresses make an entity harder to resolve confidently. Only one external record is available to compare against, so consistency ACROSS sources -- what the parameter asks for -- cannot currently be established.",
-      "metric_brief": "Compare the site's own name, domain and derived office locations against the top Wikidata hit. 70 when the brand term appears in the Wikidata entity label, else 40.",
-      "metric": "Compare the site own name, domain and derived office locations against the top Wikidata hit.\nScore = 70 if the brand term appears in the Wikidata entity label, else 40.   Confidence 0.5.",
-      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. NO. The blocker is missing directory records to compare against, not the comparison itself. With only one external record available, name/address/detail consistency ACROSS SOURCES - what the parameter actually asks for - cannot be established by any means, model included."
-    },
-    "OFF-06": {
       "name": "Certifications verifiable off-site (CMMI, ISO, partner tiers)",
       "section": "off_page",
       "weight": 1.0,
@@ -622,166 +596,75 @@
       "partial_threshold": 60,
       "uses_llm": true,
       "dedicated_llm_pass": false,
-      "definition": "Whether certification and partner-tier claims can be confirmed against the body that issued them. Issuer registries are not queried, so this reports claims found on the site as claimed-but-unverified rather than asserting that they are real.",
-      "metric_brief": "Scan the site copy for certification claims: certified or accredited, compliance, licensed, an ISO standard number, or a partner tier such as premier, gold or platinum partner. 40 when no claim is found, 55 when claims are found, the cap reflecting that they are unverified.",
-      "metric": "Scan the site copy for certification claims: certified/accredited, compliance, licensed, an ISO standard number, or a partner tier (certified/authorized/premier/gold/platinum/elite partner).\nScore = 40 if no claim is found; 55 if claims are found, reflecting claimed-but-unverified.\nConfidence 0.4.",
-      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. NO, and deliberately so. The parameter asks whether certifications are VERIFIABLE OFF-SITE. Issuer registries are not queried, and asking a language model to confirm a certification is the textbook way to manufacture a false positive - it would produce a plausible answer with no underlying record. The honest result is a capped score that states the claim is unverified."
+      "definition": "Whether the company states certifications, accreditations or partner tiers that a third party could verify, such as ISO standards, CMMI levels or cloud-partner tiers. Verifiable credentials are trust signals assistants can repeat with confidence.",
+      "metric_brief": "Scan the site copy for certification claims: certified or accredited, compliance, licensed, an ISO standard number, CMMI, or a partner tier such as premier, gold or platinum partner. 40 when no claim is found, 55 when claims are found; capped at 55 because issuer registries are not queried, so the claims are unverified.",
+      "metric": "Scan the text of every crawled page for certification claims: certified/accredited, compliance/compliant, licensed, an ISO standard number (ISO 9001, ISO 27001 ...), CMMI, and partner tiers (certified/authorized/accredited/premier/gold/platinum/elite partner).\nScore = 55 when at least one kind of claim is found, 40 when none is.\nCapped at 55: issuer registries are not queried, so the claims are unverified.\nEvidence only, no effect on the score: one web search off the company's own site for the specific certificates it names (ISO numbers, CMMI, partner tiers); up to three result pages are opened to confirm they name the company and the certificate, and the outcome is recorded as verification_result.\nName fallback: when a search for the full company name returns nothing, it is repeated once with the trailing legal form removed (plc, Inc, Ltd, LLC, Corp, GmbH, Private Limited ...), since directories list the trading name. A failed search is not retried.",
+      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. Pattern matching for named certification types is exact."
+    },
+    "OFF-05": {
+      "name": "Review platform completeness and category placement",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": true,
+      "dedicated_llm_pass": true,
+      "definition": "Whether the company is listed on the major B2B review platforms, and whether those listings put it in the same category it uses to describe itself. Review platforms are a primary third-party source assistants use to shortlist vendors, and a wrong category removes the company from the right comparisons.",
+      "metric_brief": "One web search for the exact company name on G2, Clutch, Gartner and TrustRadius. Presence: platforms found / 4 x 70. Category: + 30 when the listings place the company in a category the site itself uses -- judged by the model when available, otherwise by a keyword match. UNKNOWN when the web search fails.",
+      "metric": "One web search (Google Custom Search API, or OpenAI web search when Google is not configured): \"<company name>\" (site:g2.com OR site:clutch.co OR site:gartner.com OR site:trustradius.com). A platform is found when at least one result link is on it.\nPresence = platforms found / 4 x 70.\nCategory placement: the site's own categories are derived from its navigation and service pages. Heuristic baseline: a match when a category term appears in the found listings' titles/snippets. LLM pass (authoritative when available): the model decides whether the listings place the company in the same or a clearly equivalent category.\nScore = presence + 30 if the category matches (0 if not, or if no listing was found).\nUNKNOWN when the web search fails.\nName fallback: when a search for the full company name returns nothing, it is repeated once with the trailing legal form removed (plc, Inc, Ltd, LLC, Corp, GmbH, Private Limited ...), since directories list the trading name. A failed search is not retried.",
+      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: yes. Whether a listing's category is equivalent to the company's own positioning is a judgement a keyword match gets wrong."
+    },
+    "OFF-06": {
+      "name": "Review volume and recency",
+      "section": "off_page",
+      "weight": 1.0,
+      "pass_threshold": 90,
+      "partial_threshold": 60,
+      "uses_llm": true,
+      "dedicated_llm_pass": false,
+      "definition": "How many reviews the company has on the major review platforms and how recent they are. Assistants and buyers weigh a steady flow of recent reviews far above a few old ones.",
+      "metric_brief": "One web search for the company's reviews on G2, Clutch, Gartner and TrustRadius. Volume: 12 points per review-platform result, up to 60. Recency: 40 when the newest dated result is within 365 days, 20 within 730 days, else 0. UNKNOWN when the web search fails.",
+      "metric": "One web search (Google Custom Search API, or OpenAI web search when Google is not configured): \"<company name>\" reviews (site:g2.com OR site:clutch.co OR site:gartner.com OR site:trustradius.com). Review results = result links on those four platforms.\nVolume = min(60, review results x 12).\nRecency: each result's date is the date its page publishes (article/og metadata) or the date the search result shows. Newest dated result within 365 days = 40; within 730 days = 20; older or no date = 0.\nScore = volume + recency.\nUNKNOWN when the web search fails. Review counts inside each platform are not read.\nName fallback: when a search for the full company name returns nothing, it is repeated once with the trailing legal form removed (plc, Inc, Ltd, LLC, Corp, GmbH, Private Limited ...), since directories list the trading name. A failed search is not retried.",
+      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. Counting results and reading published dates is exact."
     },
     "OFF-07": {
-      "name": "G2, Clutch, Gartner Peer Insights and TrustRadius completeness",
+      "name": "Reddit, Quora and industry forum presence",
       "section": "off_page",
       "weight": 1.0,
       "pass_threshold": 90,
       "partial_threshold": 60,
       "uses_llm": true,
       "dedicated_llm_pass": false,
-      "definition": "Whether the company has a discoverable profile on the major B2B review platforms. These are among the most frequently cited third-party sources for vendor comparisons. Completeness within each platform would need that platform's API; presence is what is observable here.",
-      "metric_brief": "One search for the exact company name scoped to g2.com, clutch.co, gartner.com and trustradius.com, matching the hostnames behind the result links. Score is platforms found over 4. UNKNOWN when the search endpoint does not return a clean 200.",
-      "metric": "DuckDuckGo HTML search for the exact company name restricted to g2.com, clutch.co, gartner.com and trustradius.com; match hostnames behind the result links.\nScore = platforms found / 4 x 100.   Confidence 0.4.\nUNKNOWN when DuckDuckGo does not return a clean 200.",
-      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. NO. Hostname matching is exact. Profile completeness within each platform needs that platform API; presence is what is actually observable here, and the score says so."
+      "definition": "Whether the company is discussed in the communities buyers use to ask for recommendations: Reddit, Quora and industry forums. These discussions are heavily used as sources by AI assistants for real-world opinions.",
+      "metric_brief": "One web search for the exact company name on Reddit, Quora and pages whose address contains forum or community (the company's own site excluded). 100 at 6 or more discussions, 70 at 3 to 5, 40 at 1 or 2, 10 with none. UNKNOWN when the web search fails.",
+      "metric": "One web search (Google Custom Search API, or OpenAI web search when Google is not configured): \"<company name>\" (site:reddit.com OR site:quora.com OR inurl:forum OR inurl:community). Discussions = result links on reddit.com or quora.com, or whose address contains forum or community; links on the company's own site are excluded.\nScore = 100 at 6 or more discussions, 70 at 3-5, 40 at 1-2, 10 with none.\nUNKNOWN when the web search fails.\nName fallback: when a search for the full company name returns nothing, it is repeated once with the trailing legal form removed (plc, Inc, Ltd, LLC, Corp, GmbH, Private Limited ...), since directories list the trading name. A failed search is not retried.",
+      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. Hostname and URL matching is exact."
     },
     "OFF-08": {
-      "name": "Review volume, recency and velocity versus competitors",
+      "name": "Presence on best/top service lists in the category",
       "section": "off_page",
       "weight": 1.0,
       "pass_threshold": 90,
       "partial_threshold": 60,
       "uses_llm": true,
       "dedicated_llm_pass": false,
-      "definition": "Whether the company has a healthy, current review footprint relative to its market. No review API is connected, so per-review dates, velocity and a named competitor benchmark are not measured -- only a coarse volume proxy from search hits.",
-      "metric_brief": "Count matching result URLs across the same four review platforms. Score is min(60, 15 + hits x 15). The 60 cap is deliberate: with recency, velocity and a competitor set unmeasured this parameter can never return PASS, which is an accurate statement of how far the measurement reaches.",
-      "metric": "DuckDuckGo HTML search for company reviews across the same four review platforms; count matching result URLs.\nScore = min(60, 15 + hits x 15) - capped at 60 because recency, velocity and a competitor benchmark cannot be measured from a search-result count.   Confidence 0.3.",
-      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. NO. What is missing is licensed review data (counts, dates, trend, competitor set). A model cannot invent it.\nNote the consequence: this parameter cannot exceed 60, so it can never return PASS. That is an accurate statement about measurement coverage, and it does structurally limit the Off-Page pillar until a review API is connected."
+      "definition": "Whether the company appears on the 'best' and 'top' lists buyers read for its category. Assistants frequently build shortlists from exactly these round-ups.",
+      "metric_brief": "The site's main category is derived from its own pages. 100 when the brand appears in the search results for 'best <category> companies'. Otherwise a second search for the company name with best/top/leading and the category counts list pages (best, top or leading in the title, not on the company's own site): 60 at 2 or more, 40 at 1, 10 with none. UNKNOWN when a web search fails.",
+      "metric": "Topic = the site's main category, derived from its navigation and service pages.\nSearch 1 (Custom Search API): best <topic> companies. If the brand term appears in any result's title, snippet or address, score = 100.\nOtherwise search 2: \"<company name>\" (best OR top OR leading) <topic>. List pages = results whose title contains best, top or leading and that are not on the company's own site.\nScore = 60 at 2 or more list pages, 40 at 1, 10 with none.\nUNKNOWN when either web search fails.\nName fallback: when a search for the full company name returns nothing, it is repeated once with the trailing legal form removed (plc, Inc, Ltd, LLC, Corp, GmbH, Private Limited ...), since directories list the trading name. A failed search is not retried.",
+      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. Brand and title matching on the result listings is exact."
     },
     "OFF-09": {
-      "name": "Category placement matching how the company positions itself",
+      "name": "Analyst, directory and trade-press coverage and description accuracy",
       "section": "off_page",
       "weight": 1.0,
       "pass_threshold": 90,
       "partial_threshold": 60,
       "uses_llm": true,
       "dedicated_llm_pass": true,
-      "definition": "Whether third parties file the company under the same category it claims for itself. A mismatch means assistants retrieve it for the wrong set of questions.",
-      "metric_brief": "Search the four review platforms and extract result titles and snippets, and derive the site's own categories from its navigation and service pages. The heuristic tests for a literal category match; when available the model decides whether the snippets place the company in the same or a clearly equivalent category. 85 on a match, 30 otherwise.",
-      "metric": "DuckDuckGo HTML search across the four review platforms; extract result titles and snippets. Derive the site own business categories from its navigation and service pages.\nHeuristic baseline: 65 if any derived category string appears literally in the snippets, else 35.\nLLM pass (authoritative when available): the model decides whether the third-party snippets place the company in the same or a clearly equivalent category.\nScore = 85 if it matches, 30 if it does not.   Score 30 if no snippets are returned.",
-      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: yes. YES. Category equivalence is semantic. \"Custom software development\" and \"bespoke software engineering services\" are the same category and share almost no literal tokens, so substring matching reports a mismatch that is not real."
-    },
-    "OFF-10": {
-      "name": "Reddit, Stack Overflow, Quora and industry forums presence",
-      "section": "off_page",
-      "weight": 1.0,
-      "pass_threshold": 90,
-      "partial_threshold": 60,
-      "uses_llm": true,
-      "dedicated_llm_pass": false,
-      "definition": "Whether the company is discussed in community venues. Assistants draw heavily on forum content because it carries unprompted, practitioner-level opinion. Whether each mention is substantive or spam is not judged.",
-      "metric_brief": "One search for the exact company name scoped to reddit.com, stackoverflow.com and quora.com, counting matching result URLs. 15 for none, 40 for one or two, 65 for three or more.",
-      "metric": "DuckDuckGo HTML search for the exact company name restricted to reddit.com, stackoverflow.com and quora.com; count matching result URLs.\nScore = 15 if no hits; 40 if 1-2; 65 if 3 or more.   Confidence 0.35.",
-      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. NO. This counts results, which is exact.\nKnown limitation: whether each mention is substantive or spam is not judged. A model could assess the mentions it can see, but the search endpoint returns only titles and snippets, so the input needed for that judgment is not available."
-    },
-    "OFF-11": {
-      "name": "YouTube presence and authority footprint",
-      "section": "off_page",
-      "weight": 1.0,
-      "pass_threshold": 90,
-      "partial_threshold": 60,
-      "uses_llm": true,
-      "dedicated_llm_pass": false,
-      "definition": "Whether the company has a discoverable video footprint. Caption and transcript availability, which is part of the parameter's intent, is not verified -- that would need the YouTube API.",
-      "metric_brief": "One search for the exact company name scoped to youtube.com, counting result URLs. 15 for none, 45 for one or two, 65 for three or more.",
-      "metric": "DuckDuckGo HTML search for the exact company name restricted to youtube.com; count result URLs.\nScore = 15 if none; 45 if 1-2; 65 if 3 or more.   Confidence 0.35.",
-      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. NO. Counting results is exact.\nKnown limitation: transcript and caption availability - part of the parameter intent - is not verified, which would need the YouTube API."
-    },
-    "OFF-12": {
-      "name": "Podcast, webinar and conference footprint indexed/transcribed",
-      "section": "off_page",
-      "weight": 1.0,
-      "pass_threshold": 90,
-      "partial_threshold": 60,
-      "uses_llm": true,
-      "dedicated_llm_pass": false,
-      "definition": "Whether the company's experts appear in venues that produce indexable, transcribed content. Whether those appearances are actually indexed and transcribed would need the source platforms and is not verified here.",
-      "metric_brief": "One search for the company name together with podcast, webinar or conference, counting the approximate number of results. 60 at three or more, 30 at one or more, else 15.",
-      "metric": "DuckDuckGo HTML search for the company name together with podcast, webinar or conference; count the approximate number of results.\nScore = 60 if 3 or more; 30 if at least one; else 15.   Confidence 0.35.",
-      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. NO. Result counting is exact.\nThe registry previously declared this AI-assisted; no model call exists and the registry now matches the code. Whether appearances are indexed and transcribed would need the source platforms, not a model."
-    },
-    "OFF-13": {
-      "name": "Quality and topical relevance of sites linking to the company",
-      "section": "off_page",
-      "weight": 1.0,
-      "pass_threshold": 90,
-      "partial_threshold": 60,
-      "uses_llm": true,
-      "dedicated_llm_pass": false,
-      "definition": "Whether links to the company come from relevant, authoritative sites. No backlink provider (Ahrefs, Moz, Majestic) is connected, so link authority, topical relevance and follow status are not measured -- only a count of pages that mention the domain.",
-      "metric_brief": "Search for the domain while excluding the site's own host, and count distinct external pages mentioning it. Score is min(55, 10 + pages x 9). Capped at 55, this parameter cannot return PASS until a backlink index is connected.",
-      "metric": "DuckDuckGo HTML search for the domain excluding the site own host; count distinct external pages that mention it.\nScore = min(55, 10 + external pages x 9) - capped at 55 because link authority, topical relevance and follow/nofollow status require a backlink index.   Confidence 0.25.",
-      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. NO. The parameter asks about QUALITY and RELEVANCE of linking sites, which requires a backlink index (Ahrefs, Moz, Majestic). A model has no access to link graphs and would be guessing.\nNote the consequence: capped at 55, this parameter can never return PASS until a backlink provider is connected."
-    },
-    "OFF-14": {
-      "name": "Unlinked brand mentions and earned news by market",
-      "section": "off_page",
-      "weight": 1.0,
-      "pass_threshold": 90,
-      "partial_threshold": 60,
-      "uses_llm": true,
-      "dedicated_llm_pass": false,
-      "definition": "Whether the brand is mentioned on third-party pages, with or without a link. Assistants register the mention itself, so unlinked coverage still builds entity association. Whether each mention omits a link back is not individually verified.",
-      "metric_brief": "Search for the exact company name excluding the site's own domain, and count distinct external mentioning pages. 15 for none, 40 for one to three, 65 for four or more.",
-      "metric": "DuckDuckGo HTML search for the exact company name excluding the site own domain; count distinct external mentioning pages.\nScore = 15 if none; 40 if 1-3; 65 if 4 or more.   Confidence 0.3.",
-      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. NO. Counting off-domain mentions is exact.\nKnown limitation: whether each mention OMITS a link back - the \"unlinked\" half of the parameter - is not individually verified, which would require fetching and parsing each mentioning page."
-    },
-    "OFF-15": {
-      "name": "Third-party sites actually cited by AI assistants for target topics",
-      "section": "off_page",
-      "weight": 1.0,
-      "pass_threshold": 90,
-      "partial_threshold": 60,
-      "uses_llm": true,
-      "dedicated_llm_pass": true,
-      "definition": "Which independent sources an assistant reaches for when answering a buyer question in the company's category, and whether this company is among them. This is the closest direct read on AI visibility in the audit; it approximates one assistant's behaviour, not a multi-assistant citation study.",
-      "metric_brief": "Derive the site's primary topic from its own navigation and service pages, then ask the model which real, specific websites an assistant would reference for a buyer question on that topic and whether this site would plausibly be among them. 85 if included, 30 if sources are named without it, 15 if none are named. UNKNOWN when LLM scoring is disabled or the call fails.",
-      "metric": "Derive the site primary topic from its own navigation and service pages. Ask the model which real, specific websites an AI assistant would most likely reference when answering a buyer question about that topic, and whether this site would plausibly be among them.\nScore = 85 if the site is included; 30 if sources are named without it; 15 if none are named.\nUNKNOWN when LLM scoring is disabled or the call fails.   Confidence 0.4.",
-      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: yes. YES, necessarily. The parameter is literally \"which third-party sites do AI assistants cite for these topics\", and the only way to approximate that is to ask an assistant. There is no deterministic data source for it.\nStated limitation: this is a single-model approximation using this tool own LLM, not a multi-assistant citation audit, which is why confidence is held at 0.4."
-    },
-    "OFF-16": {
-      "name": "Presence on best/top/leading service lists",
-      "section": "off_page",
-      "weight": 1.0,
-      "pass_threshold": 90,
-      "partial_threshold": 60,
-      "uses_llm": true,
-      "dedicated_llm_pass": false,
-      "definition": "Whether the company appears on the roundup and best-of pages that buyers and assistants consult. The check detects the brand appearing in the results, not confirmed inclusion on an authoritative list, which would mean fetching and reading each candidate page.",
-      "metric_brief": "Search for best {primary topic} together with the company name, and test whether the brand term appears in the returned results HTML. 50 if mentioned, else 20.",
-      "metric": "DuckDuckGo HTML search for best {primary topic} together with the company name; test whether the brand term appears in the returned SERP HTML.\nScore = 50 if mentioned, else 20.   Confidence 0.35.",
-      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. NO. A substring test over returned HTML is exact.\nKnown limitation: this detects that the brand appears somewhere in the results, not that it is listed ON an authoritative best/top list. Confirming the latter means fetching and reading each candidate page - a data-collection gap first, and only then a judgment a model could help with."
-    },
-    "OFF-17": {
-      "name": "Presence on alternatives-to-competitor pages",
-      "section": "off_page",
-      "weight": 1.0,
-      "pass_threshold": 90,
-      "partial_threshold": 60,
-      "uses_llm": true,
-      "dedicated_llm_pass": false,
-      "definition": "Whether the company shows up on alternatives-to pages, which is where buyers already in market look. No competitor list is configured, so this measures inclusion on alternatives-style pages generally rather than against named competitors.",
-      "metric_brief": "Search for the company name together with alternatives or alternative to, and count result URLs whose address contains alternative. 90 at two or more, 60 at one or more, else 20.",
-      "metric": "DuckDuckGo HTML search for the company name together with alternatives / alternative to; count result URLs whose address contains \"alternative\".\nScore = 90 if 2 or more; 60 if at least one; else 20.   Confidence 0.35.",
-      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: no. NO. URL pattern matching is exact.\nKnown limitation: no competitor list is configured, so this measures inclusion on alternatives-style pages generally rather than against named competitors."
-    },
-    "OFF-18": {
-      "name": "Analyst, directory and trade-press coverage + description accuracy",
-      "section": "off_page",
-      "weight": 1.0,
-      "pass_threshold": 90,
-      "partial_threshold": 60,
-      "uses_llm": true,
-      "dedicated_llm_pass": true,
-      "definition": "Whether analysts and trade press cover the company, and whether what they say about it is correct. An inaccurate third-party description is worse than none, because it propagates.",
-      "metric_brief": "Search for the company name with gartner, forrester, idc, analyst report or industry report, and extract result titles and snippets. The heuristic scores 55 when snippets are returned and 20 when none are; when available the model judges whether they describe this company accurately. 80 if accurate, 40 if not.",
-      "metric": "DuckDuckGo HTML search for the company name together with gartner / forrester / idc / analyst report / industry report; extract result titles and snippets.\nHeuristic baseline: 55 when any snippets are returned, 20 when none are.\nLLM pass (authoritative when available): the model judges whether the snippets describe THIS company accurately, rather than confusing it with another or repeating outdated facts.\nScore = 80 if accurate, 40 if not.   Confidence 0.55 with the model, 0.35 without.",
-      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: yes. YES. Detecting a snippet that describes a different company with a similar name, or repeats a stale fact, requires reading and understanding the text. Counting results can only establish that coverage exists, not that it is correct - and \"description accuracy\" is half the parameter."
+      "definition": "Whether analysts, directories and the trade press cover the company, and whether they describe it accurately. Analyst and press coverage is high-authority corroboration, and an inaccurate description is repeated by assistants as fact.",
+      "metric_brief": "One web search for the company name with gartner, forrester, idc, analyst report or industry report. 20 when no coverage is found. Otherwise the model judges whether the snippets describe the company accurately: 80 if accurate, 40 if not; 55 when the model is unavailable. UNKNOWN when the web search fails.",
+      "metric": "One web search (Google Custom Search API, or OpenAI web search when Google is not configured): \"<company name>\" (gartner OR forrester OR idc OR \"analyst report\" OR \"industry report\"). Take the result titles and snippets.\nScore = 20 when no results are returned.\nHeuristic baseline: 55 when coverage is found. LLM pass (authoritative when available): the model judges whether the snippets describe the company accurately -- 80 if accurate, 40 if not.\nUNKNOWN when the web search fails.\nName fallback: when a search for the full company name returns nothing, it is repeated once with the trailing legal form removed (plc, Inc, Ltd, LLC, Corp, GmbH, Private Limited ...), since directories list the trading name. A failed search is not retried.",
+      "llm_rationale": "Scored by the model. The curated data this parameter extracts is sent to the model together with this parameter's definition and metric, and the model returns the score, the explanation and the recommendation that reach the report (backend/app/parameters/engine.py). When the model is unavailable the rules-based score described below stands in, and the report marks the row as such.\n\nDedicated pre-scoring model pass: yes. Whether coverage describes this company accurately, rather than a same-named one or with outdated facts, needs reading, not matching."
     }
   }
 }

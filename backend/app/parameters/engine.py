@@ -86,7 +86,7 @@ async def evaluate(spec: dict, ctx) -> dict:
             "confidence": 0,
             "checked_url_or_source": getattr(ctx, "origin", None),
             "evidence": {"summary": f"This check did not complete within {PARAMETER_TIMEOUT:.0f}s and was skipped."},
-            "recommendation": "Re-run this check; the source may be slow or unavailable.",
+            "recommendation": "Run the audit again later; the source may be slow or unavailable.",
             "error": f"Timed out after {PARAMETER_TIMEOUT:.0f}s",
             "duration_ms": int(PARAMETER_TIMEOUT * 1000),
             "evaluated_at": now,
@@ -106,7 +106,7 @@ async def evaluate(spec: dict, ctx) -> dict:
                 "summary": humanize_error(str(exc)) or "This check could not be completed.",
                 "exception": humanize_error(str(exc)),
             },
-            "recommendation": "Re-run this check; the evaluator raised an unexpected error.",
+            "recommendation": "Run the audit again; this check raised an unexpected error.",
             "error": humanize_error(str(exc)) or str(exc),
             "duration_ms": 0,
             "evaluated_at": now,
@@ -132,7 +132,7 @@ async def apply_judgement(spec: dict, row: dict) -> dict:
     # check that never actually ran.
     unscorable = rules_score is None or row.get("status") == "UNKNOWN"
     # ...and it is not asked at all. It used to be, on the argument that its account of what
-    # was missing was worth having. In practice it invented one: ON-13 timed out before
+    # was missing was worth having. In practice it invented one: ON-12 timed out before
     # inspecting a single page, and the model -- shown only the words "did not complete
     # within 60s" -- wrote "There are no visible author signals or bylines to assess" into
     # the client report. That is a finding about a check that never ran. The deterministic
@@ -190,17 +190,21 @@ async def apply_judgement(spec: dict, row: dict) -> dict:
         evidence["model_reasoning"] = judgement.reasoning
 
     if judgement.score is None:
-        # The model declined to grade data the rules-based pass could score. Its null is not
-        # allowed to stand, because an UNKNOWN row is dropped from the pillar denominators
-        # and from the issues list -- so the parameter would disappear from the audit rather
-        # than score badly. The bias runs one way: the thinnest evidence belongs to the
-        # parameters that scored lowest, so honouring these nulls would quietly raise the
-        # overall score by deleting the findings that dragged it down.
-        score = rules_score
+        # The model declined to grade data the rules-based pass could score. A null must
+        # never turn a scored row UNKNOWN: that drops it from the denominators and the
+        # issues list, and the thinnest evidence belongs to the lowest scores, so honouring
+        # nulls would quietly raise the overall score.
         evidence["scoring_method"] = "deterministic"
         evidence["llm_error"] = "the model returned no score for data the rules-based pass could grade"
-    else:
-        score = judgement.score
+    elif judgement.method == "llm":
+        # Only a score the model actually gave; a malformed one falls back to the reference.
+        evidence["model_score"] = round(float(judgement.score), 1)
+        evidence["scoring_method"] = "rules_based"
+    # The final score is the rules-based one: the Score Logic applied to the measured values,
+    # which anyone can reproduce from the evidence. The model's review is kept beside it
+    # (explanation, reasoning, model_score) but it does not move the number -- when it did,
+    # scores shifted by up to 45 points with working that contradicted the stated rule.
+    score = rules_score
 
     unknown = score is None
     status = "UNKNOWN" if unknown else status_from_score(
@@ -210,9 +214,7 @@ async def apply_judgement(spec: dict, row: dict) -> dict:
     row["evidence"] = evidence
     row["score"] = None if unknown else round(float(score), 1)
     row["status"] = status
-    # result() drops the recommendation from a passing row, and that invariant has to hold
-    # after a re-grade too: a parameter the model just upgraded to PASS must not keep the
-    # remediation text the failing rules-based pass wrote for it.
+    # result() drops the recommendation from a passing row, and that invariant holds here too.
     row["recommendation"] = None if status == "PASS" else (judgement.recommendation or row.get("recommendation"))
     if unknown:
         row["confidence"] = 0.0

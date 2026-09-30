@@ -38,3 +38,7 @@ www.*/
 # Local scratch files
 Color.png
 EV caluction.xlsx
+
+# A full copy of this project (with its own .git) and its archive -- not part of the repo
+/AI Audit/
+*.zip

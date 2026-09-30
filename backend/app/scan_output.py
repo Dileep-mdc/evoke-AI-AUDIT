@@ -507,7 +507,7 @@ COLUMNS = [
     ("Recommendation", 52, 50),
 ]
 STATUS_COL = 8
-SCORED_BY_LABEL = {"llm": "AI model", "deterministic": "Rules-based (model unavailable)"}
+SCORED_BY_LABEL = {"rules_based": "Rules-based", "llm": "Rules-based", "deterministic": "Rules-based (no AI review)"}
 MAX_ROW_HEIGHT = 320.0
 LINE_HEIGHT = 13.2
 PILLARS = [("technical", "Technical"), ("on_page", "On-Page"), ("off_page", "Off-Page")]
@@ -696,12 +696,15 @@ def _write_how_to_read_sheet(wb: Workbook) -> None:
                       "headings, links, images and structured data.")
     line("2. Extract", "For each parameter separately, the pages that matter to that check are pulled and "
                         "reduced to a small set of facts -- the curated data.")
-    line("3. Grade", "That curated data, together with the parameter's definition and its metric, is given to "
-                      "an AI model, which returns the score, the explanation and the recommendation.")
-    line("4. Roll up", "Pillar score = the weighted average of every scored parameter in that pillar. Overall "
-                        "score = the three pillars weighted 35% Technical / 40% On-Page / 25% Off-Page.")
-    line("If the model is unavailable", "The parameter keeps the rules-based score computed in step 2, and its "
-                                          "'Scored By' column says so. Nothing is left unscored silently.")
+    line("3. Score", "The parameter's Score Logic is applied to the measured values; that rules-based score "
+                      "is the final score. An AI model reviews the same data and writes the explanation and the "
+                      "recommendation, but it does not change the number.")
+    line("4. Roll up", "Each parameter is worth fixed points: its pillar's weight (35 Technical / 40 On-Page / "
+                        "25 Off-Page) split equally over the pillar's parameters. Points earned = score / 100 x "
+                        "its points. Pillar score = pillar points earned / pillar points measurable x 100. "
+                        "Overall score = all points earned / all points measurable x 100.")
+    line("If a check cannot be measured", "It is marked UNKNOWN and left out of the measurable points: it is "
+                                            "not counted as 0 and its points are not given to other parameters.")
     r += 1
 
     section("Column glossary (Technical / On-Page / Off-Page sheets)")
@@ -782,8 +785,9 @@ def build_excel(report: dict, registry: list[dict]) -> bytes:
 
     kv("Parameters Scored", (report.get("coverage") or {}).get("known"))
     kv("Parameters Unknown", (report.get("coverage") or {}).get("unknown"))
-    model_scored = sum(1 for p in params if ((p.get("evidence") or {}).get("scoring_method")) == "llm")
-    kv("Graded by AI Model", f"{model_scored} of {len(params)} parameters" if params else "")
+    points = report.get("points") or {}
+    if points:
+        kv("Points Earned / Measurable", f"{points.get('earned', 0):.2f} / {points.get('measurable', 0):.2f}")
 
     # The overall score is the one number people look for first, so it is set large; the
     # band labels beside it are bold. No fills -- the legend on the How to Read sheet says
@@ -807,8 +811,8 @@ def save_excel_output(report: dict, registry: list[dict]) -> Path:
     """Write this scan's audit workbook to backend/data/scan_output/.
 
     The name is derived from the domain alone, so a site has exactly one workbook: a
-    re-audit, or the "Re-check Unscored" retry re-scoring an existing scan, refreshes that
-    file in place instead of leaving a trail of near-identical spreadsheets behind. The
+    re-audit refreshes that file in place instead of leaving a trail of near-identical
+    spreadsheets behind. The
     canonical copy is always the stored report -- this file is rebuilt from it on demand by
     GET /scans/{id}/download.xlsx if it is ever missing.
     """

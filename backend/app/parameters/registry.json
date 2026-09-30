@@ -324,7 +324,7 @@
     "max_score": 100
   },
   {
-    "parameter_id": "ON-5.1",
+    "parameter_id": "ON-06",
     "section": "on_page",
     "name": "FAQ schema validity and answer consistency",
     "weight": 1.0,
@@ -360,7 +360,7 @@
     "max_score": 100
   },
   {
-    "parameter_id": "ON-10",
+    "parameter_id": "ON-09",
     "section": "on_page",
     "name": "Keyword stuffing / unnatural repetition",
     "weight": 1.0,
@@ -372,7 +372,7 @@
     "max_score": 100
   },
   {
-    "parameter_id": "ON-11",
+    "parameter_id": "ON-10",
     "section": "on_page",
     "name": "Content depth and completeness",
     "weight": 1.0,
@@ -384,7 +384,7 @@
     "max_score": 100
   },
   {
-    "parameter_id": "ON-12",
+    "parameter_id": "ON-11",
     "section": "on_page",
     "name": "Original, citable data point on major pages",
     "weight": 1.0,
@@ -396,7 +396,7 @@
     "max_score": 100
   },
   {
-    "parameter_id": "ON-13",
+    "parameter_id": "ON-12",
     "section": "on_page",
     "name": "Named author with role, credentials and real profile",
     "weight": 1.0,
@@ -408,7 +408,7 @@
     "max_score": 100
   },
   {
-    "parameter_id": "ON-14",
+    "parameter_id": "ON-13",
     "section": "on_page",
     "name": "Named clients, quantified outcomes, deployment detail",
     "weight": 1.0,
@@ -420,7 +420,7 @@
     "max_score": 100
   },
   {
-    "parameter_id": "ON-15",
+    "parameter_id": "ON-14",
     "section": "on_page",
     "name": "Claims sourced and dated to a primary source",
     "weight": 1.0,
@@ -432,7 +432,7 @@
     "max_score": 100
   },
   {
-    "parameter_id": "ON-17",
+    "parameter_id": "ON-15",
     "section": "on_page",
     "name": "Last substantive update within topic shelf life",
     "weight": 1.0,
@@ -444,7 +444,7 @@
     "max_score": 100
   },
   {
-    "parameter_id": "ON-18",
+    "parameter_id": "ON-16",
     "section": "on_page",
     "name": "Buying-journey coverage across discovery to decision",
     "weight": 1.0,
@@ -456,7 +456,7 @@
     "max_score": 100
   },
   {
-    "parameter_id": "ON-19",
+    "parameter_id": "ON-17",
     "section": "on_page",
     "name": "Best X for Y and X vs Y pages per industry/market",
     "weight": 1.0,
@@ -468,7 +468,7 @@
     "max_score": 100
   },
   {
-    "parameter_id": "ON-20",
+    "parameter_id": "ON-18",
     "section": "on_page",
     "name": "No two pages competing for the same question (cannibalization)",
     "weight": 1.0,
@@ -480,7 +480,7 @@
     "max_score": 100
   },
   {
-    "parameter_id": "ON-21",
+    "parameter_id": "ON-19",
     "section": "on_page",
     "name": "No thin or near-duplicate pages diluting the topic",
     "weight": 1.0,
@@ -492,7 +492,7 @@
     "max_score": 100
   },
   {
-    "parameter_id": "ON-22",
+    "parameter_id": "ON-20",
     "section": "on_page",
     "name": "Brand named alongside category, industry and geography",
     "weight": 1.0,
@@ -506,10 +506,10 @@
   {
     "parameter_id": "OFF-01",
     "section": "off_page",
-    "name": "Wikidata entry present and accurate",
+    "name": "Wikidata/Wikipedia entry present",
     "weight": 1.0,
     "automation_level": "LLM-scored (rules-based fallback)",
-    "check_logic": "Search for organization entity; compare website, name, aliases and key facts; LLM resolves ambiguous entity matches.",
+    "check_logic": "Search Wikidata and Wikipedia for the company name; 100 when it is on both, 0 when either is missing.",
     "ai_required": "Yes",
     "pass_threshold": 90,
     "partial_threshold": 60,
@@ -518,10 +518,10 @@
   {
     "parameter_id": "OFF-02",
     "section": "off_page",
-    "name": "Wikipedia or comparable reference source",
+    "name": "Google Knowledge Panel presence and consistency",
     "weight": 1.0,
     "automation_level": "LLM-scored (rules-based fallback)",
-    "check_logic": "Search for authoritative reference pages about the company; evaluate whether page is genuinely about the organization and what is cited.",
+    "check_logic": "Use the company's Wikidata entity (the main source of a Google Knowledge Panel) as a proxy for panel presence and consistency.",
     "ai_required": "Yes",
     "pass_threshold": 90,
     "partial_threshold": 60,
@@ -530,10 +530,10 @@
   {
     "parameter_id": "OFF-03",
     "section": "off_page",
-    "name": "Google Knowledge Panel presence and consistency",
+    "name": "Company profiles complete, with name, address and details consistent across own and third-party websites",
     "weight": 1.0,
     "automation_level": "LLM-scored (rules-based fallback)",
-    "check_logic": "Google's own Knowledge Panel surface cannot be reliably scraped; this check uses the same Wikidata organization entity resolved for OFF-01 as a proxy signal and compares its populated fields against the company's own site.",
+    "check_logic": "Google search for the company on LinkedIn, Crunchbase, Bloomberg and ZoomInfo; check each profile listing shows the same company name and the office locations the site states.",
     "ai_required": "Yes",
     "pass_threshold": 90,
     "partial_threshold": 60,
@@ -542,10 +542,10 @@
   {
     "parameter_id": "OFF-04",
     "section": "off_page",
-    "name": "Company profiles complete and consistent across LinkedIn/Crunchbase/Bloomberg/ZoomInfo",
+    "name": "Certifications verifiable off-site (CMMI, ISO, partner tiers)",
     "weight": 1.0,
     "automation_level": "LLM-scored (rules-based fallback)",
-    "check_logic": "Runs one search for the company name scoped to the four platform domains and records which platforms return a public profile result; no licensed profile-data API is connected, so field-level completeness is not verified.",
+    "check_logic": "Scan the site copy for certification, compliance, ISO, CMMI and partner-tier claims.",
     "ai_required": "Yes",
     "pass_threshold": 90,
     "partial_threshold": 60,
@@ -554,10 +554,10 @@
   {
     "parameter_id": "OFF-05",
     "section": "off_page",
-    "name": "Company name, address and details identical across sources",
+    "name": "Review platform completeness and category placement",
     "weight": 1.0,
     "automation_level": "LLM-scored (rules-based fallback)",
-    "check_logic": "Build canonical identity record from website; compare NAP and company attributes across sources; classify material vs cosmetic differences.",
+    "check_logic": "Google search for the company on G2, Clutch, Gartner Peer Insights and TrustRadius; check presence and whether the listings place it in the category the site uses.",
     "ai_required": "Yes",
     "pass_threshold": 90,
     "partial_threshold": 60,
@@ -566,10 +566,10 @@
   {
     "parameter_id": "OFF-06",
     "section": "off_page",
-    "name": "Certifications verifiable off-site (CMMI, ISO, partner tiers)",
+    "name": "Review volume and recency",
     "weight": 1.0,
     "automation_level": "LLM-scored (rules-based fallback)",
-    "check_logic": "Extract certification claims from site; search authoritative issuer records; verify company name, certificate type and current validity.",
+    "check_logic": "Google search for company reviews on the four review platforms; score the number of review results and how recent the newest dated one is.",
     "ai_required": "Yes",
     "pass_threshold": 90,
     "partial_threshold": 60,
@@ -578,10 +578,10 @@
   {
     "parameter_id": "OFF-07",
     "section": "off_page",
-    "name": "G2, Clutch, Gartner Peer Insights and TrustRadius completeness",
+    "name": "Reddit, Quora and industry forum presence",
     "weight": 1.0,
     "automation_level": "LLM-scored (rules-based fallback)",
-    "check_logic": "Runs one search for the company name scoped to the four review-platform domains and records which platforms return a discoverable profile page.",
+    "check_logic": "Google search for the company on Reddit, Quora and forum/community pages; count the discussions found.",
     "ai_required": "Yes",
     "pass_threshold": 90,
     "partial_threshold": 60,
@@ -590,10 +590,10 @@
   {
     "parameter_id": "OFF-08",
     "section": "off_page",
-    "name": "Review volume, recency and velocity versus competitors",
+    "name": "Presence on best/top service lists in the category",
     "weight": 1.0,
     "automation_level": "LLM-scored (rules-based fallback)",
-    "check_logic": "Uses the number of review-platform search hits found as a coarse volume proxy; no review API is connected, so per-review recency, velocity and a named competitor benchmark are not measured -- this is flagged clearly in the evidence.",
+    "check_logic": "Google search 'best <category> companies' and check whether the company appears; otherwise count 'best/top/leading' list pages that name it.",
     "ai_required": "Yes",
     "pass_threshold": 90,
     "partial_threshold": 60,
@@ -602,118 +602,10 @@
   {
     "parameter_id": "OFF-09",
     "section": "off_page",
-    "name": "Category placement matching how the company positions itself",
+    "name": "Analyst, directory and trade-press coverage and description accuracy",
     "weight": 1.0,
     "automation_level": "LLM-scored (rules-based fallback)",
-    "check_logic": "Searches for the company on review/directory platforms, extracts the surrounding result snippets, and compares the categories implied there against the site's own derived categories; the LLM judges semantic equivalence when available.",
-    "ai_required": "Yes",
-    "pass_threshold": 90,
-    "partial_threshold": 60,
-    "max_score": 100
-  },
-  {
-    "parameter_id": "OFF-10",
-    "section": "off_page",
-    "name": "Reddit, Stack Overflow, Quora and industry forums presence",
-    "weight": 1.0,
-    "automation_level": "LLM-scored (rules-based fallback)",
-    "check_logic": "Runs one search for the company name scoped to the three community domains and counts discoverable mentions.",
-    "ai_required": "Yes",
-    "pass_threshold": 90,
-    "partial_threshold": 60,
-    "max_score": 100
-  },
-  {
-    "parameter_id": "OFF-11",
-    "section": "off_page",
-    "name": "YouTube presence and authority footprint",
-    "weight": 1.0,
-    "automation_level": "LLM-scored (rules-based fallback)",
-    "check_logic": "Runs one search for the company name scoped to youtube.com and counts discoverable video/channel results; transcript availability is not independently verified.",
-    "ai_required": "Yes",
-    "pass_threshold": 90,
-    "partial_threshold": 60,
-    "max_score": 100
-  },
-  {
-    "parameter_id": "OFF-12",
-    "section": "off_page",
-    "name": "Podcast, webinar and conference footprint indexed/transcribed",
-    "weight": 1.0,
-    "automation_level": "LLM-scored (rules-based fallback)",
-    "check_logic": "Search for company/expert appearances; classify event authority, relevance and whether transcript text is indexable.",
-    "ai_required": "Yes",
-    "pass_threshold": 90,
-    "partial_threshold": 60,
-    "max_score": 100
-  },
-  {
-    "parameter_id": "OFF-13",
-    "section": "off_page",
-    "name": "Quality and topical relevance of sites linking to the company",
-    "weight": 1.0,
-    "automation_level": "LLM-scored (rules-based fallback)",
-    "check_logic": "No backlink data provider (Ahrefs/Moz/Majestic) is connected. As a rough proxy, this counts how many independent pages mention the domain in a public search; topical relevance and link authority are not verified.",
-    "ai_required": "Yes",
-    "pass_threshold": 90,
-    "partial_threshold": 60,
-    "max_score": 100
-  },
-  {
-    "parameter_id": "OFF-14",
-    "section": "off_page",
-    "name": "Unlinked brand mentions and earned news by market",
-    "weight": 1.0,
-    "automation_level": "LLM-scored (rules-based fallback)",
-    "check_logic": "Searches for the company name while excluding the company's own domain and counts third-party pages that mention it; whether each mention links back is not individually verified.",
-    "ai_required": "Yes",
-    "pass_threshold": 90,
-    "partial_threshold": 60,
-    "max_score": 100
-  },
-  {
-    "parameter_id": "OFF-15",
-    "section": "off_page",
-    "name": "Third-party sites actually cited by AI assistants for target topics",
-    "weight": 1.0,
-    "automation_level": "LLM-scored (rules-based fallback)",
-    "check_logic": "Asks the configured LLM which real websites it would reference when answering a buyer question about the site's primary category, then checks whether the company's own domain/brand appears among the sources named. This approximates a single assistant's citation behaviour; it is not a multi-assistant citation audit and requires ENABLE_LLM_SCORING to be on.",
-    "ai_required": "Yes",
-    "pass_threshold": 90,
-    "partial_threshold": 60,
-    "max_score": 100
-  },
-  {
-    "parameter_id": "OFF-16",
-    "section": "off_page",
-    "name": "Presence on best/top/leading service lists",
-    "weight": 1.0,
-    "automation_level": "LLM-scored (rules-based fallback)",
-    "check_logic": "Run target queries such as best/top/leading [service] for [industry]; extract list pages; determine whether company is included and accurately categorized.",
-    "ai_required": "Yes",
-    "pass_threshold": 90,
-    "partial_threshold": 60,
-    "max_score": 100
-  },
-  {
-    "parameter_id": "OFF-17",
-    "section": "off_page",
-    "name": "Presence on alternatives-to-competitor pages",
-    "weight": 1.0,
-    "automation_level": "LLM-scored (rules-based fallback)",
-    "check_logic": "Searches for the company name paired with 'alternatives'/'alternative to' and checks whether a genuine alternatives-listing page surfaces that includes the company; no fixed competitor list is configured, so this measures inclusion on alternatives pages generally rather than against named competitors.",
-    "ai_required": "Yes",
-    "pass_threshold": 90,
-    "partial_threshold": 60,
-    "max_score": 100
-  },
-  {
-    "parameter_id": "OFF-18",
-    "section": "off_page",
-    "name": "Analyst, directory and trade-press coverage + description accuracy",
-    "weight": 1.0,
-    "automation_level": "LLM-scored (rules-based fallback)",
-    "check_logic": "Searches for the company alongside analyst/trade-press terms (Gartner, Forrester, IDC, analyst report, industry coverage), and when the LLM is available asks it to judge whether the returned snippets describe the company accurately and consistently with its own site copy.",
+    "check_logic": "Google search for the company with analyst and industry-report terms; judge whether the coverage describes the company accurately.",
     "ai_required": "Yes",
     "pass_threshold": 90,
     "partial_threshold": 60,

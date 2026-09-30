@@ -9,13 +9,12 @@ from ..errors import humanize_error
 
 _ID_DIGITS_RE = re.compile(r"(\d+)")
 
-
 def parameter_sort_key(parameter_id: str) -> tuple:
     """Order parameter ids the way they read rather than the way they sort as text.
 
-    Ids are mostly PREFIX-NN, which sorts correctly as a plain string -- until one is
-    sub-numbered. "ON-5.1" as text lands after "ON-22" and before "TECH-01"; comparing its
-    digit runs as numbers puts it back where it belongs, between ON-05 and ON-07.
+    Ids are PREFIX-NN, which sorts correctly as a plain string -- until one is sub-numbered
+    (ON-5.1 was, before the renumbering): as text it lands after ON-20 and before TECH-01;
+    comparing its digit runs as numbers puts it back where it belongs, after ON-05.
     """
     return tuple(
         (1, int(part)) if part.isdigit() else (0, part)
@@ -110,7 +109,7 @@ def scorable_pages(ctx) -> list:
     detect_bot_block() marks a Cloudflare interstitial that came back as a normal 200.
 
     Handlers were consuming that list raw and disagreeing about it. Some filtered on
-    `result.ok`, some on `word_count`, most not at all -- so a fetch failure DEFLATED ON-21
+    `result.ok`, some on `word_count`, most not at all -- so a fetch failure DEFLATED ON-19
     (a zero-word page is "thin content") while it INFLATED TECH-07 (the timed-out pages are
     exactly the slow ones, and filtering them out left only the fast pages in the average).
     Neither effect was recorded anywhere.
@@ -359,7 +358,7 @@ def core_concept(title: str) -> str:
     """The concept a service-page title names, without the SEO wrapping around it.
 
     Titles like "Best AI Governance Consulting Services for Enterprises" were used whole as
-    the site's concepts, and ON-03, ON-04 and ON-22 then searched page copy for that exact
+    the site's concepts, and ON-03, ON-04 and ON-20 then searched page copy for that exact
     phrase -- which almost no page contains, so a site that explains AI governance on dozens
     of pages was scored as never mentioning it. "ai governance consulting" is what a page says.
     """

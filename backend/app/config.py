@@ -163,9 +163,12 @@ RENDER_SHELL_WORDS = int(os.getenv("RENDER_SHELL_WORDS", "120"))
 PARAMETER_CONCURRENCY = 6
 # Sized for full-coverage classification (see LLM_FULL_COVERAGE): a handler that puts every
 # heading or every list on a 750-page site in front of the model runs tens of batched calls
-# inside this one budget. At the old 60s, ON-13 timed out on a mid-size site and the whole
+# inside this one budget. At the old 60s, ON-12 timed out on a mid-size site and the whole
 # parameter came back UNKNOWN -- the check reported nothing rather than reporting late.
 PARAMETER_TIMEOUT = float(os.getenv("PARAMETER_TIMEOUT", "900"))
+# A scan retries the parameters that came back unscored once, after this many seconds -- long
+# enough for a rate-limit window to reopen -- so no parameter needs re-running by hand.
+SCAN_RETRY_DELAY = float(os.getenv("SCAN_RETRY_DELAY", "5"))
 # Ceiling on the model's judgement of one parameter (parameters/engine.py). Sized above
 # LLM_TIMEOUT x (LLM_RETRIES + 1) so an ordinary retry sequence finishes rather than being
 # cut off and falling back to the rules-based score for no reason.
@@ -225,15 +228,40 @@ LLM_MAX_ITEMS = int(os.getenv("LLM_MAX_ITEMS", "0"))
 # so a provider swap, a regional mirror, or a proxy is a configuration change and not a code
 # edit -- and so the full set of external services this tool talks to can be read in one place
 # rather than grepped out of a 450-line module.
-DDG_HTML_ENDPOINT = os.getenv("DDG_HTML_ENDPOINT", "https://html.duckduckgo.com/html/")
+# Web search for the off-page checks: Google's Custom Search JSON API. It needs an API key and a
+# Programmable Search Engine ID (set to search the entire web), both from Google Cloud. With
+# either missing, every search-based check reports UNKNOWN with a message saying so -- it never
+# falls back to scraping a results page, which is what made the old DuckDuckGo checks unreliable.
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
+GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID", "").strip()
+GOOGLE_SEARCH_ENDPOINT = os.getenv("GOOGLE_SEARCH_ENDPOINT", "https://www.googleapis.com/customsearch/v1")
+# Results requested per query; the API returns at most 10 per request.
+GOOGLE_SEARCH_RESULTS = min(10, int(os.getenv("GOOGLE_SEARCH_RESULTS", "10")))
+# Or OpenAI web search: an OpenAI Agents SDK agent with the hosted web-search tool, using
+# OPENAI_API_KEY above. SEARCH_PROVIDER picks one: "google", "openai", or "auto" (the default),
+# which uses Google when its key and engine ID are set and OpenAI otherwise.
+SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "auto").strip().lower()
+OPENAI_SEARCH_MODEL = os.getenv("OPENAI_SEARCH_MODEL", LLM_MODEL)
+# One query is a full agent run (the model searches, reads, then answers): seconds, not millis.
+OPENAI_SEARCH_TIMEOUT = float(os.getenv("OPENAI_SEARCH_TIMEOUT", "90"))
 WIKIDATA_API = os.getenv("WIKIDATA_API", "https://www.wikidata.org/w/api.php")
 WIKIPEDIA_API = os.getenv("WIKIPEDIA_API", "https://en.wikipedia.org/w/api.php")
+# Wikimedia's API policy asks clients to name themselves. Requests sent as a generic browser were
+# throttled to HTTP 429 from the second search on, so a Wikidata retry by the company's short
+# name came back "unavailable" -- and OFF-01/OFF-02 UNKNOWN -- for a company that is listed.
+WIKIMEDIA_USER_AGENT = os.getenv(
+    "WIKIMEDIA_USER_AGENT", "AIVisibilityAudit/1.0 (https://www.evoketechnologies.com; website audit tool)")
 # Language edition for the Wikipedia/Wikidata lookups. Was implicit in the "en." hostname and
 # the hardcoded "language=en" query argument, so auditing a non-English company meant editing
 # two unrelated string literals.
 REFERENCE_LANGUAGE = os.getenv("REFERENCE_LANGUAGE", "en")
 # How many candidate entities an entity-search returns. A retrieval width, not a score.
 ENTITY_SEARCH_LIMIT = int(os.getenv("ENTITY_SEARCH_LIMIT", "5"))
+# Off-page source verification: the Evidence & Validation Agent opens up to this many of each
+# check's source pages to confirm they are about the company, each within this many seconds.
+# Verification is recorded as evidence and never changes a score.
+OFFPAGE_VERIFY_SOURCES = int(os.getenv("OFFPAGE_VERIFY_SOURCES", "3"))
+OFFPAGE_VERIFY_TIMEOUT = float(os.getenv("OFFPAGE_VERIFY_TIMEOUT", "15"))
 
 WEIGHTS = {"technical": 0.35, "on_page": 0.40, "off_page": 0.25}
 

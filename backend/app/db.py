@@ -166,7 +166,37 @@ def init_db() -> None:
     migrate_legacy_data_dir()
     with get_db() as conn:
         conn.executescript(SCHEMA)
+        _renumber_parameters(conn)
     fail_interrupted_scans()
+
+
+def _renumber_parameters(conn: sqlite3.Connection) -> None:
+    """Once per database: move saved scans to the renumbered parameter ids.
+
+    See parameters/renumbering.py. The retired OFF-08 (YouTube) rows are dropped first, since
+    the new OFF-08 is a different parameter. Ids go through a temporary "~" name so ON-11 ->
+    ON-10 can never collide with a row still waiting for ON-10 -> ON-09. PRAGMA user_version
+    records that it ran; saved reports are rebuilt from these rows on the next startup (the
+    SCORING_METHOD bump in scoring.py), and their issue lists with them.
+    """
+    if conn.execute("PRAGMA user_version").fetchone()[0] >= 1:
+        return
+    import json
+
+    from .config import REGISTRY_PATH
+    from .parameters.renumbering import OLD_TO_NEW, RETIRED_OLD_IDS, ids_before
+
+    known = ids_before(p["parameter_id"] for p in json.loads(REGISTRY_PATH.read_text(encoding="utf-8")))
+    # A scan from an older parameter set used these numbers for other parameters: leave it be.
+    older = {sid for sid, pid in conn.execute("SELECT scan_id, parameter_id FROM parameter_results") if pid not in known}
+    skip = f" AND scan_id NOT IN ({','.join('?' * len(older))})" if older else ""
+    for table in ("parameter_results", "issues"):
+        conn.executemany(f"DELETE FROM {table} WHERE parameter_id=?{skip}", [(pid, *older) for pid in RETIRED_OLD_IDS])
+        conn.executemany(f"UPDATE {table} SET parameter_id=? WHERE parameter_id=?{skip}",
+                         [("~" + new, old, *older) for old, new in OLD_TO_NEW.items()])
+        conn.execute(f"UPDATE {table} SET parameter_id=substr(parameter_id, 2) WHERE parameter_id LIKE '~%'")
+    conn.execute("PRAGMA user_version=1")
+    log.info("Saved scans moved to the renumbered parameter ids")
 
 
 def vacuum() -> None:

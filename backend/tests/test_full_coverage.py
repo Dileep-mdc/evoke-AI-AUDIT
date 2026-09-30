@@ -3,7 +3,7 @@
 The audit used to hand the model a capped sample -- 12 pages, 24 excerpts, 20 pairs -- and
 then report the resulting ratio as the site's score, with nothing in the evidence recording
 what the sample was drawn from. On one real 750-page scan that meant ON-04 scored the site
-from its first twelve URLs in crawl order, ON-20 scored 1,345 duplicate pairs after checking
+from its first twelve URLs in crawl order, ON-18 scored 1,345 duplicate pairs after checking
 20 of them, and seven parameters sent the grader a numerator with no denominator at all.
 
 These tests pin the two properties that fixes it: the classifier sees every candidate, and
@@ -28,9 +28,9 @@ from app.parameters.onpage import (
     on_04,
     on_05,
     on_08,
-    on_17,
+    on_15,
+    on_18,
     on_20,
-    on_22,
 )
 
 SPECS = {p["parameter_id"]: p for p in load_registry()}
@@ -161,7 +161,7 @@ def test_on04_reads_every_page_not_the_first_twelve(batched_model):
     assert len(calls) == 2, "50 openings should batch into two calls, not be truncated to one sample"
 
 
-def test_on20_confirms_every_candidate_pair(batched_model):
+def test_on18_confirms_every_candidate_pair(batched_model):
     """The widest gap found in the audit: 1,345 title-overlap pairs, 20 shown to the model,
     18 of those 20 rejected -- and all 1,325 unseen pairs still counted against the site."""
     calls = batched_model(_echo("competing", value=False))  # the model rejects every pair
@@ -170,7 +170,7 @@ def test_on20_confirms_every_candidate_pair(batched_model):
     pages = [_page(f"https://x/{i}", title=f"enterprise application development services consulting team {i}",
                    text="t") for i in range(12)]
 
-    out = _run(on_20(SPECS["ON-20"], _ctx(pages)))
+    out = _run(on_18(SPECS["ON-18"], _ctx(pages)))
 
     ev = out["evidence"]
     assert ev["llm"]["candidate_pairs"] == 66, "every pair of the 12 pages is a candidate"
@@ -249,15 +249,15 @@ def test_no_handler_imposes_its_own_ceiling_on_what_gets_scored():
     assert not offenders, "handler-level ceilings on what gets scored:\n  " + "\n  ".join(offenders)
 
 
-def test_on20_judges_every_candidate_pair_with_no_ceiling(batched_model):
-    """ON-20's candidates grow faster than the page count, which is why it carried a ceiling.
+def test_on18_judges_every_candidate_pair_with_no_ceiling(batched_model):
+    """ON-18's candidates grow faster than the page count, which is why it carried a ceiling.
     The ceiling is gone: batches are packed by size, so a large pair set costs more requests
     rather than losing pairs."""
     calls = batched_model(_echo("competing", value=False))
     pages = [_page(f"https://x/{i}", title=f"enterprise application development services team {i}", text="t")
              for i in range(12)]
 
-    out = _run(on_20(SPECS["ON-20"], _ctx(pages)))
+    out = _run(on_18(SPECS["ON-18"], _ctx(pages)))
 
     llm = out["evidence"]["llm"]
     assert llm["candidate_pairs"] == 66
@@ -286,13 +286,13 @@ def test_on05_reports_the_service_page_total_not_just_a_sample():
     assert len(ev["pages"]) == 40, "evidence holds every page it scored"
 
 
-def test_on17_reports_what_the_dated_pages_are_out_of():
+def test_on15_reports_what_the_dated_pages_are_out_of():
     """`dated_pages: 333` alone gave the grader no way to state the share."""
     pages = [_page(f"https://x/{i}", text="t") for i in range(20)]
     for page in pages[:5]:
         page.dates = {"published": "2026-01-01", "modified": None}
 
-    out = _run(on_17(SPECS["ON-17"], _ctx(pages)))
+    out = _run(on_15(SPECS["ON-15"], _ctx(pages)))
 
     ev = out["evidence"]
     assert ev["dated_pages"] == 5
@@ -410,13 +410,13 @@ def test_on08_does_not_count_a_list_of_empty_items():
     assert ev["empty_or_markup_only_lists"] == 1, "and the empty one is reported, not scored"
 
 
-def test_on22_sees_the_brand_in_the_title_not_only_the_body():
+def test_on20_sees_the_brand_in_the_title_not_only_the_body():
     """The audited company's own homepage came back `brand: false` because the extractor had
     dropped the header -- and the parameter scored 0 on that."""
     pages = [_page("https://x/", title="Acme — data analytics in the United States", text="body copy with nothing in it")]
     ctx = _ctx(pages)
 
-    out = _run(on_22(SPECS["ON-22"], ctx))
+    out = _run(on_20(SPECS["ON-20"], ctx))
 
     assert out["evidence"]["pages_naming_brand"] == 1, "the brand is in the title"
 
@@ -424,7 +424,7 @@ def test_on22_sees_the_brand_in_the_title_not_only_the_body():
 # --- the engine no longer lets the model narrate a check that never ran ------------------
 
 def test_a_check_that_never_ran_gets_no_model_written_explanation(monkeypatch):
-    """ON-13 timed out before inspecting a page, and the model -- shown only "did not complete
+    """ON-12 timed out before inspecting a page, and the model -- shown only "did not complete
     within 60s" -- wrote "There are no visible author signals or bylines to assess" into the
     client report. That is a finding about a check that did not happen."""
     called = []
@@ -434,9 +434,9 @@ def test_a_check_that_never_ran_gets_no_model_written_explanation(monkeypatch):
         return LLMResult(ok=True, parsed={"score": 30, "explanation": "No author signals were found."}, elapsed_ms=1)
 
     monkeypatch.setattr(llm_scoring, "judge", fake_judge)
-    spec = SPECS["ON-13"]
+    spec = SPECS["ON-12"]
     row = {
-        "parameter_id": "ON-13", "section": spec["section"], "name": spec["name"],
+        "parameter_id": "ON-12", "section": spec["section"], "name": spec["name"],
         "status": "UNKNOWN", "score": None, "confidence": 0,
         "evidence": {"summary": "This check did not complete within 900s and was skipped."},
         "recommendation": "Re-run this check.",
@@ -492,7 +492,8 @@ def test_the_models_reasoning_is_kept_beside_its_explanation(monkeypatch):
 
     out = _run(apply_judgement(spec, row))
 
-    assert out["score"] == 30.0
+    assert out["score"] == 70.0, "the model's review must not move the rules-based score"
+    assert out["evidence"]["model_score"] == 30.0
     assert "12 of 40" in out["evidence"]["model_reasoning"]
     assert "below the metric's 60% band" in out["evidence"]["model_reasoning"]
     assert out["evidence"]["explanation"] == "Most service pages have no FAQ."

@@ -61,7 +61,7 @@ def test_the_fallback_extractor_drops_page_furniture():
 
 
 def test_word_count_no_longer_counts_the_menu():
-    """word_count drives ON-21's thin-page test and TECH's depth checks, so nav text landing
+    """word_count drives ON-19's thin-page test and TECH's depth checks, so nav text landing
     in it made thin pages read as substantial."""
     soup = BeautifulSoup(CHROME_PAGE, "html.parser")
 
@@ -129,7 +129,7 @@ def _page(url, *, ok=True, blocked=""):
 
 
 def test_failed_and_bot_blocked_pages_are_excluded_from_scoring():
-    """A fetch failure used to DEFLATE ON-21 (a zero-word page is "thin content") and INFLATE
+    """A fetch failure used to DEFLATE ON-19 (a zero-word page is "thin content") and INFLATE
     TECH-07 (filtering the timed-out pages left only the fast ones in the average). A
     Cloudflare interstitial was scored as the site's copy on every on-page parameter."""
     ctx = SimpleNamespace(pages=[

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
-import { createScan, downloadUrl, getParameter, getProgress, getReport, listScans, rerunUnscored } from "./api";
+import { createScan, downloadUrl, getParameter, getProgress, getReport, listScans } from "./api";
 import logoIcon from "./assets/logo-icon.png";
 
 function band(score) {
@@ -201,6 +201,49 @@ function CitationList({ citations }) {
   );
 }
 
+// Only a PASS may read as "nothing to do". A row whose score was brought back to its
+// rules-based value can have lost the advice it had while the AI called it a pass.
+function fixText(p) {
+  if (p.recommendation) return p.recommendation;
+  if (p.status === "PASS") return "No change required.";
+  if (p.status === "UNKNOWN") return "Not measured, so no fix can be recommended yet.";
+  return "Improve this parameter against its Score Logic; see the evidence for what fell short.";
+}
+
+// Points are shown to 2 decimals: enough to add up, without the noise of a third digit.
+const pts = (n) => fmt(n, 2);
+
+function ScoreCalculation({ p }) {
+  const ev = parseEvidence(p.evidence) || {};
+  const measured = p.status !== "UNKNOWN" && p.score != null;
+  const max = p.max_points;
+  const modelScore = typeof ev.model_score === "number" ? ev.model_score : null;
+
+  return (
+    <div className="calc">
+      <h3>How this score is calculated</h3>
+      {p.logic && (
+        <div className="calc-formula">
+          <span>What it checks</span>
+          <p>{p.logic.checks}</p>
+          <span className="calc-formula-next">How it is scored</span>
+          <p>{p.logic.scoring}</p>
+        </div>
+      )}
+      {!measured && (
+        <p className="calc-note">
+          <span className={`badge ${p.status}`}>{p.status}</span>{" "}
+          This check could not be measured, so it is skipped rather than counted as 0.
+          {max != null && <> Its {pts(max)} points are left out, so it neither helps nor hurts the overall score.</>}
+        </p>
+      )}
+      {measured && modelScore != null && Math.abs(modelScore - p.score) >= 0.1 && (
+        <p className="calc-note">The AI review suggested {fmt(modelScore)}; the score follows the rule, so the AI suggestion is shown for reference only.</p>
+      )}
+    </div>
+  );
+}
+
 function EvidencePanel({ evidence, error }) {
   const ev = parseEvidence(evidence);
   const isPlainObject = ev && typeof ev === "object" && !Array.isArray(ev);
@@ -253,7 +296,6 @@ function Icon({ name }) {
   if (name === "folder") return <svg {...common}><path d="M3 6h5l2 2h7v8H3z" /></svg>;
   if (name === "export") return <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M8 10V3" /><path d="m5 5 3-3 3 3" /><path d="M3 11v3h10v-3" /></svg>;
   if (name === "plus") return <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2"><path d="M7 2v10M2 7h10" /></svg>;
-  if (name === "refresh") return <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M13.5 8A5.5 5.5 0 1 1 11.8 4" /><path d="M13.5 2.5V6h-3.5" /></svg>;
   if (name === "globe") return <svg {...common} width="20" height="20"><circle cx="9" cy="9" r="7" /><path d="M2 9h14M9 2c2.2 2 3.5 4.5 3.5 7s-1.3 5-3.5 7c-2.2-2-3.5-4.5-3.5-7s1.3-5 3.5-7z" /></svg>;
   return null;
 }
@@ -499,8 +541,8 @@ function ParameterTable({ title, rows, onSelect, tabs, activeTab, onTabChange })
     return [...rows].sort((a, b) => {
       const av = sortValue(a, sort.key);
       const bv = sortValue(b, sort.key);
-      // numeric: true so a sub-numbered id sorts by its number, not as text -- otherwise
-      // "ON-5.1" lands after "ON-22" instead of between "ON-05" and "ON-07".
+      // numeric: true so ids sort by their number, not as text -- a sub-numbered id such as
+      // "ON-5.1" (before the renumbering) would otherwise land after "ON-20".
       if (typeof av === "string") return av.localeCompare(bv, undefined, { numeric: true }) * sort.dir;
       return (av - bv) * sort.dir;
     });
@@ -520,7 +562,7 @@ function ParameterTable({ title, rows, onSelect, tabs, activeTab, onTabChange })
           </div>
         )}
       </div>
-      <table>
+      <table className="param-table">
         <thead>
           <tr>
             {SORT_COLUMNS.map((c) => (
@@ -536,11 +578,11 @@ function ParameterTable({ title, rows, onSelect, tabs, activeTab, onTabChange })
             const tone = p.score == null ? "na" : p.score >= 75 ? "hi" : p.score >= 40 ? "mid" : "lo";
             return (
               <tr key={p.parameter_id} className="clickable" onClick={() => onSelect(p)}>
-                <td className="param-id-cell">{p.parameter_id}</td>
+                <td className="param-id-cell"><span className="param-id">{p.parameter_id}</span></td>
                 <td>{p.name}</td>
                 <td><span className={`points ${tone}`}>{p.score == null ? "—" : `${fmt(p.score, 0)}%`}</span></td>
                 <td className="issue-cell">{issueText(p)}</td>
-                <td>{p.recommendation || "—"}</td>
+                <td>{p.status === "PASS" && !p.recommendation ? "—" : fixText(p)}</td>
                 <td className="citation-cell">
                   {(() => {
                     const cites = citationsOf(p.evidence);
@@ -617,7 +659,6 @@ function Dashboard() {
   const [scans, setScans] = useState([]);
   const [toast, setToast] = useState("");
   const [activeSection, setActiveSection] = useState("technical");
-  const [rerunning, setRerunning] = useState(false);
 
   useEffect(() => {
     // Dashboard stays mounted when navigating from one report straight to another
@@ -652,7 +693,6 @@ function Dashboard() {
   }
 
   const params = report?.parameters || [];
-  const unscoredCount = params.filter((p) => p.status === "UNKNOWN" || p.error).length;
   const cats = report?.category_scores || {};
   const overall = report?.overall_score;
   const overallBand = band(overall);
@@ -670,6 +710,7 @@ function Dashboard() {
     score: cats[p.key],
     weight: weights[p.key],
     contribution: contributions[p.key],
+    measurable: (report?.category_points_measurable || {})[p.key],
   }));
 
   const rowsBySection = useMemo(() => {
@@ -699,24 +740,6 @@ function Dashboard() {
     notify("Preparing PDF download");
   }
 
-  async function rerunFailed() {
-    setRerunning(true);
-    try {
-      const result = await rerunUnscored(scanId);
-      const fresh = await getReport(scanId);
-      setReport(fresh);
-      notify(
-        result.rerun_count > 0
-          ? `Re-checked ${result.rerun_count} parameter${result.rerun_count === 1 ? "" : "s"}`
-          : "Nothing to re-check — every parameter already has a score"
-      );
-    } catch (e) {
-      notify(e.message);
-    } finally {
-      setRerunning(false);
-    }
-  }
-
   return (
     <Shell view={view} onView={(v) => { setView(v); if (v === "home") nav("/"); }} search={search} onSearch={(v) => { setSearch(v); if (v) setView("analytics"); }} toast={toast}>
       {view === "analytics" && (
@@ -726,11 +749,6 @@ function Dashboard() {
               <h1>{report.domain}</h1>
             </div>
             <div className="head-actions">
-              {unscoredCount > 0 && (
-                <button className="btn btn-ghost" onClick={rerunFailed} disabled={rerunning} title="Re-evaluate every parameter that came back without a score">
-                  <Icon name="refresh" /> {rerunning ? "Re-checking…" : `Re-check Unscored (${unscoredCount})`}
-                </button>
-              )}
               <button className="btn btn-ghost" onClick={exportPdf}><Icon name="export" /> Export to PDF</button>
               <button className="btn btn-primary" onClick={() => nav("/")}><Icon name="plus" /> Create New Report</button>
             </div>
@@ -745,7 +763,7 @@ function Dashboard() {
               <div className="visibility-table">
                 <table>
                   <thead>
-                    <tr><th>Pillar</th><th>Weight</th><th>Score/100</th><th>Weighted</th><th>Band</th></tr>
+                    <tr><th>Pillar</th><th>Weight</th><th>Score/100</th><th>Points earned</th><th>Band</th></tr>
                   </thead>
                   <tbody>
                     {pillars.map((p) => {
@@ -762,7 +780,7 @@ function Dashboard() {
                           <td>{p.name}</td>
                           <td>{p.weight == null ? "—" : `${Math.round(p.weight * 100)}%`}</td>
                           <td>{fmt(p.score)}</td>
-                          <td>{fmt(p.contribution, 2)}</td>
+                          <td>{p.measurable != null ? `${fmt(p.contribution, 2)} / ${fmt(p.measurable, 2)}` : fmt(p.contribution, 2)}</td>
                           <td className={`band ${b.cls}`}>{b.label}</td>
                         </tr>
                       );
@@ -829,11 +847,11 @@ function Dashboard() {
                 <div className="kicker">{selected.parameter_id}</div>
                 <h2>{selected.name}</h2>
               </div>
-              <button className="btn btn-ghost" onClick={() => setSelected(null)}>Close</button>
+              <button className="btn btn-ghost" onClick={() => setSelected(null)} aria-label="Close">Close</button>
             </div>
             <p className="drawer-meta">
               <span className={`badge ${selected.status}`}>{selected.status}</span>
-              <span className="drawer-score">Score <b>{selected.score != null ? `${fmt(selected.score, 0)}%` : "—"}</b></span>
+              <span className="drawer-score">Score <b>{selected.score != null ? `${fmt(selected.score)} / 100` : "—"}</b></span>
               {selected.status === "UNKNOWN" && <span className="drawer-note">Excluded from the overall score</span>}
             </p>
             <div className="drawer-fact">
@@ -850,9 +868,10 @@ function Dashboard() {
             </div>
             <div className="drawer-fact">
               <span className="drawer-fact-label">Recommended fix</span>
-              <span>{selected.recommendation || "No change required."}</span>
+              <span>{fixText(selected)}</span>
             </div>
             <EvidencePanel evidence={selected.evidence} error={selected.error} />
+            <ScoreCalculation p={selected} />
           </div>
         </div>
       )}

@@ -25,3 +25,15 @@ def no_live_llm_calls_during_tests():
     llm_client.ENABLE_LLM_SCORING = False
     yield
     llm_client.ENABLE_LLM_SCORING = original
+
+
+@pytest.fixture(autouse=True, scope="session")
+def no_live_web_search_during_tests():
+    """The same key would also run billed OpenAI web searches. Tests stub google_search(), so
+    the off-page tools are pinned to that provider; test_openai_search.py covers the other."""
+    import app.parameters.offpage_tools as tools
+
+    original = tools.SEARCH_PROVIDER
+    tools.SEARCH_PROVIDER = "google"
+    yield
+    tools.SEARCH_PROVIDER = original

@@ -31,6 +31,14 @@ app.add_middleware(
 app.include_router(router)
 
 
+@app.on_event("startup")
+async def _recalculate_saved_reports() -> None:
+    """Bring reports saved under an older scoring method up to the current one, so the
+    dashboard, the history cards and the downloads all show the same numbers."""
+    from .api.scans import upgrade_saved_reports
+    upgrade_saved_reports()
+
+
 @app.on_event("shutdown")
 async def _close_crawler_connections() -> None:
     """Return the crawler's pooled HTTP connections on the way out.

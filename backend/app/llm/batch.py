@@ -174,7 +174,7 @@ async def judge_one(
 ) -> tuple[Optional[dict], Coverage]:
     """The whole-site variant: one verdict object about the population, not one per item.
 
-    ON-18 asks a single question ("which journey stages does this site cover?") over many
+    ON-16 asks a single question ("which journey stages does this site cover?") over many
     pages, so batching it means merging booleans rather than concatenating rows. Every batch
     still sees real pages, and a stage counts as covered if any batch found it.
     """

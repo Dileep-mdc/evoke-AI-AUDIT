@@ -19,20 +19,20 @@
       "floor": 25.0
     },
     "keyword_density": {
-      "_what": "ON-10. Peak single-term density, measured over content words only.",
+      "_what": "ON-09. Peak single-term density, measured over content words only.",
       "_why": "With function words included the most frequent token on essentially every English page was 'the' at 4-7%, above the worst band, so every site scored the floor and the check said nothing.",
       "bands": [[0.035, 100], [0.06, 75]],
       "floor": 45,
       "direction": "lower_is_better"
     },
     "cannibalization": {
-      "_what": "ON-20. Share of the site NOT competing with itself for the same buyer question.",
+      "_what": "ON-18. Share of the site NOT competing with itself for the same buyer question.",
       "_why": "A fixed penalty per pair meant nine overlapping titles bottomed out the check whether the site had 20 pages or 2000. Proportional scales the penalty with the site.",
       "bands": [[1.0, 100.0], [0.95, 90.0], [0.85, 75.0], [0.70, 60.0]],
       "floor": 40.0
     },
     "dilution": {
-      "_what": "ON-21. Share of the site that is neither thin nor near-duplicate.",
+      "_what": "ON-19. Share of the site that is neither thin nor near-duplicate.",
       "_why": "Same reason as cannibalization: the old absolute penalty hit its cap at eight thin pages.",
       "bands": [[0.95, 100.0], [0.85, 85.0], [0.70, 70.0], [0.50, 55.0]],
       "floor": 40.0
@@ -41,24 +41,36 @@
       "_what": "TECH-13. Visible text as a percentage of total HTML weight.",
       "bands": [[25.0, 100.0], [15.0, 85.0], [10.0, 70.0], [5.0, 45.0]],
       "floor": 20.0
+    },
+    "forum_mentions": {
+      "_what": "OFF-07. Reddit, Quora and forum/community result pages found for the company name.",
+      "_why": "A single thread is incidental; a handful across communities shows the company is genuinely discussed. The old 15/40/65 scale could never reach PASS, which misstated a well-discussed company as failing.",
+      "bands": [[6, 100], [3, 70], [1, 40]],
+      "floor": 10
+    },
+    "best_list_pages": {
+      "_what": "OFF-08, when the company is not in the generic 'best <category>' results: list pages (best/top/leading in the title) that name it.",
+      "_why": "Appearing on the generic results page is the strongest signal and scores 100 outright; being named on list pages found by name is the next tier.",
+      "bands": [[2, 60], [1, 40]],
+      "floor": 10
     }
   },
 
   "thresholds": {
     "thin_page_words": {
-      "_what": "ON-21. Below this word count a page counts as thin.",
+      "_what": "ON-19. Below this word count a page counts as thin.",
       "value": 180
     },
     "near_duplicate_body_similarity": {
-      "_what": "ON-21. Jaccard overlap of page text above which two pages are near-duplicates.",
+      "_what": "ON-19. Jaccard overlap of page text above which two pages are near-duplicates.",
       "value": 0.72
     },
     "competing_title_similarity": {
-      "_what": "ON-20. Jaccard overlap of titles above which two pages become candidates for competing. A candidate filter only -- the model confirms which genuinely compete.",
+      "_what": "ON-18. Jaccard overlap of titles above which two pages become candidates for competing. A candidate filter only -- the model confirms which genuinely compete.",
       "value": 0.7
     },
     "min_content_words_for_density": {
-      "_what": "ON-10, TECH-11. Below this, a page has too little prose for density or section-length to mean anything.",
+      "_what": "ON-09, TECH-11. Below this, a page has too little prose for density or section-length to mean anything.",
       "value": 40
     },
     "answer_direct_words": {
@@ -76,7 +88,7 @@
       "max": 90
     },
     "comparison_pages_for_full_credit": {
-      "_what": "ON-19. How many genuine comparison pages a site needs before the check stops penalising it.",
+      "_what": "ON-17. How many genuine comparison pages a site needs before the check stops penalising it.",
       "value": 3
     },
     "useful_list_min_items": {
@@ -86,6 +98,16 @@
     "redirect_chain_hops": {
       "_what": "TECH-06, TECH-20. At or above this many hops a redirect counts as a chain.",
       "value": 3
+    },
+    "review_recent_days": {
+      "_what": "OFF-06. A review-platform result dated within this many days earns the full recency points (40).",
+      "_why": "Assistants and buyers discount reviews older than a year.",
+      "value": 365
+    },
+    "review_stale_days": {
+      "_what": "OFF-06. A review-platform result dated within this many days (but not the recent window) earns half the recency points (20).",
+      "_why": "Two-year-old reviews still show the company is reviewed, but no longer that it is currently active.",
+      "value": 730
     }
   }
 }

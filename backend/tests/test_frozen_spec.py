@@ -5,7 +5,7 @@ text and the reference workbook all claim things about the code, and each claim 
 here against the code itself. Changing a handler without updating its frozen description
 fails the build rather than silently shipping a document that is no longer true.
 
-Regenerate everything with:  python tools/build_parameter_workbook.py
+registry.json, formulas.json and frozen_spec.json are edited by hand alongside the handler.
 """
 from __future__ import annotations
 
@@ -24,8 +24,8 @@ def handler_bodies() -> list[tuple[str, str]]:
     """(parameter id, handler source body) for every registered handler.
 
     The id is read from each module's HANDLERS table rather than derived from the function
-    name: a sub-numbered parameter like ON-5.1 cannot be spelled as an identifier, so the
-    two stopped lining up.
+    name: a sub-numbered parameter (ON-5.1, before the renumbering) cannot be spelled as an
+    identifier, so the two stopped lining up.
     """
     out = []
     for module in ("technical", "onpage", "offpage"):
@@ -36,7 +36,12 @@ def handler_bodies() -> list[tuple[str, str]]:
             pid = ids.get(match.group(1))
             if pid:
                 out.append((pid, match.group(2)))
-    return out
+    # Off-page research, including every model pass, lives in the agents; the handler in
+    # offpage.py only maps the findings to calculation inputs. The agent method is its body.
+    agents = (PARAMS / "offpage_agents.py").read_text(encoding="utf-8")
+    research = {f"OFF-{num}": body for num, body in re.findall(
+        r"\n    async def research_off_(\d+)\(self, ctx\) -> Findings:(.*?)(?=\n    (?:async )?def |\nclass |\n# -)", agents, re.S)}
+    return [(pid, research.get(pid, body)) for pid, body in out]
 
 
 # The three ways a handler can run its own classification pass. judge() is the single call;
@@ -123,7 +128,7 @@ def test_the_brief_explanation_is_actually_brief():
 
 
 def test_dedicated_llm_pass_flags_match_the_code():
-    """Separate from scoring: eighteen handlers run their own classification pass before
+    """Separate from scoring: sixteen handlers run their own classification pass before
     they score, and that flag still has to match what the source actually does."""
     calling = handlers_calling_the_model()
     wrong = {
@@ -134,26 +139,27 @@ def test_dedicated_llm_pass_flags_match_the_code():
     assert not wrong, f"frozen spec disagrees with the handlers: {wrong}"
 
 
-def test_exactly_the_expected_eighteen_parameters_run_a_dedicated_model_pass():
+def test_exactly_the_expected_sixteen_parameters_run_a_dedicated_model_pass():
     """Pins the extra AI surface area on top of universal scoring. Every entry here is a
     second model call per scan, so the list growing is something to notice, not wave
     through."""
     assert handlers_calling_the_model() == {
         "TECH-11",
-        "ON-01", "ON-03", "ON-04", "ON-07", "ON-08", "ON-11", "ON-12", "ON-13", "ON-14",
-        "ON-15", "ON-18", "ON-19", "ON-20",
-        "OFF-02", "OFF-09", "OFF-15", "OFF-18",
+        "ON-01", "ON-03", "ON-04", "ON-07", "ON-08", "ON-10", "ON-11", "ON-12", "ON-13",
+        "ON-14", "ON-16", "ON-17", "ON-18",
+        "OFF-05", "OFF-09",
     }
 
 
 def test_every_llm_parameter_still_scores_without_a_model():
     """A scan must complete with no API key. Every LLM-assisted handler therefore keeps a
     deterministic fallback, which shows up in source as a heuristic score computed before
-    judge() is awaited -- except OFF-15, whose entire question is "what would an assistant
-    cite", and which correctly returns UNKNOWN instead of inventing a number."""
+    judge() is awaited. An off-page agent does not score, so its fallback is the rules-based
+    reading (`rules_*`) that the evaluator falls back on."""
     for pid, body in handler_bodies():
-        if not any(call in body for call in MODEL_CALLS) or pid == "OFF-15":
+        if not any(call in body for call in MODEL_CALLS):
             continue
         assert "llm_unavailable" in body, f"{pid} does not record why the model was unavailable"
         first_call = min(body.index(call) for call in MODEL_CALLS if call in body)
-        assert body.index("score") < first_call, f"{pid} has no pre-model fallback score"
+        marker = "rules_" if pid.startswith("OFF-") else "score"
+        assert marker in body and body.index(marker) < first_call, f"{pid} has no pre-model fallback"

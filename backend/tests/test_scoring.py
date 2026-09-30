@@ -3,7 +3,9 @@ from app.parameters.scoring import (
     category_score,
     coefficients,
     contributions,
+    final_from_rules,
     label_for_score,
+    measurable_points,
     overall_score,
     prioritize,
     status_counts,
@@ -19,8 +21,10 @@ def test_unknown_excluded_from_category():
     assert category_score(rows, "technical") == 50.0
 
 
-def test_overall_renormalizes_missing_category():
-    assert overall_score(100, 50, None) == round((100 * 0.35 + 50 * 0.40) / 0.75, 1)
+def test_overall_is_points_earned_over_points_measurable():
+    rows = _rows({f"TECH-{i:02d}": 100.0 for i in range(1, 23)}, unknown={f"OFF-{i:02d}" for i in range(1, 10)})
+    # Technical 35 points all earned, On-Page 40 points at 50%, Off-Page not measured.
+    assert overall_score(rows) == round((35 + 20) / 75 * 100, 1)
 
 
 def test_status_counts_and_labels():
@@ -38,14 +42,14 @@ def test_status_counts_and_labels():
     assert label_for_score(28) == "Critical"
 
 
-# Section sizes of the shipped registry: 22 technical, 20 on-page, 18 off-page, every
+# Section sizes of the shipped registry: 22 technical, 20 on-page, 9 off-page, every
 # weight 1.0. The ids below are generated, so they are the right SHAPE and count rather
 # than the exact shipped set -- scoring only ever weights and groups them.
-SECTION_SIZES = {"technical": 22, "on_page": 20, "off_page": 18}
+SECTION_SIZES = {"technical": 22, "on_page": 20, "off_page": 9}
 
 
 def _rows(scores: dict[str, float] | None = None, unknown: set[str] | None = None) -> list[dict]:
-    """A full 60-parameter result set. Anything in `unknown` comes back UNKNOWN/None,
+    """A full 51-parameter result set. Anything in `unknown` comes back UNKNOWN/None,
     anything else scores `scores[id]` (default 50)."""
     scores = scores or {}
     unknown = unknown or set()
@@ -66,12 +70,12 @@ def _rows(scores: dict[str, float] | None = None, unknown: set[str] | None = Non
 
 
 def _reported(rows: list[dict]) -> float:
-    return overall_score(*(category_score(rows, s) for s in ("technical", "on_page", "off_page")))
+    return overall_score(rows)
 
 
 def test_coefficients_sum_to_one_hundred():
     coeffs = coefficients(_rows())
-    assert len(coeffs) == 60
+    assert len(coeffs) == 51
     assert round(sum(coeffs.values()), 9) == 100.0
 
 
@@ -100,35 +104,39 @@ def test_earned_plus_lost_equals_the_ceiling():
         assert round(c["points_earned"] + c["points_lost"], 9) == round(c["coefficient"], 9)
 
 
-def test_unknown_rows_hand_their_weight_to_scored_siblings():
-    """An UNKNOWN is excluded from the average, not scored zero -- so the survivors in its
-    section each get a bigger share. This is the case a naive weight/count breakdown gets
-    wrong, and it still has to reconcile."""
-    half_off_page_missing = {f"OFF-{i:02d}" for i in range(1, 10)}
+def test_unknown_rows_keep_their_fixed_share_and_are_left_out_of_what_was_measured():
+    """An UNKNOWN is excluded, not scored zero -- and its points are NOT handed to its
+    siblings: every parameter is worth the same fixed share on every scan, so two sites
+    are always compared on one scale."""
+    half_off_page_missing = {f"OFF-{i:02d}" for i in range(1, 6)}
     rows = _rows(unknown=half_off_page_missing)
     coeffs = coefficients(rows)
 
     assert len(coeffs) == 51
     assert round(sum(coeffs.values()), 9) == 100.0
-    # 9 of 18 off-page checks left: each survivor is worth double its nominal 1.389
-    assert round(coeffs["OFF-10"], 4) == round(WEIGHTS["off_page"] / 9 * 100, 4)
-    assert round(coeffs["OFF-10"], 4) == round(2 * WEIGHTS["off_page"] / 18 * 100, 4)
-    # untouched sections are unaffected
+    assert round(coeffs["OFF-08"], 4) == round(WEIGHTS["off_page"] / 9 * 100, 4)
     assert round(coeffs["TECH-01"], 4) == round(WEIGHTS["technical"] / 22 * 100, 4)
-    assert abs(_reported(rows) - sum(c["points_earned"] for c in contributions(rows))) <= 0.05
+    assert round(measurable_points(rows), 9) == round(100 - 5 * WEIGHTS["off_page"] / 9 * 100, 9)
+    earned = sum(c["points_earned"] for c in contributions(rows))
+    assert abs(_reported(rows) - earned / measurable_points(rows) * 100) <= 0.05
 
 
-def test_a_silent_section_renormalises_the_others():
-    """overall_score() divides by the weight of sections that scored, so losing a whole
-    section promotes the remaining two rather than counting it as zero."""
-    rows = _rows(unknown={f"OFF-{i:02d}" for i in range(1, 19)})
-    coeffs = coefficients(rows)
+def test_a_silent_section_is_left_out_of_the_measurable_points():
+    rows = _rows(unknown={f"OFF-{i:02d}" for i in range(1, 10)})
+    assert round(measurable_points(rows), 9) == 75.0
+    assert not any(c["section"] == "off_page" for c in contributions(rows))
+    assert round(coefficients(rows)["TECH-01"], 4) == round(35 / 22, 4)
 
-    assert not any(k.startswith("OFF") for k in coeffs)
-    assert round(sum(coeffs.values()), 9) == 100.0
-    surviving = WEIGHTS["technical"] + WEIGHTS["on_page"]
-    assert round(coeffs["TECH-01"], 4) == round(WEIGHTS["technical"] / surviving / 22 * 100, 4)
-    assert abs(_reported(rows) - sum(c["points_earned"] for c in contributions(rows))) <= 0.05
+
+def test_the_rules_based_score_is_the_final_score_for_old_saved_rows():
+    row = {"parameter_id": "ON-10", "section": "on_page", "status": "PARTIAL", "score": 64.1,
+           "recommendation": "Cover the rubric.", "evidence": {"rules_based_score": 19.5}}
+    out = final_from_rules(row)
+    assert out["score"] == 19.5 and out["status"] == "FAIL"
+    assert out["evidence"]["model_score"] == 64.1
+    assert row["score"] == 64.1, "the stored row must not be mutated"
+    upgraded = final_from_rules({**row, "score": 100.0, "status": "PASS", "evidence": {"rules_based_score": 95.0}})
+    assert upgraded["status"] == "PASS" and upgraded["recommendation"] is None
 
 
 def test_prioritize_impact_is_the_exact_points_lost():
@@ -158,26 +166,21 @@ def test_prioritize_ranks_by_points_and_bands_severity():
 BANDS = ["Low Impact", "Medium Impact", "High Impact"]
 
 
-def test_severity_drift_is_bounded_when_checks_go_unmeasured():
-    """Unmeasured checks raise the surviving coefficients in their own section, so an
-    identical failure there genuinely costs more. Banding on the mean coefficient keeps
-    that from stampeding the whole report into one severity -- which is what fixed point
-    thresholds did, since every coefficient can double."""
-    intact = prioritize(_rows({"OFF-10": 70.0}))
-    degraded = prioritize(_rows({"OFF-10": 70.0}, unknown={f"OFF-{i:02d}" for i in range(1, 10)}))
+def test_an_unmeasured_sibling_does_not_change_what_a_failure_costs():
+    """Fixed points: a check's cost depends on its own score, not on how many of its
+    siblings happened to be measurable on this scan."""
+    intact = prioritize(_rows({"OFF-08": 70.0}))
+    degraded = prioritize(_rows({"OFF-08": 70.0}, unknown={f"OFF-{i:02d}" for i in range(1, 6)}))
 
-    before = next(i for i in intact if i["parameter_id"] == "OFF-10")
-    after = next(i for i in degraded if i["parameter_id"] == "OFF-10")
-
-    # half its section went unmeasured, so its share -- and its cost -- doubles
-    assert abs(after["score_impact"] / before["score_impact"] - 2) < 0.01
-    # but the label drifts by at most one band rather than jumping straight to High
-    assert BANDS.index(after["severity"]) - BANDS.index(before["severity"]) <= 1
+    before = next(i for i in intact if i["parameter_id"] == "OFF-08")
+    after = next(i for i in degraded if i["parameter_id"] == "OFF-08")
+    assert after["score_impact"] == before["score_impact"]
+    assert after["severity"] == before["severity"]
 
 
 def test_severity_discriminates_across_all_three_bands():
     """A report with a real spread of scores must not land everything in one band."""
-    rows = _rows({"ON-05": 0.0, "ON-12": 30.0, "TECH-04": 60.0, "TECH-05": 88.0})
+    rows = _rows({"ON-05": 0.0, "ON-11": 30.0, "TECH-04": 60.0, "TECH-05": 88.0})
     bands = {i["severity"] for i in prioritize(rows)}
     assert bands == set(BANDS)
 

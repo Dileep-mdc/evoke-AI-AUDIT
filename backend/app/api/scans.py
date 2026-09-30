@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections import OrderedDict
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -11,13 +10,15 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from ..config import ENGINE_VERSION
+from ..config import ENGINE_VERSION, SCAN_RETRY_DELAY
 from ..crawler import snapshot
 from ..crawler.discover import crawl_site
 from ..crawler.http import normalize_url
 from ..db import discard_scan_pages, vacuum
 from ..parameters.engine import load_registry, run_all_parameters
-from ..parameters.scoring import build_report, prioritize
+from ..parameters.formula_simple import logic_for
+from ..parameters.working import working_for
+from ..parameters.scoring import SCORING_METHOD, build_report, final_from_rules, prioritize
 from ..pdf_export import build_pdf
 from ..scan_output import build_excel, save_crawl_failures, save_crawl_output, save_excel_output
 from ..storage.repository import ScanRepository
@@ -28,20 +29,19 @@ registry = load_registry()
 log = logging.getLogger("scans")
 _running: set[asyncio.Task] = set()
 
-# The crawled site (pages, soups, sitemap, robots...) behind a completed scan, kept in
-# memory so "re-run unscored parameters" can re-evaluate against the exact same crawl
-# instead of re-crawling the site. Bounded so a long-lived server doesn't accumulate one
-# entry per scan forever; a scan that's aged out simply can't be re-run without a fresh
-# full scan.
-_ctx_cache: "OrderedDict[str, object]" = OrderedDict()
-_CTX_CACHE_SIZE = 12
 
 
-def _cache_ctx(scan_id: str, ctx) -> None:
-    _ctx_cache[scan_id] = ctx
-    _ctx_cache.move_to_end(scan_id)
-    while len(_ctx_cache) > _CTX_CACHE_SIZE:
-        _ctx_cache.popitem(last=False)
+def _worth_retrying(row: dict | None) -> bool:
+    """A check that came back unscored for a reason a second attempt can fix: a timed-out
+    model call, a rate-limited search, a network error. A check that does not apply to the
+    site, or whose source is not configured, gives the same answer every time."""
+    if row is None:
+        return True
+    if (row.get("evidence") or {}).get("not_applicable"):
+        return False
+    if "not configured" in str(row.get("error") or ""):
+        return False
+    return row["status"] == "UNKNOWN" or bool(row.get("error"))
 
 
 SECTION_TOTALS = {"technical": 0, "on_page": 0, "off_page": 0}
@@ -86,7 +86,6 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None) -> Non
             # parameters -- now reads the folder; see crawler/snapshot.py.
             snapshot.activate(snapshot.open_folder(folder))
         ctx = await crawl_site(url, on_progress=bump)
-        _cache_ctx(scan_id, ctx)
         repo.save_pages(scan_id, ctx.pages)
         # Both crawl artifacts are written before scoring starts, so the scraped content and
         # the failed-link list survive even if the model calls or the workbook later fail.
@@ -121,6 +120,23 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None) -> Non
             )
 
         results = await run_all_parameters(ctx, registry, on_each)
+        # Checks that came back unscored are retried once, straight away, against the same
+        # crawl, so the report is complete when the scan finishes and nothing has to be
+        # re-run by hand afterwards.
+        by_id = {r["parameter_id"]: r for r in results}
+        retry = [spec for spec in registry if _worth_retrying(by_id.get(spec["parameter_id"]))]
+        if retry:
+            log.info("Scan %s retrying %d unscored parameter(s): %s", scan_id, len(retry),
+                     ", ".join(s["parameter_id"] for s in retry))
+            await asyncio.sleep(SCAN_RETRY_DELAY)
+
+            async def save(row: dict) -> None:
+                repo.save_parameter(scan_id, row)
+
+            for row in await run_all_parameters(ctx, retry, save):
+                by_id[row["parameter_id"]] = row
+            results = [by_id[s["parameter_id"]] for s in registry if s["parameter_id"] in by_id]
+            repo.update(scan_id, errors_count=sum(1 for r in results if r.get("error")))
         issues = prioritize(results)
         repo.save_issues(scan_id, issues)
         completed = datetime.now(timezone.utc).isoformat()
@@ -199,6 +215,45 @@ async def _run(scan_id: str, url: str, folder: str | None = None) -> None:
         repo.update(scan_id, status="error")
 
 
+def _current_report(scan_id: str) -> dict | None:
+    """The stored report, recalculated first if it was saved under an older scoring method.
+
+    Reports are persisted when a scan finishes, so one saved before the current method
+    (rules-based final scores, fixed points per parameter) would otherwise keep showing
+    the numbers it was saved with. Rebuilding needs only the stored parameter rows, so it
+    is done once, written back, and every later read is the plain stored copy.
+    """
+    report = repo.report(scan_id)
+    if not report or report.get("scoring_method") == SCORING_METHOD:
+        return report
+    scan = repo.get(scan_id)
+    results = repo.parameters(scan_id)
+    if not scan or not results:
+        return report
+    issues = prioritize(results)
+    fresh = build_report(scan, results, issues)
+    fresh["snapshot"] = report.get("snapshot") or {}
+    repo.save_issues(scan_id, issues)
+    repo.save_report(scan_id, fresh)
+    return fresh
+
+
+def upgrade_saved_reports() -> int:
+    """Recalculate every completed scan saved under an older scoring method; returns how many."""
+    upgraded = 0
+    for scan in repo.list_scans(limit=1000):
+        if scan.get("status") != "completed":
+            continue
+        before = repo.report(scan["id"])
+        if before and before.get("scoring_method") != SCORING_METHOD:
+            try:
+                _current_report(scan["id"])
+                upgraded += 1
+            except Exception:
+                log.exception("Could not recalculate the saved report for scan %s", scan["id"])
+    return upgraded
+
+
 @router.get("/scans")
 async def list_scans():
     return [_progress_payload(s) for s in repo.list_scans()]
@@ -219,7 +274,7 @@ async def get_report(scan_id: str):
         raise HTTPException(404, "Scan not found")
     if scan["status"] != "completed":
         raise HTTPException(409, f"Scan is {scan['status']}; report not ready")
-    report = repo.report(scan_id)
+    report = _current_report(scan_id)
     if not report:
         raise HTTPException(409, "Report not persisted yet")
     return report
@@ -230,91 +285,15 @@ async def get_parameter(scan_id: str, parameter_id: str):
     row = repo.parameter(scan_id, parameter_id)
     if not row:
         raise HTTPException(404, "Parameter result not found")
+    row = final_from_rules(row)
+    row["working"] = working_for(row["parameter_id"], row.get("evidence"), row.get("score"))
+    row["logic"] = logic_for(row["parameter_id"])
     return row
-
-
-@router.post("/scans/{scan_id}/rerun-unscored")
-async def rerun_unscored(scan_id: str):
-    """Re-evaluate only the parameters that came back UNKNOWN or errored last time,
-    reusing the original crawl (no re-fetching the site) so a flaky check can be retried
-    in seconds instead of re-running the whole audit."""
-    scan = repo.get(scan_id)
-    if not scan:
-        raise HTTPException(404, "Scan not found")
-    if scan["status"] != "completed":
-        raise HTTPException(409, f"Scan is {scan['status']}; wait for it to complete first")
-
-    ctx = _ctx_cache.get(scan_id)
-    if ctx is None:
-        raise HTTPException(
-            409,
-            "The original crawl for this scan is no longer available in memory "
-            "(the server may have restarted since). Run a new full scan to refresh it.",
-        )
-
-    existing = {row["parameter_id"]: row for row in repo.parameters(scan_id)}
-
-    def worth_retrying(spec: dict) -> bool:
-        row = existing.get(spec["parameter_id"])
-        if row is None:
-            return True
-        # A parameter this build cannot evaluate at all, or one that does not apply to this
-        # site, comes back UNKNOWN every time it is run. Retrying it against the same cached
-        # crawl cannot change the answer, so including it meant the retry list was never
-        # empty: every click re-ran and re-billed a model call whose verdict was discarded
-        # by construction, and the UI never got to say there was nothing left to retry.
-        if (row.get("evidence") or {}).get("not_applicable"):
-            return False
-        return row["status"] == "UNKNOWN" or bool(row.get("error"))
-
-    failed_specs = [spec for spec in registry if worth_retrying(spec)]
-    if not failed_specs:
-        return {"rerun_count": 0, "rerun_parameter_ids": [], **_progress_payload(scan)}
-
-    repo.update(scan_id, status="evaluating")
-
-    async def on_each(row: dict) -> None:
-        repo.save_parameter(scan_id, row)
-
-    # Everything below runs with the scan parked in "evaluating". Without the finally, any
-    # failure in here -- a sqlite lock, a workbook write -- left it parked there for good:
-    # the report endpoint refuses a non-completed scan, and so does this one, so the scan
-    # could only be freed by restarting the server, which then marks it errored instead.
-    try:
-        # A scan audited from a saved folder re-checks against the same folder.
-        folder = (getattr(ctx, "snapshot", None) or {}).get("folder")
-        if folder:
-            snapshot.activate(snapshot.open_folder(folder))
-        await run_all_parameters(ctx, failed_specs, on_each)
-
-        all_results = repo.parameters(scan_id)
-        issues = prioritize(all_results)
-        repo.save_issues(scan_id, issues)
-        repo.update(scan_id, completed_at=datetime.now(timezone.utc).isoformat())
-        scan = repo.get(scan_id)
-        report = build_report(scan, all_results, issues)
-        repo.save_report(scan_id, report)
-        # The workbook name is derived from the domain, so this rewrites the same file the
-        # original scan wrote rather than leaving a fresh one behind each time the retry is
-        # clicked. As in execute_scan, a workbook failure must not lose the re-scored report.
-        try:
-            excel_path = await asyncio.to_thread(save_excel_output, report, registry)
-            repo.update(scan_id, excel_output_path=str(excel_path))
-        except Exception:
-            log.exception("Rerun of scan %s could not rewrite its workbook", scan_id)
-    finally:
-        repo.update(scan_id, status="completed")
-
-    return {
-        "rerun_count": len(failed_specs),
-        "rerun_parameter_ids": [s["parameter_id"] for s in failed_specs],
-        **_progress_payload(repo.get(scan_id)),
-    }
 
 
 @router.get("/scans/{scan_id}/download")
 async def download_report(scan_id: str):
-    report = repo.report(scan_id)
+    report = _current_report(scan_id)
     if not report:
         raise HTTPException(409, "Report not ready")
     pdf = build_pdf(report)
@@ -334,7 +313,7 @@ async def download_workbook(scan_id: str):
     existed, a cleaned data directory), and rebuilding is cheap enough that a download
     should not be the thing that fails.
     """
-    report = repo.report(scan_id)
+    report = _current_report(scan_id)
     if not report:
         raise HTTPException(409, "Report not ready")
     data = await asyncio.to_thread(build_excel, report, registry)

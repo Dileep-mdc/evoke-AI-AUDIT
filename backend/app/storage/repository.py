@@ -2,13 +2,24 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-
 from ..db import get_db
 from ..parameters.common import parameter_sort_key
+from ..parameters.renumbering import RENAMED
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _loaded(row) -> dict:
+    item = dict(row)
+    # A row keeps the name it was scanned under; a parameter renamed since reads as its new name.
+    item["name"] = RENAMED.get(item["name"], item["name"])
+    try:
+        item["evidence"] = json.loads(item["evidence"] or "{}")
+    except Exception:
+        item["evidence"] = {"raw": item["evidence"]}
+    return item
 
 
 class ScanRepository:
@@ -84,17 +95,10 @@ class ScanRepository:
             rows = conn.execute(
                 "SELECT * FROM parameter_results WHERE scan_id=?", (scan_id,)
             ).fetchall()
-        out = []
-        for r in rows:
-            item = dict(r)
-            try:
-                item["evidence"] = json.loads(item["evidence"] or "{}")
-            except Exception:
-                item["evidence"] = {"raw": item["evidence"]}
-            out.append(item)
+        out = [_loaded(r) for r in rows]
         # This is the order the report and the UI table are rendered in, so it sorts here
-        # rather than in SQL: SQLite's text collation puts a sub-numbered id such as ON-5.1
-        # after ON-22 instead of after ON-05.
+        # rather than in SQL: SQLite's text collation would put a sub-numbered id such as ON-5.1
+        # after ON-20 instead of after ON-05.
         out.sort(key=lambda item: parameter_sort_key(item["parameter_id"]))
         return out
 
@@ -106,12 +110,7 @@ class ScanRepository:
             ).fetchone()
         if not row:
             return None
-        item = dict(row)
-        try:
-            item["evidence"] = json.loads(item["evidence"] or "{}")
-        except Exception:
-            item["evidence"] = {"raw": item["evidence"]}
-        return item
+        return _loaded(row)
 
     def save_issues(self, scan_id: str, issues: list[dict]) -> None:
         with get_db() as conn:

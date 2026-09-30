@@ -59,19 +59,22 @@ def model_returns(monkeypatch):
     return install
 
 
-def test_the_model_decides_score_explanation_and_recommendation(model_returns):
+def test_the_model_explains_and_advises_but_the_rules_based_score_stands(model_returns):
+    """The final score is the Score Logic applied to the measured values, so anyone can
+    reproduce it. The model's own number is kept for reference and never replaces it."""
     model_returns({"score": 42, "explanation": "Only two of ten pages qualify.", "recommendation": "Add FAQs."})
     spec = REGISTRY[0]
 
     out = _run(apply_judgement(spec, _row(spec)))
 
-    assert out["score"] == 42.0
-    assert out["status"] == "FAIL"
+    assert out["score"] == 70.0
+    assert out["status"] == "PARTIAL"
     assert out["recommendation"] == "Add FAQs."
     assert out["evidence"]["explanation"] == "Only two of ten pages qualify."
     assert out["evidence"]["summary"] == "Only two of ten pages qualify."
-    assert out["evidence"]["scoring_method"] == "llm"
+    assert out["evidence"]["scoring_method"] == "rules_based"
     assert out["evidence"]["rules_based_score"] == 70.0
+    assert out["evidence"]["model_score"] == 42.0
 
 
 def test_the_prompt_carries_the_definition_the_metric_and_the_curated_data(model_returns):
@@ -140,8 +143,9 @@ def test_every_registry_parameter_can_be_judged(model_returns):
     model_returns({"score": 88, "explanation": "fine", "recommendation": "tweak"})
     for spec in REGISTRY:
         out = _run(apply_judgement(spec, _row(spec)))
-        assert out["evidence"]["scoring_method"] == "llm", spec["parameter_id"]
-        assert out["score"] == 88.0, spec["parameter_id"]
+        assert out["evidence"]["scoring_method"] == "rules_based", spec["parameter_id"]
+        assert out["evidence"]["model_score"] == 88.0, spec["parameter_id"]
+        assert out["score"] == 70.0, spec["parameter_id"]
 
 
 def test_insufficient_data_stays_unknown_rather_than_being_invented(monkeypatch):
@@ -261,7 +265,7 @@ def test_the_workbook_has_a_sheet_and_a_row_per_parameter_with_the_pipeline_colu
     assert first["What Was Found on Your Site (the exact data scored)"] == (
         "Pages with FAQ: 2\nPages checked: 10"
     )
-    assert first["Scored By"] == "AI model"
+    assert first["Scored By"] == "Rules-based"
     assert first["Explanation"] == "Two of ten service pages carry an FAQ block."
 
 
@@ -319,16 +323,15 @@ def test_a_check_that_never_ran_cannot_be_given_a_score(model_returns):
     assert out["status"] == "UNKNOWN"
 
 
-def test_a_downgraded_pass_does_not_claim_no_change_is_required(model_returns):
-    """result() strips the recommendation from a PASS. If the model then downgrades that row
-    to FAIL and offers no recommendation of its own, the row must not still read as if
-    nothing needs doing."""
+def test_a_failing_row_without_advice_does_not_claim_no_change_is_required(model_returns):
+    """A FAIL that reaches the workbook with no recommendation -- neither the rules-based
+    pass nor the model wrote one -- must not read as if nothing needs doing."""
     model_returns({"score": 30, "explanation": "Most pages lack titles.", "recommendation": None})
     spec = REGISTRY[0]
-    passing = _row(spec, score=100.0, status="PASS")
-    passing["recommendation"] = None  # what result() does for a PASS
+    failing = _row(spec, score=30.0, status="FAIL")
+    failing["recommendation"] = None
 
-    out = _run(apply_judgement(spec, passing))
+    out = _run(apply_judgement(spec, failing))
     assert out["status"] == "FAIL"
 
     report = _report()
@@ -344,15 +347,15 @@ def test_a_downgraded_pass_does_not_claim_no_change_is_required(model_returns):
 @pytest.mark.parametrize(
     "raw, expected",
     [
-        # Rejected outright -- the rules-based 70.0 stands instead.
-        (float("nan"), 70.0),   # min(100.0, nan) is 100.0, so clamping alone scores this 100
-        (True, 70.0),           # float(True) is 1.0, so clamping alone scores this 1
-        ([1], 70.0),
-        ({"a": 1}, 70.0),
-        ("not a number", 70.0),
+        # Rejected outright -- no model score is recorded at all.
+        (float("nan"), None),   # min(100.0, nan) is 100.0, so clamping alone scores this 100
+        (True, None),           # float(True) is 1.0, so clamping alone scores this 1
+        ([1], None),
+        ({"a": 1}, None),
+        ("not a number", None),
         # Infinity is malformed output, not a perfect site, so it is rejected rather than
         # clamped -- clamping it would hand a parameter 100 on the strength of a bug.
-        (float("inf"), 70.0),
+        (float("inf"), None),
         # Accepted: clamped, or read out of the string models sometimes quote.
         (-20, 0.0),
         ("85%", 85.0),
@@ -367,7 +370,8 @@ def test_a_malformed_score_never_reaches_the_report(model_returns, raw, expected
 
     out = _run(apply_judgement(spec, _row(spec)))
 
-    assert out["score"] == expected, f"{raw!r} became {out['score']!r}"
+    assert out["evidence"].get("model_score") == expected, f"{raw!r} became {out['evidence'].get('model_score')!r}"
+    assert out["score"] == 70.0, "the model's number, malformed or not, never replaces the rules-based score"
     json.dumps(out["score"])       # must not emit NaN/Infinity, which are invalid JSON
     json.dumps(out["evidence"])
 
@@ -464,9 +468,9 @@ def test_a_rejected_score_is_not_labelled_as_an_ai_grade(model_returns):
     assert "unusable" in out["evidence"]["llm_error"]
 
 
-def test_a_parameter_upgraded_to_pass_drops_its_stale_remediation(model_returns):
-    """result() strips the recommendation from a passing row. A row the model raises to PASS
-    must not keep the fix the failing rules-based pass had written for it."""
+def test_the_model_cannot_raise_a_failing_parameter_to_pass(model_returns):
+    """A model that calls a failing check perfect must not erase the finding: the rules-based
+    FAIL stands, and so does the remediation the rules-based pass wrote for it."""
     model_returns({"score": 100, "explanation": "All good.", "recommendation": None})
     spec = REGISTRY[0]
     failing = _row(spec, score=20.0, status="FAIL")
@@ -474,8 +478,9 @@ def test_a_parameter_upgraded_to_pass_drops_its_stale_remediation(model_returns)
 
     out = _run(apply_judgement(spec, failing))
 
-    assert out["status"] == "PASS"
-    assert out["recommendation"] is None, "a passing parameter still shows a remediation step"
+    assert out["score"] == 20.0
+    assert out["status"] == "FAIL"
+    assert out["recommendation"] == "Fix your robots.txt"
 
 
 def test_curated_data_survives_a_judgement_that_times_out(monkeypatch):

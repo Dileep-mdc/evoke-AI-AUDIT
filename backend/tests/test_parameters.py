@@ -20,7 +20,7 @@ from app.parameters.common import (
 from app.parameters.onpage import density_score
 
 
-# --- keyword density (ON-10) -----------------------------------------------------------
+# --- keyword density (ON-09) -----------------------------------------------------------
 
 NORMAL_PROSE = (
     "The consultancy helps enterprises modernise legacy platforms. The team works with "
@@ -43,7 +43,7 @@ def test_content_words_drop_function_words():
 
 
 def test_density_separates_normal_prose_from_stuffing():
-    """The whole point of ON-10. Counting function words made "the" the peak term on every
+    """The whole point of ON-09. Counting function words made "the" the peak term on every
     page, pushing normal copy into the stuffing band, so every site scored the same floor."""
     normal, _ = top_term_density(NORMAL_PROSE)
     stuffed, _ = top_term_density(STUFFED)
@@ -61,7 +61,7 @@ def test_density_is_none_for_pages_too_short_to_judge():
     assert top_term_density("Only a handful of words here.")[0] is None
 
 
-# --- near-duplicate detection (ON-20 / ON-21) ------------------------------------------
+# --- near-duplicate detection (ON-18 / ON-19) ------------------------------------------
 
 def _brute_force(documents, threshold):
     tokens = [(u, set(re.findall(r"[a-z0-9]{4,}", t.lower()))) for u, t in documents]
@@ -129,7 +129,7 @@ import asyncio  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 from app.parameters.engine import load_registry  # noqa: E402
-from app.parameters.onpage import _journey_stage_coverage, _collect_thought_leadership_signals, on_13  # noqa: E402
+from app.parameters.onpage import _journey_stage_coverage, _collect_thought_leadership_signals, on_12  # noqa: E402
 from app.parameters.technical import _collect_author_signals, tech_09, tech_17, tech_18, tech_19, tech_21  # noqa: E402
 
 SPECS = {p["parameter_id"]: p for p in load_registry()}
@@ -245,7 +245,7 @@ def test_tech19_with_no_markup_is_unknown_not_forty():
 
 # --- event-loop-blocking per-page loops now run via asyncio.to_thread ------------------
 #
-# TECH-18, ON-13 and ON-18's heuristic pass were measured at 74-101s each on a 1057-page
+# TECH-18, ON-12 and ON-16's heuristic pass were measured at 74-101s each on a 1057-page
 # scan, with no `await` inside their per-page loop -- meaning every other parameter
 # scheduled in the same PARAMETER_CONCURRENCY batch sat frozen behind them too, not just
 # these three. Extracted into plain helpers run through asyncio.to_thread(); these tests
@@ -277,9 +277,9 @@ def test_collect_thought_leadership_signals_matches_the_original_loop_shape():
     assert len(signals) == 2
 
 
-def test_on13_runs_the_extracted_helper_through_a_thread_and_scores_the_same():
+def test_on12_runs_the_extracted_helper_through_a_thread_and_scores_the_same():
     pages = [_page("https://x/a", html='<div class="author">Jane Roe</div>')]
-    out = _run(on_13(SPECS["ON-13"], _ctx(pages)))
+    out = _run(on_12(SPECS["ON-12"], _ctx(pages)))
     assert out["score"] == 80, "a real author signal must still score 80 after the move to a thread"
 
 

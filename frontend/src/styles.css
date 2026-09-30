@@ -186,7 +186,15 @@ tr.clickable:hover { background: #f8fafc; }
 
 .issue-cell { max-width: 280px; color: var(--muted); line-height: 1.45; }
 
-.param-id-cell { white-space: nowrap; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: 0.02em; }
+/* Parameter ids: a fixed-width font so every character (letters, hyphen, digits) takes the same
+   space and OFF-01 .. OFF-09 line up column for column, in a same-width chip wide enough for the
+   longest id (TECH-22) at any zoom. Rows centre vertically so the ids sit evenly down the column
+   even when a row's text runs to two lines. */
+.param-table td { vertical-align: middle; }
+.param-id-cell { width: 92px; min-width: 92px; white-space: nowrap; }
+.param-id { display: inline-block; min-width: 72px; padding: 3px 6px; border-radius: 6px; background: #f3f5f8;
+  color: #4b5563; font: 600 12px/1.4 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  text-align: center; letter-spacing: 0; }
 
 .drawer-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
 .drawer-head h2 { margin: 4px 0 0; font-size: 20px; letter-spacing: -0.01em; }
@@ -320,8 +328,32 @@ tr.clickable:hover { background: #f8fafc; }
   display: flex; align-items: center; justify-content: center; z-index: 50; padding: 24px;
 }
 .drawer {
-  width: min(720px, 100%); max-height: min(88vh, 900px); background: #fff; border-radius: 16px;
-  padding: 26px 28px; overflow: auto; box-shadow: 0 24px 70px rgba(15, 23, 42, 0.35);
+  width: min(1040px, 100%); height: min(86vh, 1000px); background: #fff; border-radius: 16px;
+  padding: 0 32px 28px; overflow: auto; box-shadow: 0 24px 70px rgba(15, 23, 42, 0.35);
+  font-size: 13px;
+}
+.drawer .drawer-head {
+  position: sticky; top: 0; z-index: 2; background: #fff;
+  padding: 22px 0 12px; margin-bottom: 6px; border-bottom: 1px solid var(--line);
+}
+.drawer .drawer-head h2 { font-size: 20px; }
+.drawer .drawer-meta { font-size: 13px; margin: 10px 0 4px; }
+.drawer .drawer-fact { font-size: 13px; padding: 10px 0; }
+.drawer .evidence-json { max-height: 420px; }
+.drawer .evidence h3 { font-size: 15px; }
+.drawer .evidence-lead { font-size: 13px; }
+
+.calc { margin: 22px 0 4px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: #fafbfc; }
+.calc h3 { margin: 0 0 10px; font-size: 14px; }
+.calc-formula { background: #fff; border: 1px solid var(--line); border-left: 3px solid var(--blue); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+.calc-formula span { display: block; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; }
+.calc-formula p { margin: 4px 0 0; font-size: 13.5px; color: var(--text); line-height: 1.55; }
+.calc-formula .calc-formula-next { margin-top: 10px; }
+.calc-formula:last-child { margin-bottom: 0; }
+.calc-note { margin: 10px 0 0; color: var(--muted); line-height: 1.5; }
+@media (max-width: 760px) {
+  .drawer { padding: 0 18px 22px; height: 94vh; }
+  .drawer-back { padding: 10px; }
 }
 .badge { border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 700; }
 .badge.PASS { background: #dcfce7; color: #15803d; }

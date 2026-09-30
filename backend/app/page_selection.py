@@ -58,32 +58,30 @@ SCOPES: dict[str, tuple[str, str]] = {
     "ON-03": ("The site's core concepts, searched for across the combined text of every crawled page.", "Nothing is excluded. Each concept is looked for in every page, and the most prose-like mention is the one quoted."),
     "ON-04": (_SITE, "Nothing is excluded by rule. Pages whose opening paragraph could not be extracted contribute no opening to judge."),
     "ON-05": ("Pages typed as service or home, or whose URL contains 'service' or 'solution'.", "Blog posts, contact, careers and policy pages are outside the rule -- the parameter asks for an FAQ on service and solution pages, and demanding one on a careers page would be wrong."),
-    "ON-5.1": ("Only pages that carry an FAQ -- either FAQPage structured data or a visible FAQ section.", "Pages with no FAQ at all are outside the rule: this checks whether existing FAQs are marked up correctly, not whether every page has one."),
+    "ON-06": ("Only pages that carry an FAQ -- either FAQPage structured data or a visible FAQ section.", "Pages with no FAQ at all are outside the rule: this checks whether existing FAQs are marked up correctly, not whether every page has one."),
     "ON-07": ("Every crawled page with body text; the model then decides which of them are pages where a buyer is evaluating options.", "Pages the model judges not to be evaluation pages are excluded from the denominator -- a company news post is not failing for having no comparison table."),
     "ON-08": ("Every list on every crawled page, excluding lists inside navigation, header and footer.", "Menu lists repeat site-wide and are not content. Lists whose items extracted as empty are also excluded and reported separately, because that is an extraction problem rather than a finding about the site."),
-    "ON-10": ("Every crawled page with at least 40 content words.", "Shorter pages are skipped: keyword density is meaningless on a page with almost no prose. Because thin pages are excluded, this score describes the more substantial part of the site."),
-    "ON-11": ("Service, solution, home and case-study pages, falling back to every page if none are identified.", "Blog and utility pages are outside the rule -- the 8-point rubric describes what a service page should cover."),
-    "ON-12": ("Pages typed home, service, case study or about -- the pages a buyer lands on to evaluate the business.", "Blog posts and utility pages are outside the rule: the parameter asks for original data on MAJOR pages, not on every article."),
-    "ON-13": ("Every author or byline signal found on any crawled page.", "Pages with no byline contribute nothing rather than counting as failures: the check grades the quality of the bylines that exist."),
-    "ON-14": (_SITE, "Nothing is excluded by rule. Pages with no text contribute no proof signals."),
-    "ON-15": ("Every sentence on the site that states a claim containing a statistic.", "Sentences without a statistic are outside the rule -- this checks whether factual claims are sourced, and a sentence making no numeric claim has nothing to source."),
-    "ON-17": (_SITE, "Nothing is excluded. Pages carrying no published or modified date count against the score rather than being skipped."),
-    "ON-18": ("Every crawled page, by title and URL, assessed for which buying-journey stage it serves.", "Nothing is excluded. The score is out of six stages, so it measures coverage of the journey rather than a count of pages."),
-    "ON-19": ("Every crawled page with a title; the model then decides which are genuine comparison pages.", "Nothing is excluded. A title matching 'best' or 'vs' is only a candidate -- the model confirms whether the page actually answers a comparison query."),
-    "ON-20": ("Every pair of crawled pages whose titles overlap enough to be candidates for competing.", "Pairs with little title overlap are not candidates. Identical titles are also excluded, and the model then confirms which remaining pairs genuinely compete."),
-    "ON-21": ("Every crawled page except those typed utility (contact, careers, policy pages).", "Utility pages are outside the rule: a contact page is legitimately short and should not count as thin content diluting the site."),
-    "ON-22": (_SITE, _SITE_WHY),
+    "ON-09": ("Every crawled page with at least 40 content words.", "Shorter pages are skipped: keyword density is meaningless on a page with almost no prose. Because thin pages are excluded, this score describes the more substantial part of the site."),
+    "ON-10": ("Service, solution, home and case-study pages, falling back to every page if none are identified.", "Blog and utility pages are outside the rule -- the 8-point rubric describes what a service page should cover."),
+    "ON-11": ("Pages typed home, service, case study or about -- the pages a buyer lands on to evaluate the business.", "Blog posts and utility pages are outside the rule: the parameter asks for original data on MAJOR pages, not on every article."),
+    "ON-12": ("Every author or byline signal found on any crawled page.", "Pages with no byline contribute nothing rather than counting as failures: the check grades the quality of the bylines that exist."),
+    "ON-13": (_SITE, "Nothing is excluded by rule. Pages with no text contribute no proof signals."),
+    "ON-14": ("Every sentence on the site that states a claim containing a statistic.", "Sentences without a statistic are outside the rule -- this checks whether factual claims are sourced, and a sentence making no numeric claim has nothing to source."),
+    "ON-15": (_SITE, "Nothing is excluded. Pages carrying no published or modified date count against the score rather than being skipped."),
+    "ON-16": ("Every crawled page, by title and URL, assessed for which buying-journey stage it serves.", "Nothing is excluded. The score is out of six stages, so it measures coverage of the journey rather than a count of pages."),
+    "ON-17": ("Every crawled page with a title; the model then decides which are genuine comparison pages.", "Nothing is excluded. A title matching 'best' or 'vs' is only a candidate -- the model confirms whether the page actually answers a comparison query."),
+    "ON-18": ("Every pair of crawled pages whose titles overlap enough to be candidates for competing.", "Pairs with little title overlap are not candidates. Identical titles are also excluded, and the model then confirms which remaining pairs genuinely compete."),
+    "ON-19": ("Every crawled page except those typed utility (contact, careers, policy pages).", "Utility pages are outside the rule: a contact page is legitimately short and should not count as thin content diluting the site."),
+    "ON-20": (_SITE, _SITE_WHY),
 
     # --- Off-page: these do not read the site at all
     **{
-        pid: ("No pages of your site. This check queries third-party sources -- public search results, Wikipedia and Wikidata -- for how the web describes your company.",
+        pid: ("No pages of your site. This check queries third-party sources -- web search results, Wikipedia and Wikidata -- for how the web describes your company.",
               "Your own pages are deliberately not read: the parameter measures external signals, and a site describing itself proves nothing about them.")
-        for pid in (
-            "OFF-01", "OFF-02", "OFF-03", "OFF-04", "OFF-05", "OFF-06", "OFF-07", "OFF-08",
-            "OFF-09", "OFF-10", "OFF-11", "OFF-12", "OFF-13", "OFF-14", "OFF-15", "OFF-16",
-            "OFF-17", "OFF-18",
-        )
+        for pid in ("OFF-01", "OFF-02", "OFF-03", "OFF-05", "OFF-06", "OFF-07", "OFF-08", "OFF-09")
     },
+    # The one off-page check that reads the site: which certifications it claims.
+    "OFF-04": (_SITE, "Nothing is excluded. Every crawled page is read for certification, ISO, CMMI and partner-tier claims."),
 }
 
 # Where each parameter records how many things it actually scored, best key first. The counts
@@ -110,10 +108,10 @@ _JUDGED_UNITS = {
     "ON-01": "distinct headings",
     "ON-03": "concepts",
     "ON-08": "lists",
-    "ON-12": "pages carrying a statistic",
-    "ON-13": "bylines",
-    "ON-15": "claims",
-    "ON-20": "candidate pairs",
+    "ON-11": "pages carrying a statistic",
+    "ON-12": "bylines",
+    "ON-14": "claims",
+    "ON-18": "candidate pairs",
 }
 
 
@@ -143,7 +141,7 @@ def link_reason(parameter_id: str, evidence: dict | None) -> str:
     # Off-page parameters measure what the rest of the web says about the company, so the
     # crawl's page counts are not their denominator and quoting them here would imply this
     # check read pages it never opened.
-    reads_site_pages = not parameter_id.startswith("OFF-")
+    reads_site_pages = not parameter_id.startswith("OFF-") or parameter_id == "OFF-04"
 
     if reads_site_pages:
         count, unit = _first_count(evidence)
@@ -176,7 +174,7 @@ def link_reason(parameter_id: str, evidence: dict | None) -> str:
     if isinstance(llm, dict) and isinstance(llm.get("population"), int):
         population, assessed = llm["population"], llm.get("assessed", 0)
         # Named, because what the model read is not always the same unit as what was scored:
-        # ON-20 compares pages but judges PAIRS of them, and "520 of 2,012" beside "1,013
+        # ON-18 compares pages but judges PAIRS of them, and "520 of 2,012" beside "1,013
         # pages" reads like a contradiction without it.
         judged_unit = _JUDGED_UNITS.get(parameter_id, "of them")
         if llm.get("complete"):

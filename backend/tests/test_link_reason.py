@@ -31,7 +31,7 @@ def test_it_answers_both_halves_of_the_question():
 def test_pages_lost_by_the_crawl_are_separated_from_pages_out_of_scope():
     """Two different facts. One is a scoping decision the reader should accept; the other is a
     gap in the evidence they should worry about."""
-    text = link_reason("ON-22", {
+    text = link_reason("ON-20", {
         "pages_assessed": 900, "pages_crawled": 1000,
         "pages_excluded_fetch_failed": 80, "pages_excluded_bot_blocked": 20,
     })
@@ -50,7 +50,7 @@ def test_a_complete_model_pass_says_so():
 def test_a_capped_or_failed_model_pass_is_not_reported_as_complete():
     """The cap and the failed batches are the two ways a reading can be partial, and both have
     to reach the reader -- a partial pass presented as whole is the original defect."""
-    text = link_reason("ON-20", {
+    text = link_reason("ON-18", {
         "pages_compared": 1013,
         "llm": {"population": 2012, "assessed": 520, "complete": False,
                 "capped_at": 600, "batches_failed": 2},
@@ -66,7 +66,7 @@ def test_off_page_parameters_do_not_claim_to_have_read_your_pages():
     """They query third-party sources. Quoting the crawl's page counts here would imply this
     check opened pages it never touched -- and engine.evaluate attaches those counts to every
     parameter, so the guard has to be explicit."""
-    text = link_reason("OFF-13", {"pages_crawled": 1063, "pages_excluded_fetch_failed": 40})
+    text = link_reason("OFF-03", {"pages_crawled": 1063, "pages_excluded_fetch_failed": 40})
 
     assert "No pages of your site" in text
     assert "ON THIS SCAN" not in text

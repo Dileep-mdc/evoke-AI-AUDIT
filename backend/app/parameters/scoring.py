@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 from ..config import WEIGHTS
+from .formula_simple import logic_for
+from .working import working_for
+
+# Stamped on every report so a report saved under an older method can be recognised and
+# recalculated (see api/scans.py::_current_report).
+SCORING_METHOD = "rules_fixed_points_v8"  # v8: ids renumbered 1..N; v7: OFF-01 yes/no; v6: OFF-08 retired
 
 
 def scored_rows(results: list[dict]) -> list[dict]:
@@ -8,39 +14,61 @@ def scored_rows(results: list[dict]) -> list[dict]:
     return [r for r in results if r["status"] != "UNKNOWN" and r.get("score") is not None]
 
 
-def coefficients(results: list[dict]) -> dict[str, float]:
-    """Each parameter's exact share, in points, of the 100-point overall score.
+def final_from_rules(row: dict) -> dict:
+    """The row as the report scores it: the rules-based score is the final score.
 
-    Both denominators below count only what was measured, because that is what the
-    scoring functions themselves divide by: category_score() sums the weight of scored
-    rows, and overall_score() sums the weight of sections that produced a score. So an
-    UNKNOWN parameter does not score zero -- it hands its share to its scored siblings,
-    and a section that returns nothing at all hands its share to the other sections.
-    Ignoring that is how a per-parameter breakdown ends up not summing to the score it
-    claims to explain.
+    Scans saved before this rule stored the model's score as the final one, with the
+    rules-based score kept in evidence["rules_based_score"]. Reading them through here puts
+    every scan -- old or new -- on the same footing as the calculation workbook: the Score
+    Logic applied to the measured values, and nothing else. The model's number is kept
+    beside it as evidence["model_score"] for reference.
     """
-    scored = scored_rows(results)
+    evidence = row.get("evidence")
+    if not isinstance(evidence, dict) or "rules_based_score" not in evidence:
+        return row
+    rules = evidence["rules_based_score"]
+    if row.get("status") == "UNKNOWN" or rules is None:
+        return row
+    out = dict(row)
+    out["evidence"] = ev = dict(evidence)
+    if row.get("score") is not None and "model_score" not in ev:
+        ev["model_score"] = row["score"]
+    out["score"] = round(float(rules), 1)
+    out["status"] = status_from_score(out["score"], row.get("pass_threshold", 90), row.get("partial_threshold", 60))
+    if out["status"] == "PASS":
+        out["recommendation"] = None
+    return out
+
+
+def status_from_score(score: float, pass_at: float = 90, partial_at: float = 60) -> str:
+    if score >= pass_at:
+        return "PASS"
+    if score >= partial_at:
+        return "PARTIAL"
+    return "FAIL"
+
+
+def coefficients(results: list[dict]) -> dict[str, float]:
+    """Each parameter's fixed share, in points, of the 100 available points.
+
+    A section's weight is split over every parameter in it, measured or not (Technical
+    35 / 22, On-Page 40 / 20, Off-Page 25 / 10 with the shipped registry), so a parameter
+    is worth the same on every scan and two sites are always compared on one scale. An
+    UNKNOWN parameter keeps its share here; it is simply left out of the points that
+    could be measured (see measurable_points()), so it neither earns nor costs anything.
+    """
     section_weight: dict[str, float] = {}
-    for r in scored:
+    for r in results:
         section_weight[r["section"]] = section_weight.get(r["section"], 0.0) + float(r.get("weight") or 1)
-    live_weight = sum(WEIGHTS[s] for s in section_weight)
-    if not live_weight:
-        return {}
     return {
-        r["parameter_id"]: (float(r.get("weight") or 1) / section_weight[r["section"]])
-        * (WEIGHTS[r["section"]] / live_weight)
-        * 100
-        for r in scored
+        r["parameter_id"]: float(r.get("weight") or 1) / section_weight[r["section"]] * WEIGHTS[r["section"]] * 100
+        for r in results
+        if r["section"] in WEIGHTS
     }
 
 
 def contributions(results: list[dict]) -> list[dict]:
-    """Exact point attribution per parameter: its ceiling, what it earned, what it forfeits.
-
-    Because both scoring steps are weighted averages -- linear in the parameter scores --
-    these are exact, not estimates. points_earned summed over every row reproduces the
-    overall score up to the two round(..., 1) calls applied on the way out.
-    """
+    """Exact point attribution per measured parameter: its ceiling, what it earned, what it lost."""
     coeffs = coefficients(results)
     out = []
     for r in scored_rows(results):
@@ -54,6 +82,11 @@ def contributions(results: list[dict]) -> list[dict]:
             "points_lost": coefficient - earned,
         })
     return out
+
+
+def measurable_points(results: list[dict], section: str | None = None) -> float:
+    """The points that could be measured: the fixed shares of every scored parameter."""
+    return sum(c["coefficient"] for c in contributions(results) if section is None or c["section"] == section)
 
 
 def scrape_confidence(page) -> dict:
@@ -105,17 +138,17 @@ def category_score(results: list[dict], section: str) -> float | None:
     return round(num / den * 100, 1) if den else None
 
 
-def overall_score(tech: float | None, onpage: float | None, offpage: float | None) -> float | None:
-    parts = []
-    weights = []
-    mapping = {"technical": tech, "on_page": onpage, "off_page": offpage}
-    for key, val in mapping.items():
-        if val is not None:
-            parts.append(val * WEIGHTS[key])
-            weights.append(WEIGHTS[key])
-    if not weights:
+def overall_score(results: list[dict]) -> float | None:
+    """Points earned / points measurable x 100, over every measured parameter.
+
+    Computed from the unrounded points, so the headline always equals what the
+    per-parameter points add up to.
+    """
+    measurable = measurable_points(results)
+    if not measurable:
         return None
-    return round(sum(parts) / sum(weights), 1)
+    earned = sum(c["points_earned"] for c in contributions(results))
+    return round(earned / measurable * 100, 1)
 
 
 def status_counts(results: list[dict]) -> dict:
@@ -142,20 +175,22 @@ def label_for_score(score: float | None) -> str:
 
 
 # Severity bands are fractions of the mean parameter coefficient rather than fixed point
-# values. Unmeasured checks inflate every surviving coefficient (see coefficients()), so
-# banding on absolute points would promote a whole report to "High Impact" just because a
-# data source was unavailable -- the cost really is higher, but the priority order isn't.
+# values, so the bands follow the registry's section sizes and weights if those change.
 HIGH_IMPACT_SHARE = 0.8
 MEDIUM_IMPACT_SHARE = 0.4
 
 
 def prioritize(results: list[dict]) -> list[dict]:
-    """Rank the fixable findings by the exact number of overall-score points each is costing."""
+    """Rank the fixable findings by the exact number of points each is costing."""
+    results = [final_from_rules(r) for r in results]
     scored = contributions(results)
     if not scored:
         return []
     points_lost = {c["parameter_id"]: c["points_lost"] for c in scored}
-    mean_coefficient = sum(c["coefficient"] for c in scored) / len(scored)
+    # Banded on every parameter's fixed share, not just the measured ones, so a check's
+    # severity does not move when unrelated checks happen to be unmeasurable on this scan.
+    fixed = coefficients(results)
+    mean_coefficient = sum(fixed.values()) / len(fixed)
     high = mean_coefficient * HIGH_IMPACT_SHARE
     medium = mean_coefficient * MEDIUM_IMPACT_SHARE
 
@@ -190,18 +225,30 @@ def prioritize(results: list[dict]) -> list[dict]:
 
 
 def build_report(scan: dict, results: list[dict], issues: list[dict]) -> dict:
+    results = [final_from_rules(r) for r in results]
     tech = category_score(results, "technical")
     onpage = category_score(results, "on_page")
     offpage = category_score(results, "off_page")
-    overall = overall_score(tech, onpage, offpage)
+    overall = overall_score(results)
     counts = status_counts(results)
     known = sum(counts[k] for k in ("pass", "partial", "fail"))
-    # Each pillar's actual points out of 100, summed from the per-parameter attribution so
-    # the dashboard displays this rather than multiplying score by weight itself -- that
-    # shortcut is wrong whenever a pillar goes unscored and the weights renormalise.
+    coeffs = coefficients(results)
+    points = {c["parameter_id"]: c for c in contributions(results)}
     earned_by_section: dict[str, float] = {}
-    for c in contributions(results):
+    for c in points.values():
         earned_by_section[c["section"]] = earned_by_section.get(c["section"], 0.0) + c["points_earned"]
+    parameters = []
+    for r in results:
+        c = points.get(r["parameter_id"])
+        parameters.append({
+            **r,
+            "working": working_for(r["parameter_id"], r.get("evidence"), r.get("score")),
+            "logic": logic_for(r["parameter_id"]),
+            "max_points": round(coeffs.get(r["parameter_id"], 0.0), 3),
+            "points_earned": round(c["points_earned"], 3) if c else None,
+            "points_lost": round(c["points_lost"], 3) if c else None,
+        })
+    measurable_total = measurable_points(results)
     return {
         "scan_id": scan["id"],
         "domain": scan["domain"],
@@ -210,6 +257,7 @@ def build_report(scan: dict, results: list[dict], issues: list[dict]) -> dict:
         "started_at": scan.get("started_at"),
         "completed_at": scan.get("completed_at"),
         "crawler_version": scan.get("crawler_version"),
+        "scoring_method": SCORING_METHOD,
         "overall_score": overall,
         "overall_label": label_for_score(overall),
         "category_scores": {
@@ -223,12 +271,21 @@ def build_report(scan: dict, results: list[dict], issues: list[dict]) -> dict:
             "off_page": label_for_score(offpage),
         },
         "weights": WEIGHTS,
+        # Points earned per pillar, out of that pillar's fixed share of 100.
         "category_contributions": {
             section: round(earned_by_section.get(section, 0.0), 3) for section in WEIGHTS
         },
+        "category_points_measurable": {
+            section: round(measurable_points(results, section), 3) for section in WEIGHTS
+        },
+        "points": {
+            "available": 100.0,
+            "measurable": round(measurable_total, 3),
+            "earned": round(sum(earned_by_section.values()), 3),
+        },
         "status_counts": counts,
         "coverage": {"scorable_parameters": len(results), "known": known, "unknown": counts["unknown"]},
-        "parameters": results,
+        "parameters": parameters,
         "top_issues": issues[:8],
         "issues": issues,
     }

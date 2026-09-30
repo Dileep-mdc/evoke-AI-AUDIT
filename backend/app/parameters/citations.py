@@ -4,7 +4,7 @@ Every score the audit produces must be traceable to what it was computed from. T
 handler returns already holds that -- the pages it graded, the links it re-fetched, the files
 it parsed, the third-party pages it queried -- but scattered across differently-shaped dicts.
 This collects every URL the evidence rests on into one list, each with a short note of what was
-found there, so the report can cite its sources the same way for all 60 parameters.
+found there, so the report can cite its sources the same way for every parameter.
 
 A score is never left uncited: when the evidence names no URL at all, the citation is the
 source the check read (`checked_url_or_source`), which every handler is required to set.

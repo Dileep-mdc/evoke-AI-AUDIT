@@ -430,7 +430,7 @@ async def on_05(spec, ctx):
     )
 
 
-async def on_05_1(spec, ctx):
+async def on_06(spec, ctx):
     t = timed()
     rows = []
     for page in scorable_pages(ctx):
@@ -583,7 +583,7 @@ async def on_08(spec, ctx):
     return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
-async def on_10(spec, ctx):
+async def on_09(spec, ctx):
     t = timed()
     rows = []
     for page in scorable_pages(ctx):
@@ -615,7 +615,7 @@ async def on_10(spec, ctx):
     )
 
 
-async def on_11(spec, ctx):
+async def on_10(spec, ctx):
     t = timed()
     pages = _service_pages(ctx) or scorable_pages(ctx)
     rows = []
@@ -671,7 +671,7 @@ def _statistics(text: str) -> list[str]:
     return [m.group(0).strip() for m in _STAT_RE.finditer(text or "") if not _YEAR_ONLY_RE.match(m.group(0).strip())]
 
 
-async def on_12(spec, ctx):
+async def on_11(spec, ctx):
     t = timed()
     rows = []
     # "Major pages" per the registry: the pages a buyer actually lands on to evaluate the
@@ -721,7 +721,7 @@ async def on_12(spec, ctx):
 
 
 def _collect_thought_leadership_signals(pages) -> list[dict]:
-    """The synchronous per-page CSS-selector + schema-walk behind ON-13.
+    """The synchronous per-page CSS-selector + schema-walk behind ON-12.
 
     Same shape as technical._collect_author_signals and the same reason it
     runs off the event loop: an unyielding per-page loop over a large site
@@ -744,7 +744,7 @@ def _collect_thought_leadership_signals(pages) -> list[dict]:
     return signals
 
 
-async def on_13(spec, ctx):
+async def on_12(spec, ctx):
     t = timed()
     signals = await asyncio.to_thread(_collect_thought_leadership_signals, scorable_pages(ctx))
     score = 80.0 if signals else 30.0
@@ -776,7 +776,7 @@ async def on_13(spec, ctx):
     return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
-async def on_14(spec, ctx):
+async def on_13(spec, ctx):
     t = timed()
     rows = []
     for page in scorable_pages(ctx):
@@ -817,7 +817,7 @@ async def on_14(spec, ctx):
     return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
-async def on_15(spec, ctx):
+async def on_14(spec, ctx):
     t = timed()
     claims = 0
     sourced = 0
@@ -861,7 +861,7 @@ async def on_15(spec, ctx):
     return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
-async def on_17(spec, ctx):
+async def on_15(spec, ctx):
     t = timed()
     dated = 0
     rows = []
@@ -891,7 +891,7 @@ async def on_17(spec, ctx):
 
 
 def _journey_stage_coverage(pages, journey: dict) -> dict:
-    """The synchronous per-page keyword scan behind ON-18's heuristic path.
+    """The synchronous per-page keyword scan behind ON-16's heuristic path.
 
     A 6-stage x N-page x ~keywords scan with no `await` inside it -- same
     event-loop-blocking shape as the two helpers above, moved off the loop
@@ -907,7 +907,7 @@ def _journey_stage_coverage(pages, journey: dict) -> dict:
     return covered
 
 
-async def on_18(spec, ctx):
+async def on_16(spec, ctx):
     t = timed()
     brand = primary_brand(ctx)
     journey = {**JOURNEY, "comparison": JOURNEY["comparison"] + ((f"why {brand}",) if brand else ())}
@@ -941,7 +941,7 @@ async def on_18(spec, ctx):
     return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
-async def on_19(spec, ctx):
+async def on_17(spec, ctx):
     t = timed()
     patterns = []
     for page in scorable_pages(ctx):
@@ -981,7 +981,7 @@ async def on_19(spec, ctx):
     return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
-async def on_20(spec, ctx):
+async def on_18(spec, ctx):
     t = timed()
     titles = [(p.result.final_url, (p.title or "").lower().strip()) for p in scorable_pages(ctx) if p.title]
     if not titles:
@@ -1039,7 +1039,7 @@ async def on_20(spec, ctx):
     return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
-async def on_21(spec, ctx):
+async def on_19(spec, ctx):
     t = timed()
     scorable = [p for p in scorable_pages(ctx) if p.page_type != "utility"]
     if not scorable:
@@ -1048,7 +1048,7 @@ async def on_21(spec, ctx):
     excerpts = [(p.result.final_url, p.text[:400]) for p in scorable if p.text]
     dups = near_duplicate_pairs(excerpts, _NEAR_DUPLICATE_SIMILARITY)
     duplicated = {u for d in dups for u in (d["a"], d["b"])}
-    # Proportional, like ON-20: the old absolute penalty (8 points per thin page, 10 per
+    # Proportional, like ON-18: the old absolute penalty (8 points per thin page, 10 per
     # duplicate pair) hit its 60-point cap at eight thin pages, so a 2000-page site with
     # eight thin pages scored identically to a 10-page site that was almost entirely thin.
     affected = len({t["url"] for t in thin} | duplicated)
@@ -1066,7 +1066,7 @@ _DILUTION_BANDS, _DILUTION_FLOOR = rules.band("dilution")
 _GENERIC_REACH_TERMS = ("united states", "usa", "uk", "europe", "asia", "north america", "global", "worldwide", "nationwide")
 
 
-async def on_22(spec, ctx):
+async def on_20(spec, ctx):
     t = timed()
     geos = tuple(derive_site_geographies(ctx)) + _GENERIC_REACH_TERMS
     cats = tuple(derive_site_categories(ctx))
@@ -1105,8 +1105,8 @@ async def on_22(spec, ctx):
 
 
 HANDLERS = {
-    "ON-01": on_01, "ON-02": on_02, "ON-03": on_03, "ON-04": on_04, "ON-05": on_05, "ON-5.1": on_05_1,
-    "ON-07": on_07, "ON-08": on_08, "ON-10": on_10, "ON-11": on_11, "ON-12": on_12,
-    "ON-13": on_13, "ON-14": on_14, "ON-15": on_15, "ON-17": on_17, "ON-18": on_18,
-    "ON-19": on_19, "ON-20": on_20, "ON-21": on_21, "ON-22": on_22,
+    "ON-01": on_01, "ON-02": on_02, "ON-03": on_03, "ON-04": on_04, "ON-05": on_05, "ON-06": on_06,
+    "ON-07": on_07, "ON-08": on_08, "ON-09": on_09, "ON-10": on_10, "ON-11": on_11,
+    "ON-12": on_12, "ON-13": on_13, "ON-14": on_14, "ON-15": on_15, "ON-16": on_16,
+    "ON-17": on_17, "ON-18": on_18, "ON-19": on_19, "ON-20": on_20,
 }

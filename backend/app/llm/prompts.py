@@ -19,20 +19,7 @@ def on03_prompt(concepts: list[dict]) -> str:
     )
 
 
-def off02_prompt(company_name: str, hits: list[dict]) -> str:
-    return (
-        f'Given the company "{company_name}", decide which (if any) of these Wikipedia search '
-        "results is genuinely a reference page about that specific company (not a different "
-        "company or a generic/disambiguation page), and rate the source's authority as a "
-        "reference for factual claims about the company.\n\n"
-        f"Search results (JSON array of {{title, snippet}}):\n{json.dumps(hits)}\n\n"
-        'Reply as JSON: {"about_company": <bool>, "best_match_title": <string or null>, '
-        '"entity_accuracy": <float 0-100, how confident this is the right entity>, '
-        '"source_authority": <float 0-100, how authoritative this source is>}'
-    )
-
-
-def off09_prompt(company_name: str, categories: list[str], snippets: list[dict]) -> str:
+def category_prompt(company_name: str, categories: list[str], snippets: list[dict]) -> str:
     return (
         f'Given the company "{company_name}", whose own site describes its business using these '
         f"categories: {json.dumps(categories)}, decide whether the third-party search snippets "
@@ -43,7 +30,7 @@ def off09_prompt(company_name: str, categories: list[str], snippets: list[dict])
     )
 
 
-def off18_prompt(company_name: str, snippets: list[dict]) -> str:
+def analyst_prompt(company_name: str, snippets: list[dict]) -> str:
     return (
         f'Given the company "{company_name}", judge whether the analyst/trade-press search '
         "snippets below describe the company accurately (not confusing it with a different "
