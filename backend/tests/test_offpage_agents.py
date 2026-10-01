@@ -186,3 +186,31 @@ def test_wikidata_finds_the_company_under_its_short_name(monkeypatch):
     two = _run(offpage.off_02(_spec("OFF-02"), ctx))
     assert one["score"] == 100 and two["score"] == 100
     assert "search=nVent+Electric&" in two["checked_url_or_source"]
+
+
+@pytest.mark.parametrize("candidate, company, same", [
+    ("NVent Electric", "nVent Electric plc", True),
+    ("Evoke Technologies", "Evoke Technologies Private Limited", True),
+    ("Evoke plc", "Evoke Technologies", False),            # a betting company, same first word
+    ("Evoke (video game)", "Evoke Technologies", False),
+    ("Acme Corp", "Acme Corp", True),
+    ("Acmeware", "Acme", False),                           # whole words only
+])
+def test_a_record_must_name_the_whole_company(candidate, company, same):
+    assert offpage_tools.names_company(candidate, company) is same
+
+
+def test_off01_does_not_take_a_same_first_word_company_for_this_one(monkeypatch):
+    async def fake_fetch(url, **kwargs):
+        if "wikidata" in url:
+            body = {"search": [{"id": "Q274372", "label": "Evoke plc", "description": "betting company"}]}
+        else:
+            body = {"query": {"search": [{"title": "Evoke plc"}, {"title": "888sport"}]}}
+        return SimpleNamespace(status_code=200, ok=True, text=__import__("json").dumps(body), error=None)
+    monkeypatch.setattr(offpage_tools, "fetch", fake_fetch)
+    ctx = _ctx()
+    ctx.company_name = "Evoke Technologies"
+    one = _run(offpage.off_01(_spec("OFF-01"), ctx))
+    two = _run(offpage.off_02(_spec("OFF-02"), ctx))
+    assert one["evidence"]["wikidata"]["present"] is False and one["evidence"]["wikipedia"]["present"] is False
+    assert one["score"] == 0 and two["score"] == 0

@@ -114,3 +114,52 @@ def test_nothing_configured_is_external_data_required(monkeypatch):
     ctx = SimpleNamespace(company_name="Acme Corp", domain="www.acme.com", origin="https://www.acme.com", pages=[])
     row = _run(offpage.off_07({"parameter_id": "OFF-07", "section": "off_page", "name": "OFF-07", "weight": 1.0}, ctx))
     assert row["status"] == "UNKNOWN" and row["evidence"]["parameter_status"] == "External Data Required"
+
+
+def _rate_limited(body=None, headers=None):
+    import httpx
+    import openai
+    response = httpx.Response(429, headers=headers or {}, request=httpx.Request("POST", "https://api.openai.com/v1/responses"))
+    return openai.RateLimitError("Rate limit reached", response=response, body=body)
+
+
+def test_a_rate_limited_search_waits_and_tries_again(monkeypatch, key):
+    calls, waits = [], []
+    ok = _result([{"url": "https://www.reddit.com/r/x/1", "title": "t", "snippet": "s"}], ["https://www.reddit.com/r/x/1"])
+
+    async def flaky(agent, prompt, **kwargs):
+        calls.append(1)
+        if len(calls) < 3:
+            raise _rate_limited(headers={"retry-after": "2"} if len(calls) == 1 else None)
+        return ok
+
+    async def no_sleep(seconds):
+        waits.append(seconds)
+    monkeypatch.setattr(agents.Runner, "run", flaky)
+    monkeypatch.setattr(oas.asyncio, "sleep", no_sleep)
+    sr = _run(oas.openai_search("q"))
+    assert sr.ok and len(sr.items) == 1
+    assert waits == [2.0, 20.0]  # OpenAI's Retry-After first, then the second step of the backoff
+
+
+def test_an_empty_account_is_not_retried(monkeypatch, key):
+    calls = []
+
+    async def broke(agent, prompt, **kwargs):
+        calls.append(1)
+        raise _rate_limited(body={"code": "insufficient_quota"})
+    monkeypatch.setattr(agents.Runner, "run", broke)
+    sr = _run(oas.openai_search("q"))
+    assert not sr.ok and len(calls) == 1 and "run out of credit" in sr.error
+
+
+def test_a_lasting_rate_limit_is_reported_after_the_retries(monkeypatch, key):
+    async def always(agent, prompt, **kwargs):
+        raise _rate_limited()
+
+    async def no_sleep(seconds):
+        pass
+    monkeypatch.setattr(agents.Runner, "run", always)
+    monkeypatch.setattr(oas.asyncio, "sleep", no_sleep)
+    sr = _run(oas.openai_search("q"))
+    assert not sr.ok and sr.status == 429 and "after 3 retries" in sr.error

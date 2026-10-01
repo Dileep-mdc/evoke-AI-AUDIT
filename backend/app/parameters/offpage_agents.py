@@ -114,16 +114,15 @@ class KnowledgeEntityAgent(Agent):
     async def research_off_01(self, ctx) -> Findings:
         """Presence only: is the company on Wikidata, and is it on Wikipedia? Each is answered
         from the search result names alone -- no page or entity data is fetched, and no model
-        is asked. An entry counts when its name carries the brand term."""
+        is asked. An entry counts when its name is the company's (see tools.names_company)."""
         wd_data, wd_meta = await tools.wikidata_search(ctx.company_name, ctx)
         wp_data, wp_meta = await tools.wikipedia_search(ctx.company_name, ctx)
         f = Findings("OFF-01", self.name, "Wikidata and Wikipedia", checked=wp_meta["url"], verify=False)
-        brand = primary_brand(ctx)
-        f.evidence = {"provider": "Wikidata + Wikipedia", "brand": brand}
+        f.evidence = {"provider": "Wikidata + Wikipedia", "matched_on": tools.short_name(ctx.company_name)}
 
         if wd_data is not None:
             hits = wd_data.get("search") or []
-            entry = next((h for h in hits if tools.compare_entities(h.get("label") or "", [brand])), None)
+            entry = tools.extract_entity(hits, ctx.company_name)
             f.evidence["wikidata"] = {"present": entry is not None, "entry": entry,
                                       "results": [h.get("label") for h in hits[:5]]}
             f.values["on_wikidata"] = entry is not None
@@ -134,7 +133,7 @@ class KnowledgeEntityAgent(Agent):
 
         if wp_data is not None:
             hits = ((wp_data.get("query") or {}).get("search") or [])
-            article = next((h.get("title") for h in hits if tools.compare_entities(h.get("title") or "", [brand])), None)
+            article = (tools.extract_entity(hits, ctx.company_name, field="title") or {}).get("title")
             f.evidence["wikipedia"] = {"present": article is not None, "article": article,
                                        "results": [h.get("title") for h in hits[:5]]}
             f.values["on_wikipedia"] = article is not None
@@ -163,7 +162,7 @@ class KnowledgeEntityAgent(Agent):
             return f
         hits = data.get("search") or []
         brand = primary_brand(ctx)
-        match = tools.extract_entity(hits, brand, org_words=False, fallback_first=False)
+        match = tools.extract_entity(hits, ctx.company_name)
         f.values["entity_found"] = match is not None
         if not match:
             # Wikidata answered and has no entity for the company: that is a finding, not a gap.

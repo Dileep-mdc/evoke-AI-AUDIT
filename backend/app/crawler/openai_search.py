@@ -21,13 +21,23 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel
 
-from ..config import GOOGLE_SEARCH_RESULTS, OPENAI_API_KEY, OPENAI_SEARCH_MODEL, OPENAI_SEARCH_TIMEOUT
+from ..config import (
+    GOOGLE_SEARCH_RESULTS,
+    OPENAI_API_KEY,
+    OPENAI_SEARCH_CONCURRENCY,
+    OPENAI_SEARCH_MODEL,
+    OPENAI_SEARCH_RETRIES,
+    OPENAI_SEARCH_TIMEOUT,
+)
 from .google_search import SearchResult
 
 PROVIDER = "OpenAI web search"
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-# Each query is a full agent run with a web search; a scan's off-page checks fire together.
-_semaphore = asyncio.Semaphore(4)
+# Each query is a full agent run with a web search, and the results it reads count against the
+# account's tokens-per-minute limit; a scan's off-page checks fire together, so few run at once.
+_semaphore = asyncio.Semaphore(max(1, OPENAI_SEARCH_CONCURRENCY))
+_RATE_LIMIT_WAITS = (10.0, 20.0, 40.0)   # seconds, when OpenAI does not say how long to wait
+_MAX_WAIT = 60.0
 
 INSTRUCTIONS = (
     "You are a web search engine. Run a web search for the query you are given and return the "
@@ -104,7 +114,9 @@ def _failure(exc: Exception) -> tuple[str, Optional[int]]:
     if isinstance(exc, asyncio.TimeoutError):
         return f"OpenAI web search timed out after {OPENAI_SEARCH_TIMEOUT:.0f}s", None
     if isinstance(exc, openai.RateLimitError):
-        return "OpenAI web search quota or rate limit reached (HTTP 429)", 429
+        if _out_of_credit(exc):
+            return "The OpenAI account has run out of credit (HTTP 429 insufficient_quota); add credit to resume web search", 429
+        return f"OpenAI web search rate limit still reached after {OPENAI_SEARCH_RETRIES} retries (HTTP 429)", 429
     if isinstance(exc, openai.AuthenticationError):
         return "OpenAI rejected the API key (HTTP 401); check OPENAI_API_KEY in backend/.env", 401
     if isinstance(exc, openai.PermissionDeniedError):
@@ -116,18 +128,48 @@ def _failure(exc: Exception) -> tuple[str, Optional[int]]:
     return f"OpenAI web search failed: {type(exc).__name__}", None
 
 
+def _out_of_credit(exc) -> bool:
+    """A 429 for an empty account, which no amount of waiting fixes, rather than a rate limit."""
+    return getattr(exc, "code", None) == "insufficient_quota" or "insufficient_quota" in str(exc)
+
+
+def _wait_for(exc, attempt: int) -> float:
+    """How long to wait before retrying a rate-limited search: OpenAI's Retry-After when sent."""
+    headers = getattr(getattr(exc, "response", None), "headers", None) or {}
+    for header, scale in (("retry-after-ms", 1000.0), ("retry-after", 1.0)):
+        try:
+            if headers.get(header):
+                return min(_MAX_WAIT, max(0.0, float(headers[header]) / scale))
+        except (TypeError, ValueError):
+            pass
+    return _RATE_LIMIT_WAITS[min(attempt, len(_RATE_LIMIT_WAITS) - 1)]
+
+
+async def _run(query: str, num: int):
+    """One search, retried when OpenAI's rate limit refuses it. The wait happens outside the
+    semaphore, so a rate-limited search does not hold a slot other searches could use."""
+    import openai
+    from agents import RunConfig, Runner
+
+    for attempt in range(OPENAI_SEARCH_RETRIES + 1):
+        try:
+            async with _semaphore:
+                return await asyncio.wait_for(
+                    Runner.run(_search_agent(), f"Query: {query}\nReturn up to {num} results.",
+                               run_config=RunConfig(tracing_disabled=True)),
+                    timeout=OPENAI_SEARCH_TIMEOUT)
+        except openai.RateLimitError as exc:
+            if _out_of_credit(exc) or attempt == OPENAI_SEARCH_RETRIES:
+                raise
+            await asyncio.sleep(_wait_for(exc, attempt))
+
+
 async def openai_search(query: str, num: int = GOOGLE_SEARCH_RESULTS) -> SearchResult:
     if not configured():
         return SearchResult(query, ok=False, provider=PROVIDER,
                             error="OpenAI web search is not configured: set OPENAI_API_KEY in backend/.env")
-    from agents import RunConfig, Runner
-
     try:
-        async with _semaphore:
-            result = await asyncio.wait_for(
-                Runner.run(_search_agent(), f"Query: {query}\nReturn up to {num} results.",
-                           run_config=RunConfig(tracing_disabled=True)),
-                timeout=OPENAI_SEARCH_TIMEOUT)
+        result = await _run(query, num)
     except Exception as exc:
         error, status = _failure(exc)
         return SearchResult(query, ok=False, provider=PROVIDER, error=error, status=status)

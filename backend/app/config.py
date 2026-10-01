@@ -168,7 +168,7 @@ PARAMETER_CONCURRENCY = 6
 PARAMETER_TIMEOUT = float(os.getenv("PARAMETER_TIMEOUT", "900"))
 # A scan retries the parameters that came back unscored once, after this many seconds -- long
 # enough for a rate-limit window to reopen -- so no parameter needs re-running by hand.
-SCAN_RETRY_DELAY = float(os.getenv("SCAN_RETRY_DELAY", "5"))
+SCAN_RETRY_DELAY = float(os.getenv("SCAN_RETRY_DELAY", "30"))
 # Ceiling on the model's judgement of one parameter (parameters/engine.py). Sized above
 # LLM_TIMEOUT x (LLM_RETRIES + 1) so an ordinary retry sequence finishes rather than being
 # cut off and falling back to the rules-based score for no reason.
@@ -244,6 +244,10 @@ SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "auto").strip().lower()
 OPENAI_SEARCH_MODEL = os.getenv("OPENAI_SEARCH_MODEL", LLM_MODEL)
 # One query is a full agent run (the model searches, reads, then answers): seconds, not millis.
 OPENAI_SEARCH_TIMEOUT = float(os.getenv("OPENAI_SEARCH_TIMEOUT", "90"))
+# Searches at once, and retries of one refused by the rate limit (HTTP 429) after waiting what
+# OpenAI asks, or 10, 20 then 40 seconds. Four at once tripped the limit and blanked OFF-07.
+OPENAI_SEARCH_CONCURRENCY = int(os.getenv("OPENAI_SEARCH_CONCURRENCY", "2"))
+OPENAI_SEARCH_RETRIES = int(os.getenv("OPENAI_SEARCH_RETRIES", "3"))
 WIKIDATA_API = os.getenv("WIKIDATA_API", "https://www.wikidata.org/w/api.php")
 WIKIPEDIA_API = os.getenv("WIKIPEDIA_API", "https://en.wikipedia.org/w/api.php")
 # Wikimedia's API policy asks clients to name themselves. Requests sent as a generic browser were

@@ -9,7 +9,7 @@ web_search() and source-specific query patterns.
     3. wikidata_search()            Wikidata entity search API
     4. crawl_page()                 open a source page
     5. extract_content()            title and visible text of a crawled page
-    6. extract_entity()             the Wikidata entity that is this company
+    6. extract_entity()             the Wikidata entry or Wikipedia article that is this company
     7. extract_company_details()    name/location details from each business-profile listing
     8. verify_source()              open a source page and confirm it is about the company
     9. compare_entities()           does a piece of text name any of the given terms
@@ -46,7 +46,6 @@ from ..crawler.openai_search import openai_search
 from ..crawler.http import fetch
 from ..crawler.parse import make_soup
 
-_ORG_WORDS = ("company", "business", "corporation", "organization", "organisation", "enterprise", "firm")
 _LIST_TITLE = re.compile(r"\b(best|top|leading)\b", re.I)
 _TEXT_LIMIT = 20_000
 
@@ -224,18 +223,10 @@ async def extract_content(page) -> dict:
 # ---------------------------------------------------------------------------------------------
 # 6-7. Entity and company-detail extraction
 # ---------------------------------------------------------------------------------------------
-def extract_entity(hits: list[dict], brand: str, *, org_words: bool = True, fallback_first: bool = True) -> Optional[dict]:
-    """The Wikidata hit that is this company.
-
-    A hit matches when its label or description carries the brand term or, with `org_words`,
-    an organisation word (company, business, firm ...). With `fallback_first` the first hit
-    stands in when nothing matches.
-    """
-    for h in hits or []:
-        blob = f"{h.get('label', '')} {h.get('description', '')}".lower()
-        if (brand and brand in blob) or (org_words and any(k in blob for k in _ORG_WORDS)):
-            return h
-    return (hits or [None])[0] if fallback_first else None
+def extract_entity(hits: list[dict], company_name: str, field: str = "label") -> Optional[dict]:
+    """The search hit that is this company: the first whose name (`field`: a Wikidata "label"
+    or a Wikipedia "title") names the company, per names_company(). None when no hit does."""
+    return next((h for h in hits or [] if names_company(h.get(field) or "", company_name)), None)
 
 
 def extract_company_details(items: list[dict], domains: tuple[str, ...], brand_terms: list[str], locations: list[str]) -> dict:
@@ -256,6 +247,23 @@ def extract_company_details(items: list[dict], domains: tuple[str, ...], brand_t
 # ---------------------------------------------------------------------------------------------
 # 8-9. Verification and matching
 # ---------------------------------------------------------------------------------------------
+def _plain(name: str) -> str:
+    """Lower-case words only: "nVent-Electric, plc." -> "nvent electric plc"."""
+    return " ".join(re.sub(r"[^\w]+", " ", (name or "").lower()).split())
+
+
+def names_company(candidate: str, company_name: str) -> bool:
+    """True when a record's name (a Wikidata label, a Wikipedia title) is this company's.
+
+    The candidate must contain the company's whole name without its legal form, as words:
+    "NVent Electric" names "nVent Electric plc", while "Evoke plc" -- a betting company --
+    does not name "Evoke Technologies", although both start with "Evoke". Matching on the
+    first word alone made every same-first-word company look like a match.
+    """
+    wanted = _plain(short_name(company_name))
+    return bool(wanted) and f" {wanted} " in f" {_plain(candidate)} "
+
+
 def compare_entities(text: str, terms: list[str]) -> bool:
     """True when the text names any of the terms (case-insensitive)."""
     text = (text or "").lower()

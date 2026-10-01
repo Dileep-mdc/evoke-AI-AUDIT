@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import time
 from dataclasses import dataclass
 from typing import Callable
@@ -123,6 +124,41 @@ async def render_many(
         log.info("skipping render pass for %d urls: %s", len(urls), unavailable)
         return results
 
+    if _loop_can_start_processes():
+        await _render_live(urls, results, user_agent, concurrency, timeout, on_progress)
+    else:
+        # The running loop cannot start a child process, so Chromium would never launch and
+        # every page would come back "render pass failed: NotImplementedError". uvicorn picks
+        # that loop on Windows whenever it runs with --reload (how start.ps1 starts it). The
+        # browser therefore runs on a worker thread with its own Proactor loop, which can.
+        await asyncio.to_thread(_on_proactor_loop, lambda: _render_live(
+            urls, results, user_agent, concurrency, timeout, on_progress))
+    rendered = sum(1 for r in results.values() if r.ok)
+    log.info("render pass: %d of %d urls rendered", rendered, len(urls))
+    return results
+
+
+def _loop_can_start_processes() -> bool:
+    """Only Windows' Proactor loop can start a subprocess there; elsewhere every loop can."""
+    if sys.platform != "win32":
+        return True
+    return isinstance(asyncio.get_running_loop(), asyncio.ProactorEventLoop)
+
+
+def _on_proactor_loop(make_coro) -> None:
+    with asyncio.Runner(loop_factory=asyncio.ProactorEventLoop) as runner:
+        runner.run(make_coro())
+
+
+async def _render_live(
+    urls: list[str],
+    results: dict[str, RenderResult],
+    user_agent: str,
+    concurrency: int,
+    timeout: float,
+    on_progress: Callable[[int], None] | None,
+) -> None:
+    """Render `urls` in one shared headless browser, writing each outcome into `results`."""
     from playwright.async_api import async_playwright
 
     done = 0
@@ -149,7 +185,7 @@ async def render_many(
                 for r in results.values():
                     r.error = reason
                 log.warning("render pass unavailable -- %s", reason)
-                return results
+                return
 
             semaphore = asyncio.Semaphore(max(1, concurrency))
 
@@ -211,7 +247,3 @@ async def render_many(
             if not r.ok and r.error == "not rendered":
                 r.error = reason
         log.warning("%s", reason)
-
-    rendered = sum(1 for r in results.values() if r.ok)
-    log.info("render pass: %d of %d urls rendered", rendered, total)
-    return results
