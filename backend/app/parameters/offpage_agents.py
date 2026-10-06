@@ -38,9 +38,7 @@ from ..llm.client import judge
 from ..llm.prompts import SYSTEM, analyst_prompt, category_prompt
 from . import offpage_tools as tools
 from .common import derive_site_categories, derive_site_geographies, primary_brand
-
-REVIEW_DOMAINS = ("g2.com", "clutch.co", "gartner.com", "trustradius.com")
-PROFILE_DOMAINS = ("linkedin.com", "crunchbase.com", "bloomberg.com", "zoominfo.com")
+from .platforms import platforms_for
 
 # parameter_status values (data contract). The first three mean the evidence was not available.
 EXTERNAL_DATA_REQUIRED = "External Data Required"
@@ -98,6 +96,9 @@ class Agent:
     name = ""
     parameters: tuple[str, ...] = ()
     tools: tuple[str, ...] = ()
+    # Whether this agent's checks need a web-search provider. The dashboard warns up front when
+    # none is configured, naming how many checks will go unmeasured.
+    needs_web_search = True
 
     async def research(self, parameter_id: str, ctx) -> Findings:
         return await getattr(self, "research_" + parameter_id.lower().replace("-", "_"))(ctx)
@@ -110,6 +111,7 @@ class KnowledgeEntityAgent(Agent):
     name = "Knowledge Entity Agent"
     parameters = ("OFF-01", "OFF-02")
     tools = ("wikidata_search", "wikipedia_search", "extract_entity", "compare_entities")
+    needs_web_search = False
 
     async def research_off_01(self, ctx) -> Findings:
         """Presence only: is the company on Wikidata, and is it on Wikipedia? Each is answered
@@ -188,16 +190,18 @@ class CompanyProfileAgent(Agent):
     tools = ("web_search", "crawl_page", "extract_company_details", "compare_entities")
 
     async def research_off_03(self, ctx) -> Findings:
-        sr = await tools.web_search_company('"{name}" ' + tools.site_or(PROFILE_DOMAINS), ctx.company_name)
+        domains = platforms_for(ctx)["profile"]
+        sr = await tools.web_search_company('"{name}" ' + tools.site_or(domains), ctx.company_name)
         if not sr.ok:
             return _search_failed("OFF-03", self.name, "Business profiles", sr)
-        hits = tools.domains_present(sr.urls, PROFILE_DOMAINS)
+        hits = tools.domains_present(sr.urls, domains)
         found = [d for d, v in hits.items() if v]
         locations = [g.lower() for g in derive_site_geographies(ctx)]
         profiles = tools.extract_company_details(sr.items, tuple(found), [ctx.company_name.lower(), primary_brand(ctx)], locations)
         f = Findings("OFF-03", self.name, "Business profiles", checked=sr.display_url)
-        f.values = {"platforms_found": found, "profiles": profiles}
-        f.evidence = {"provider": sr.provider, "query": sr.query, "platforms_found": found, "matches": hits,
+        f.values = {"platforms_found": found, "profiles": profiles, "platforms_checked": list(domains)}
+        f.evidence = {"provider": sr.provider, "query": sr.query, "platforms_checked": list(domains),
+                      "platform_set": platforms_for(ctx)["label"], "platforms_found": found, "matches": hits,
                       "profiles": profiles, "site_locations": locations,
                       "note": "Consistency is read from each profile's search listing (title and snippet), not from the full profile page."}
         f.source_urls = [p["urls"][0] for p in profiles.values() if p["urls"]]
@@ -264,10 +268,11 @@ class ReviewIntelligenceAgent(Agent):
     tools = ("web_search", "extract_reviews", "extract_dates_and_rankings", "compare_entities")
 
     async def research_off_05(self, ctx) -> Findings:
-        sr = await tools.web_search_company('"{name}" ' + tools.site_or(REVIEW_DOMAINS), ctx.company_name)
+        domains = platforms_for(ctx)["review"]
+        sr = await tools.web_search_company('"{name}" ' + tools.site_or(domains), ctx.company_name)
         if not sr.ok:
             return _search_failed("OFF-05", self.name, "Review platforms", sr)
-        hits = tools.domains_present(sr.urls, REVIEW_DOMAINS)
+        hits = tools.domains_present(sr.urls, domains)
         found = [d for d, v in hits.items() if v]
         rows = tools.extract_reviews(sr.items, tuple(found))
         listings = [{"title": i["title"], "snippet": i["snippet"]} for i in rows]
@@ -276,7 +281,8 @@ class ReviewIntelligenceAgent(Agent):
         # Rules-based reading first, so the check still has an input with no model available.
         rules_category_match = bool(listings and categories and tools.compare_entities(blob, categories))
         f = Findings("OFF-05", self.name, "Review platforms", checked=sr.display_url)
-        f.evidence = {"provider": sr.provider, "query": sr.query, "platforms_found": found, "matches": hits,
+        f.evidence = {"provider": sr.provider, "query": sr.query, "platforms_checked": list(domains),
+                      "platform_set": platforms_for(ctx)["label"], "platforms_found": found, "matches": hits,
                       "snippets": listings[:8], "site_categories": categories, "category_method": "keyword"}
         llm_category_match = None
         if listings and categories:
@@ -288,19 +294,21 @@ class ReviewIntelligenceAgent(Agent):
             elif not llm_res.ok:
                 f.evidence["llm_unavailable"] = llm_res.error
         f.values = {"platforms_found": found, "rules_category_match": rules_category_match,
-                    "llm_category_match": llm_category_match}
+                    "llm_category_match": llm_category_match, "platforms_checked": list(domains)}
         f.source_urls = [v[0] for v in hits.values() if v]
         return f
 
     async def research_off_06(self, ctx) -> Findings:
-        sr = await tools.web_search_company('"{name}" reviews ' + tools.site_or(REVIEW_DOMAINS), ctx.company_name)
+        domains = platforms_for(ctx)["review"]
+        sr = await tools.web_search_company('"{name}" reviews ' + tools.site_or(domains), ctx.company_name)
         if not sr.ok:
             return _search_failed("OFF-06", self.name, "Review platforms", sr)
-        rows = tools.extract_reviews(sr.items, REVIEW_DOMAINS)
+        rows = tools.extract_reviews(sr.items, domains)
         dated = tools.extract_dates_and_rankings(rows)
         f = Findings("OFF-06", self.name, "Review platforms", checked=sr.display_url)
         f.values = {"review_results": len(rows), "newest_review_age_days": dated["age_days"]}
-        f.evidence = {"provider": sr.provider, "query": sr.query, "review_results": len(rows),
+        f.evidence = {"provider": sr.provider, "query": sr.query, "platforms_checked": list(domains),
+                      "platform_set": platforms_for(ctx)["label"], "review_results": len(rows),
                       "review_urls": [i["url"] for i in rows][:10], "newest_review_date": dated["newest_date"],
                       "newest_review_age_days": dated["age_days"], "dated_results": len(dated["dates"]),
                       "note": "Volume is the number of review-platform results; recency comes from the date each result page publishes or the search result shows. Review counts on each platform are not read."}
@@ -317,24 +325,26 @@ class CommunityPresenceAgent(Agent):
     tools = ("web_search",)
 
     async def research_off_07(self, ctx) -> Findings:
-        sr = await tools.web_search_company('"{name}" (site:reddit.com OR site:quora.com OR inurl:forum OR inurl:community)', ctx.company_name)
+        sites = platforms_for(ctx)["community"]
+        scope = " OR ".join([f"site:{d}" for d in sites] + ["inurl:forum", "inurl:community"])
+        sr = await tools.web_search_company('"{name}" (' + scope + ")", ctx.company_name)
         if not sr.ok:
             return _search_failed("OFF-07", self.name, "Reddit, Quora and forums", sr)
         own = (ctx.domain or "").lower().removeprefix("www.")
-        found: dict[str, list[str]] = {"reddit.com": [], "quora.com": [], "forums": []}
+        found: dict[str, list[str]] = {**{d: [] for d in sites}, "forums": []}
         for u in sr.urls:
             if own and tools.on_domain(u, own):
                 continue
-            if tools.on_domain(u, "reddit.com"):
-                found["reddit.com"].append(u)
-            elif tools.on_domain(u, "quora.com"):
-                found["quora.com"].append(u)
+            site = next((d for d in sites if tools.on_domain(u, d)), None)
+            if site:
+                found[site].append(u)
             elif "forum" in u.lower() or "community" in u.lower():
                 found["forums"].append(u)
         count = sum(len(v) for v in found.values())
         f = Findings("OFF-07", self.name, "Reddit, Quora and forums", checked=sr.display_url)
         f.values = {"mentions_found": count}
-        f.evidence = {"provider": sr.provider, "query": sr.query, "mentions_found": count, "matches": found,
+        f.evidence = {"provider": sr.provider, "query": sr.query, "platforms_checked": list(sites),
+                      "platform_set": platforms_for(ctx)["label"], "mentions_found": count, "matches": found,
                       "note": "Presence signal only; whether each thread is substantive is not individually judged."}
         f.source_urls = [u for v in found.values() for u in v]
         return f

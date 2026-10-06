@@ -10,13 +10,15 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from ..config import ENGINE_VERSION, SCAN_RETRY_DELAY
+from ..config import ENGINE_VERSION, LLM_SCAN_BUDGET_USD, SCAN_RETRY_DELAY
 from ..crawler import snapshot
 from ..crawler.discover import crawl_site
 from ..crawler.http import normalize_url
 from ..db import discard_scan_pages, vacuum
+from ..llm import usage
 from ..parameters.engine import load_registry, run_all_parameters
 from ..parameters.formula_simple import logic_for
+from ..parameters.platforms import resolve as resolve_platforms
 from ..parameters.working import working_for
 from ..parameters.scoring import SCORING_METHOD, build_report, final_from_rules, prioritize
 from ..pdf_export import build_pdf
@@ -28,6 +30,11 @@ repo = ScanRepository()
 registry = load_registry()
 log = logging.getLogger("scans")
 _running: set[asyncio.Task] = set()
+# AI spend of the scans running in this process, for the progress screen: the live meter and the
+# estimate made once the crawl's size is known. Dropped when the scan ends; the report keeps both.
+_meters: dict[str, usage.Meter] = {}
+_estimates: dict[str, dict] = {}
+_history_cache: list[dict] | None = None
 
 
 
@@ -51,6 +58,34 @@ for _spec in registry:
 
 class ScanRequest(BaseModel):
     url: str = Field(..., min_length=1)
+    # Optional off-page site sets to add to the default lists (parameters/offpage_platforms.json).
+    industry: str | None = None
+    region: str | None = None
+
+
+def usage_history(limit: int = 10) -> list[dict]:
+    """What recent completed scans spent on AI, for estimating the next one.
+
+    Read from saved reports, newest first, and cached until the next scan completes: the
+    estimate is shown on every progress poll and must not re-read reports each time.
+    """
+    global _history_cache
+    if _history_cache is None:
+        out = []
+        for scan in repo.list_scans(limit=30):
+            if scan.get("status") != "completed":
+                continue
+            spent = (repo.report(scan["id"]) or {}).get("ai_usage") or {}
+            if spent.get("calls") and spent.get("pages"):
+                entry = {"pages": spent["pages"], "calls": spent["calls"] + spent.get("search_calls", 0),
+                         "cost_usd": spent.get("cost_usd") or 0.0}
+                if "scaling_calls" in spent:
+                    entry.update(scaling_calls=spent["scaling_calls"], scaling_cost_usd=spent.get("scaling_cost_usd") or 0.0)
+                out.append(entry)
+            if len(out) >= limit:
+                break
+        _history_cache = out
+    return _history_cache
 
 
 def _progress_payload(scan: dict) -> dict:
@@ -70,12 +105,24 @@ def _progress_payload(scan: dict) -> dict:
         "completed_at": scan.get("completed_at"),
         "errors_count": scan.get("errors_count") or 0,
         "overall_score": scan.get("overall_score"),
+        "ai_usage": _live_usage(scan["id"]),
     }
 
 
-async def execute_scan(scan_id: str, url: str, folder: str | None = None) -> None:
+def _live_usage(scan_id: str) -> dict | None:
+    meter = _meters.get(scan_id)
+    if meter is None:
+        return None
+    return {**meter.as_dict(), "estimate": _estimates.get(scan_id)}
+
+
+async def execute_scan(scan_id: str, url: str, folder: str | None = None, platforms: dict | None = None) -> None:
+    global _history_cache
     log.info("Scan %s starting %s%s", scan_id, url, f" from saved folder {folder}" if folder else "")
     repo.update(scan_id, status="crawling", progress_percent=2)
+    # Every model call and web search this scan makes is counted here, and refused once the
+    # optional spending cap is reached (llm/usage.py).
+    meter = _meters[scan_id] = usage.start(LLM_SCAN_BUDGET_USD)
 
     def bump(pct: int) -> None:
         repo.update(scan_id, status="crawling", progress_percent=pct)
@@ -86,6 +133,11 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None) -> Non
             # parameters -- now reads the folder; see crawler/snapshot.py.
             snapshot.activate(snapshot.open_folder(folder))
         ctx = await crawl_site(url, on_progress=bump)
+        ctx.platforms = platforms or resolve_platforms()
+        # The crawl's size is now known, so the AI spend can be estimated before scoring starts.
+        estimate = usage.estimate(len(ctx.pages), usage_history())
+        if estimate:
+            _estimates[scan_id] = estimate
         repo.save_pages(scan_id, ctx.pages)
         # Both crawl artifacts are written before scoring starts, so the scraped content and
         # the failed-link list survive even if the model calls or the workbook later fail.
@@ -146,7 +198,10 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None) -> Non
         # Which copy of the site was audited: the saved folder or the live web. The dashboard
         # shows it, since scores from a snapshot describe the site as of the day it was saved.
         report["snapshot"] = getattr(ctx, "snapshot", None) or {}
+        report["platforms"] = ctx.platforms
+        report["ai_usage"] = {**meter.as_dict(), "pages": len(ctx.pages), "estimate": _estimates.get(scan_id)}
         repo.save_report(scan_id, report)
+        _history_cache = None
         # The workbook is an artifact of the report, not a precondition for it. Writing it
         # used to sit inside this try, so a locked file on a synced drive -- or any openpyxl
         # complaint about one character of scraped text -- marked a finished scan as "error",
@@ -177,6 +232,9 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None) -> Non
                 log.info("Discarded %d page rows from failed scan %s", dropped, scan_id)
         except Exception:
             log.exception("Could not discard page rows for failed scan %s", scan_id)
+    finally:
+        _meters.pop(scan_id, None)
+        _estimates.pop(scan_id, None)
 
 
 @router.post("/scans")
@@ -191,6 +249,7 @@ async def create_scan(payload: ScanRequest):
         else:
             url = normalize_url(payload.url)
             folder = None
+        platforms = resolve_platforms(payload.industry, payload.region)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     domain = urlparse(url).netloc.lower()
@@ -201,15 +260,15 @@ async def create_scan(payload: ScanRequest):
         onpage_total=SECTION_TOTALS["on_page"],
         offpage_total=SECTION_TOTALS["off_page"],
     )
-    task = asyncio.create_task(_run(scan_id, url, folder), name=f"scan-{scan_id}")
+    task = asyncio.create_task(_run(scan_id, url, folder, platforms), name=f"scan-{scan_id}")
     _running.add(task)
     task.add_done_callback(_running.discard)
     return _progress_payload(scan)
 
 
-async def _run(scan_id: str, url: str, folder: str | None = None) -> None:
+async def _run(scan_id: str, url: str, folder: str | None = None, platforms: dict | None = None) -> None:
     try:
-        await execute_scan(scan_id, url, folder)
+        await execute_scan(scan_id, url, folder, platforms)
     except Exception:
         log.exception("Scan %s crashed", scan_id)
         repo.update(scan_id, status="error")
@@ -233,6 +292,9 @@ def _current_report(scan_id: str) -> dict | None:
     issues = prioritize(results)
     fresh = build_report(scan, results, issues)
     fresh["snapshot"] = report.get("snapshot") or {}
+    for key in ("platforms", "ai_usage"):
+        if key in report:
+            fresh[key] = report[key]
     repo.save_issues(scan_id, issues)
     repo.save_report(scan_id, fresh)
     return fresh

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
-import { createScan, downloadUrl, getParameter, getProgress, getReport, listScans } from "./api";
+import { createScan, downloadUrl, getParameter, getProgress, getReport, getStatus, listScans } from "./api";
 import logoIcon from "./assets/logo-icon.png";
 
 function band(score) {
@@ -289,6 +289,59 @@ function EvidencePanel({ evidence, error }) {
   );
 }
 
+function money(n) {
+  if (n == null || Number.isNaN(n)) return "—";
+  return `$${Number(n).toFixed(n > 0 && n < 0.01 ? 4 : 2)}`;
+}
+
+// Setup and coverage notices. The backend writes the setup ones (GET /api/status), so the wording
+// of what is not configured lives next to the configuration it describes.
+function Notices({ items, className = "" }) {
+  if (!items || !items.length) return null;
+  return (
+    <div className={`notices ${className}`}>
+      {items.map((n, i) => (
+        <div key={i} className={`notice notice-${n.level}`}>
+          <b>{n.title}</b>
+          {n.text && <p>{n.text}</p>}
+          {n.list && <ul className="notice-list">{n.list.map((x, j) => <li key={j}>{x}</li>)}</ul>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// AI spend of a scan: live while it runs (progress feed), final on the report.
+function AiUsage({ usage, final = false }) {
+  if (!usage) return null;
+  const est = usage.estimate;
+  return (
+    <div className="ai-usage">
+      {final ? "AI used for this report: " : "AI so far: "}
+      <b>{(usage.calls || 0).toLocaleString()}</b> model calls
+      {usage.search_calls ? <>, <b>{usage.search_calls}</b> web searches</> : null}, about <b>{money(usage.cost_usd)}</b>
+      {!usage.search_fee_counted && usage.search_calls ? " (search tool fees not included)" : ""}
+      {!final && est && (
+        <> · expected for this site: about <b>{est.calls.toLocaleString()}</b> calls, <b>{money(est.cost_usd)}</b> (from {est.based_on_scans} earlier scan{est.based_on_scans === 1 ? "" : "s"})</>
+      )}
+      {usage.budget_usd ? <> · cap <b>{money(usage.budget_usd)}</b></> : null}
+      {usage.budget_reached && (
+        <div className="ai-usage-cap">Spending cap reached: further AI calls were skipped, so the remaining checks use their rules-based scores and each check's evidence shows how much of the site was judged.</div>
+      )}
+    </div>
+  );
+}
+
+function unmeasuredReasons(rows) {
+  const reasons = [...new Set(rows.map((p) => {
+    const e = String(p.error || "");
+    if (/not configured/i.test(e)) return "web search is not configured";
+    if (/budget/i.test(e)) return "the AI spending cap was reached";
+    return e ? friendlyError(e) : "source unavailable";
+  }))];
+  return reasons.slice(0, 2).join("; ");
+}
+
 function Icon({ name }) {
   const common = { width: 18, height: 18, fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round", strokeLinejoin: "round" };
   if (name === "home") return <svg {...common}><path d="M3 10.5 9 4l6 6.5" /><path d="M5 9.5V16h8V9.5" /></svg>;
@@ -362,6 +415,13 @@ function Landing() {
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [status, setStatus] = useState(null);
+  const [industry, setIndustry] = useState("");
+  const [region, setRegion] = useState("");
+
+  useEffect(() => {
+    getStatus().then(setStatus).catch(() => setStatus(null));
+  }, []);
 
   async function start() {
     const target = url.trim();
@@ -372,7 +432,7 @@ function Landing() {
     setBusy(true);
     setError("");
     try {
-      const scan = await createScan(target);
+      const scan = await createScan(target, { industry, region });
       nav(`/scan/${scan.scan_id}`);
     } catch (e) {
       setError(e.message);
@@ -393,6 +453,7 @@ function Landing() {
       <p className="hero-sub">
         Understand how your brand appears in AI-generated answers. Monitor visibility, sentiment and brand mentions across top AI platforms.
       </p>
+      <Notices items={status?.warnings} />
       <div className="hero-input-pill">
         <input
           value={url}
@@ -405,6 +466,25 @@ function Landing() {
         </button>
       </div>
       {error && <p className="hero-error">{error}</p>}
+      {status?.platforms && (
+        <div className="scan-options">
+          <span>Off-Page sites to add:</span>
+          <select value={industry} onChange={(e) => setIndustry(e.target.value)} aria-label="Industry">
+            <option value="">Any industry</option>
+            {status.platforms.industries.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+          </select>
+          <select value={region} onChange={(e) => setRegion(e.target.value)} aria-label="Region">
+            <option value="">Any region</option>
+            {status.platforms.regions.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+          </select>
+        </div>
+      )}
+      <p className="scan-cost-hint">
+        {status?.cost?.typical_per_100_pages
+          ? `Typical AI cost: about ${money(status.cost.typical_per_100_pages.cost_usd)} per 100 pages (from the last ${status.cost.typical_per_100_pages.based_on_scans} scans).`
+          : "AI cost is measured on every scan and shown while it runs."}
+        {status?.cost?.budget_usd ? ` Spending cap: ${money(status.cost.budget_usd)} per scan.` : ""}
+      </p>
       <div className="hero-sub-heading">Understand where your brand stands in AI search:</div>
       <div className="feature-grid">
         {features.map((f) => (
@@ -471,6 +551,7 @@ function Scanning() {
         </div>
       ))}
       <p style={{ color: "var(--muted)" }}>Overall {Math.round(p?.progress_percent || 0)}% · {p?.status || "queued"}</p>
+      <AiUsage usage={p?.ai_usage} />
       {err && <p style={{ color: "var(--red)" }}>{err}</p>}
     </div>
   );
@@ -724,6 +805,37 @@ function Dashboard() {
     return out;
   }, [params, search]);
 
+  // Unmeasured checks are left out of the score, not counted as 0 -- so a score with gaps must
+  // say so, or an audit that could not run a third of a pillar reads as a complete one.
+  const reportNotices = useMemo(() => {
+    const names = { technical: "Technical", on_page: "On-Page", off_page: "Off-Page" };
+    const gaps = Object.entries(names)
+      .map(([key, name]) => {
+        const rows = params.filter((p) => p.section === key);
+        return { name, total: rows.length, unknown: rows.filter((p) => p.status === "UNKNOWN") };
+      })
+      .filter((g) => g.unknown.length);
+    const out = [];
+    if (gaps.length) {
+      out.push({
+        level: "warning",
+        title: "Partial score: some checks could not be measured",
+        text: "Checks that could not be measured are left out of the score rather than counted as 0, so the overall score covers only the checks that ran.",
+        list: gaps.map((g) => `${g.name}: ${g.unknown.length} of ${g.total} not measured (${unmeasuredReasons(g.unknown)})`),
+      });
+    }
+    const plat = report?.platforms;
+    if (plat && (plat.industry || plat.region)) {
+      out.push({
+        level: "info",
+        title: `Off-Page sites checked: ${plat.label}`,
+        text: `Review sites: ${(plat.review || []).join(", ")}. Business profiles: ${(plat.profile || []).join(", ")}.`,
+      });
+    }
+    return out;
+  }, [params, report]);
+  const partial = reportNotices.some((n) => n.level === "warning");
+
   if (err) {
     return (
       <Shell view="home" onView={setView} search={search} onSearch={setSearch} toast={toast}>
@@ -753,6 +865,8 @@ function Dashboard() {
               <button className="btn btn-primary" onClick={() => nav("/")}><Icon name="plus" /> Create New Report</button>
             </div>
           </div>
+
+          <Notices items={reportNotices} className="report-notices" />
 
           <div className="card visibility-card">
             <div className="card-head">
@@ -789,6 +903,7 @@ function Dashboard() {
                 </table>
                 <div className="overall-score-line">
                   Overall Score <span className={`overall-score-value band ${overallBand.cls}`}>{fmt(overall)}</span>
+                  {partial && <span className="drawer-note"> (partial: not every check could be measured)</span>}
                 </div>
               </div>
               <div className="gauge-row">
@@ -797,6 +912,7 @@ function Dashboard() {
                 ))}
               </div>
             </div>
+            <AiUsage usage={report.ai_usage} final />
             <div className="legend-row">
               <span className="band excellent">90+ Excellent</span>
               <span className="band good">75–89 Good</span>

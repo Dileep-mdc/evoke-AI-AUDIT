@@ -592,6 +592,9 @@ class SiteContext:
     render: dict = field(default_factory=dict)
     # Set when the scan read a saved copy of the site (crawler/snapshot.py) instead of the web.
     snapshot: dict = field(default_factory=dict)
+    # The off-page review/profile/community sites this scan checks (parameters/platforms.py).
+    # Empty means the default set; the scan request fills it when an industry or region is chosen.
+    platforms: dict = field(default_factory=dict)
 
 
 def _priority_urls(origin: str, sitemap_urls: list[str], homepage_links: list[str]) -> list[str]:

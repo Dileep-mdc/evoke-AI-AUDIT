@@ -8,8 +8,13 @@ async function read(res) {
   return data;
 }
 
-export function createScan(url) {
-  return fetch("/api/scans", { method: "POST", headers, body: JSON.stringify({ url }) }).then(read);
+export function createScan(url, options = {}) {
+  const body = { url, industry: options.industry || null, region: options.region || null };
+  return fetch("/api/scans", { method: "POST", headers, body: JSON.stringify(body) }).then(read);
+}
+
+export function getStatus() {
+  return fetch("/api/status").then(read);
 }
 
 export function getProgress(id) {

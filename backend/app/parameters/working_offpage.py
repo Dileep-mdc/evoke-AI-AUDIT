@@ -16,12 +16,17 @@ import functools
 from typing import Callable, Optional
 
 from . import rules
-from .offpage_agents import PROFILE_DOMAINS, REVIEW_DOMAINS
+from .offpage_scoring import presence_target
+from .platforms import DEFAULT
 
 Result = Optional[tuple[str, float]]
 
-_PROFILE_DOMAINS = PROFILE_DOMAINS
-_REVIEW_DOMAINS = REVIEW_DOMAINS
+
+def _checked(ev: dict, kind: str) -> tuple[str, ...]:
+    """The sites this row was checked against. Rows from before the lists were configurable
+    carry no record of them, and were checked against the default set."""
+    listed = ev.get("platforms_checked")
+    return tuple(listed) if isinstance(listed, list) and listed else DEFAULT[kind]
 
 
 def fmt(value: float) -> str:
@@ -128,16 +133,19 @@ def off_02(ev: dict) -> Result:
 
 @_safe
 def off_03(ev: dict) -> Result:
-    found = _found(ev, _PROFILE_DOMAINS)
+    sites = _checked(ev, "profile")
+    found = _found(ev, sites)
     if found is None:
         return None
     name = _num(ev.get("name_consistent_share")) or 0.0
     loc = _num(ev.get("location_consistent_share")) or 0.0
-    presence = len(found) / 4 * 70
+    need = presence_target(len(sites))
+    presence = min(len(found), need) / need * 70
     score = presence + name * 15 + loc * 15
     if not found:
-        return f"None of the 4 business profiles ({_and(list(_PROFILE_DOMAINS))}) were found, {_so(score)}", score
-    return (f"{len(found)} of the 4 business profiles were found ({_and(found)}) for {fmt(presence)} of 70 points."
+        return f"None of the {len(sites)} business profiles checked ({_and(list(sites))}) were found, {_so(score)}", score
+    of = f"of the {len(sites)} business profiles checked" + (f" (any {need} earn full marks)" if need < len(sites) else "")
+    return (f"{len(found)} {of} were found ({_and(found)}) for {fmt(presence)} of 70 points."
             f" The company name matches the website on {fmt(name * 100)}% of them ({fmt(name * 15)} of 15 points) and"
             f" the location on {fmt(loc * 100)}% ({fmt(loc * 15)} of 15 points), {_so(score)}"), score
 
@@ -155,15 +163,18 @@ def off_04(ev: dict) -> Result:
 
 @_safe
 def off_05(ev: dict) -> Result:
-    found = _found(ev, _REVIEW_DOMAINS)
+    sites = _checked(ev, "review")
+    found = _found(ev, sites)
     if found is None or "category_match" not in ev:
         return None
-    presence = len(found) / 4 * 70
+    need = presence_target(len(sites))
+    presence = min(len(found), need) / need * 70
     cat = 30 if ev["category_match"] else 0
     how = "checked by the AI" if ev.get("category_method") == "llm" else "checked by keywords"
     score = presence + cat
-    listed = (f"{len(found)} of the 4 review sites list the company ({_and(found)})" if found
-              else f"None of the 4 review sites ({_and(list(_REVIEW_DOMAINS))}) list the company")
+    of = f"of the {len(sites)} review sites checked" + (f" (any {need} earn full marks)" if need < len(sites) else "")
+    listed = (f"{len(found)} {of} list the company ({_and(found)})" if found
+              else f"None of the {len(sites)} review sites checked ({_and(list(sites))}) list the company")
     cat_text = (f"the listings use the right category (30 points, {how})" if cat
                 else f"the listings do not match the company's category (0 of 30 points, {how})")
     return f"{listed} for {fmt(presence)} of 70 points, and {cat_text}, {_so(score)}", score

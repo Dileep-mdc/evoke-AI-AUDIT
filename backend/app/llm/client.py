@@ -18,6 +18,7 @@ from ..config import (
     LLM_TIMEOUT,
     OPENAI_API_KEY,
 )
+from . import usage
 
 RETRY_BACKOFF_SECONDS = 0.6
 # Rate limits get their own, longer schedule. Every parameter of a scan is model-scored now,
@@ -99,6 +100,12 @@ async def judge(prompt: str, *, system: str = "", json_mode: bool = True, lane: 
     if not OPENAI_API_KEY:
         return LLMResult(ok=False, error="No OPENAI_API_KEY configured")
 
+    # The scan's spending cap (llm/usage.py). Refused before any request is made, so the
+    # caller falls back exactly as it does for any other unavailable model.
+    meter = usage.current()
+    if meter is not None and meter.over_budget():
+        return LLMResult(ok=False, error=meter.refuse())
+
     # A separate system-role message was empirically found to trigger a 400 "could not
     # parse the JSON body" error from the API for some real (clean, ASCII) scraped-page
     # content combined with certain other parameters, reproducible 100% of the time for
@@ -122,6 +129,10 @@ async def judge(prompt: str, *, system: str = "", json_mode: bool = True, lane: 
                 if json_mode:
                     kwargs["response_format"] = {"type": "json_object"}
                 resp = await client.chat.completions.create(**kwargs)
+                if meter is not None:
+                    used = getattr(resp, "usage", None)
+                    meter.record(getattr(used, "prompt_tokens", 0), getattr(used, "completion_tokens", 0),
+                                 scales=lane == "batch")
                 text = (resp.choices[0].message.content or "").strip()
                 parsed = None
                 if json_mode:

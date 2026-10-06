@@ -99,6 +99,43 @@
       "_what": "TECH-06, TECH-20. At or above this many hops a redirect counts as a chain.",
       "value": 3
     },
+    "vitals_lcp_ms": {
+      "_what": "TECH-07. Largest Contentful Paint, milliseconds (75th percentile for field data, median key page for lab). At or under `good` scores full marks; at or over `poor` scores the poor floor.",
+      "_why": "Google's published Core Web Vitals thresholds (web.dev/articles/vitals).",
+      "good": 2500,
+      "poor": 4000
+    },
+    "vitals_inp_ms": {
+      "_what": "TECH-07, field data only. Interaction to Next Paint, milliseconds, 75th percentile.",
+      "_why": "Google's published Core Web Vitals thresholds. INP needs real users interacting, so a lab run scores Total Blocking Time in its place.",
+      "good": 200,
+      "poor": 500
+    },
+    "vitals_tbt_ms": {
+      "_what": "TECH-07, lab data only. Total Blocking Time, milliseconds: the lab stand-in for INP.",
+      "_why": "Lighthouse's mobile scoring thresholds for TBT.",
+      "good": 200,
+      "poor": 600
+    },
+    "vitals_cls": {
+      "_what": "TECH-07. Cumulative Layout Shift (unitless; largest session window).",
+      "_why": "Google's published Core Web Vitals thresholds.",
+      "good": 0.1,
+      "poor": 0.25
+    },
+    "vitals_points": {
+      "_what": "TECH-07. Points per metric: `good` at or under the good threshold; between the thresholds, falling linearly from `needs_improvement_best` to `needs_improvement_worst`; `poor` at or over the poor threshold. TECH-07 is the mean of the three metric scores.",
+      "_why": "Mirrors Google's three ratings (Good / Needs improvement / Poor) while still separating a site just over the line from one about to fail.",
+      "good": 100,
+      "needs_improvement_best": 90,
+      "needs_improvement_worst": 50,
+      "poor": 25
+    },
+    "platforms_for_full_marks": {
+      "_what": "OFF-03, OFF-05. Sites the company must be found on for full presence points (70). Presence = min(found, N) / N x 70, where N is this value or the number of sites checked, whichever is smaller.",
+      "_why": "The site lists are configurable (offpage_platforms.json) and an industry or region adds sites to them. Dividing by the whole list would make a scan that checks more sites score lower for the same presence; dividing by a fixed N keeps the default four-site result unchanged and lets any of the checked sites count.",
+      "value": 4
+    },
     "review_recent_days": {
       "_what": "OFF-06. A review-platform result dated within this many days earns the full recency points (40).",
       "_why": "Assistants and buyers discount reviews older than a year.",

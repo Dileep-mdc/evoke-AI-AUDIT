@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .api.scans import router
+from .api.status import router as status_router
 from .crawler.extract import shutdown_pool
 from .crawler.http import aclose_clients
 from .db import init_db
@@ -29,6 +30,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(router)
+app.include_router(status_router)
 
 
 @app.on_event("startup")

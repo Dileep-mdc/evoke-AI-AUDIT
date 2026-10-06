@@ -1,0 +1,64 @@
+{
+  "_comment": [
+    "Which third-party websites the off-page checks look for the company on.",
+    "",
+    "`default` is used on every scan. Choosing an industry and/or a region on the scan screen ADDS",
+    "that set's sites to the default lists -- nothing is taken away, so the core platforms are always",
+    "checked. Edit this file to add an industry, a region or a site; no code change is needed.",
+    "OFFPAGE_PLATFORMS_PATH points the app at a different file.",
+    "",
+    "  review     OFF-05 and OFF-06: B2B review and rating sites.",
+    "  profile    OFF-03: business directories and company-profile sites.",
+    "  community  OFF-07: discussion sites, searched alongside any URL containing 'forum' or 'community'.",
+    "",
+    "Sites are bare domains (g2.com, not https://www.g2.com/). Scoring is unchanged by a longer list:",
+    "full presence marks need `platforms_for_full_marks` sites found (scoring_rules.json), whichever",
+    "sites of the active list those are."
+  ],
+  "default": {
+    "label": "Global (default)",
+    "review": ["g2.com", "clutch.co", "gartner.com", "trustradius.com"],
+    "profile": ["linkedin.com", "crunchbase.com", "bloomberg.com", "zoominfo.com"],
+    "community": ["reddit.com", "quora.com"]
+  },
+  "industries": {
+    "software": {
+      "label": "Software & SaaS",
+      "review": ["capterra.com", "softwareadvice.com", "getapp.com"],
+      "community": ["stackoverflow.com"]
+    },
+    "it_services": {
+      "label": "IT services & consulting",
+      "review": ["goodfirms.co", "designrush.com"]
+    },
+    "manufacturing": {
+      "label": "Manufacturing & industrial",
+      "profile": ["thomasnet.com", "kompass.com"]
+    }
+  },
+  "regions": {
+    "us": {
+      "label": "United States",
+      "review": ["bbb.org"]
+    },
+    "uk": {
+      "label": "United Kingdom",
+      "review": ["trustpilot.com"],
+      "profile": ["find-and-update.company-information.service.gov.uk"]
+    },
+    "europe": {
+      "label": "Europe",
+      "review": ["trustpilot.com"],
+      "profile": ["kompass.com", "northdata.com"]
+    },
+    "india": {
+      "label": "India",
+      "review": ["ambitionbox.com"],
+      "profile": ["tracxn.com", "justdial.com"]
+    },
+    "australia": {
+      "label": "Australia & New Zealand",
+      "review": ["productreview.com.au"]
+    }
+  }
+}

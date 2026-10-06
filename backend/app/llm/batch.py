@@ -140,7 +140,9 @@ async def judge_all(
     coverage.batches = len(batches)
 
     async def run(batch: list) -> list[dict]:
-        res = await judge(prompt_builder(batch), system=system)
+        # lane "batch": a classification call, counted by the usage meter as work that grows
+        # with the size of the site (llm/usage.py).
+        res = await judge(prompt_builder(batch), system=system, lane="batch")
         if not res.ok:
             raise RuntimeError(res.error or "classification call failed")
         rows = (res.parsed or {}).get(result_key)
@@ -195,7 +197,7 @@ async def judge_one(
     coverage.batches = len(batches)
 
     async def run(batch: list) -> dict:
-        res = await judge(prompt_builder(batch), system=system)
+        res = await judge(prompt_builder(batch), system=system, lane="batch")
         if not res.ok or not isinstance(res.parsed, dict):
             raise RuntimeError(res.error or "classification call failed")
         return res.parsed

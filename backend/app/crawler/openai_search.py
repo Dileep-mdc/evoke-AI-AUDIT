@@ -29,6 +29,7 @@ from ..config import (
     OPENAI_SEARCH_RETRIES,
     OPENAI_SEARCH_TIMEOUT,
 )
+from ..llm import usage
 from .google_search import SearchResult
 
 PROVIDER = "OpenAI web search"
@@ -168,11 +169,17 @@ async def openai_search(query: str, num: int = GOOGLE_SEARCH_RESULTS) -> SearchR
     if not configured():
         return SearchResult(query, ok=False, provider=PROVIDER,
                             error="OpenAI web search is not configured: set OPENAI_API_KEY in backend/.env")
+    meter = usage.current()
+    if meter is not None and meter.over_budget():
+        return SearchResult(query, ok=False, provider=PROVIDER, error=meter.refuse())
     try:
         result = await _run(query, num)
     except Exception as exc:
         error, status = _failure(exc)
         return SearchResult(query, ok=False, provider=PROVIDER, error=error, status=status)
+    if meter is not None:
+        used = getattr(getattr(result, "context_wrapper", None), "usage", None)
+        meter.record(getattr(used, "input_tokens", 0), getattr(used, "output_tokens", 0), search=True)
 
     returned = _sources(result)
     items, seen = [], set()

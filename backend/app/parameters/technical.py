@@ -7,11 +7,13 @@ from urllib.parse import urlparse
 from ..config import BROWSER_UA
 from ..crawler.discover import internal_links
 from ..crawler.http import check, fetch
+from ..crawler import vitals
 from ..crawler.robots import AI_BOTS, bot_decision
 from ..llm.client import judge
 from ..llm.prompts import SYSTEM, tech11_prompt
 from . import rules
-from .common import band, flatten_schema, heading_blocks, ms_since, result, schema_types, timed
+from .common import (VITAL_NAMES, VITALS, band, flatten_schema, heading_blocks, ms_since, result, schema_types,
+                     timed, vital_rating, vital_score)
 
 # Declared in scoring_rules.json rather than inline, for the same reason as onpage.py: these
 # are the methodology, and they belong where a reviewer can read them together.
@@ -148,10 +150,44 @@ async def tech_06(spec, ctx):
 
 
 async def tech_07(spec, ctx):
+    """Real Core Web Vitals (crawler/vitals.py): CrUX field data, else a throttled lab run, else
+    the latency/weight proxy this check used before either was wired in."""
     t = timed()
+    vit = await vitals.measure(ctx)
+    source = vit.get("source")
+    if source not in VITALS:
+        return _tech_07_proxy(spec, ctx, t, vit.get("unavailable") or [])
+    metrics = vit["metrics"]
+    points = {m: round(vital_score(m, metrics[m]), 1) for m in VITALS[source]}
+    score = sum(points.values()) / len(points)
+    evidence = {
+        "vitals_source": source,
+        "metrics": {m: round(metrics[m], 3 if m == "cls" else 0) for m in VITALS[source]},
+        "ratings": {m: vital_rating(m, metrics[m]) for m in VITALS[source]},
+        "metric_points": points,
+    }
+    if source == "field":
+        evidence.update(crux_origin=vit.get("origin"), crux_form_factor=vit.get("form_factor"),
+                        crux_collection_period=vit.get("collection_period"),
+                        note="Real-user data from Google's Chrome UX Report: 75th percentile over the last 28 days.")
+    else:
+        evidence.update(lab_pages=vit.get("lab_pages"), lab_throttled=vit.get("throttled"),
+                        field_data_unavailable=vit.get("field_unavailable"),
+                        note=("Measured in headless Chromium" + (" throttled like Lighthouse mobile" if vit.get("throttled") else "")
+                              + "; the median page per metric. Total Blocking Time stands in for INP, which needs real users."))
+    weak = [VITAL_NAMES[m] for m in VITALS[source] if evidence["ratings"][m] != "good"]
+    how = ("optimise the largest above-the-fold image or text block, cut long-running JavaScript, and reserve "
+           "space for images, ads and embeds so the layout does not shift.")
+    rec = None if score >= 90 else (f"Improve {', '.join(weak)}: {how}" if weak else how[:1].upper() + how[1:])
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=vit.get("origin") or ctx.origin,
+                  duration_ms=ms_since(t), confidence=0.9 if source == "field" else 0.7)
+
+
+def _tech_07_proxy(spec, ctx, t, unavailable: list[str]):
+    """Latency and HTML weight from the crawl itself: the fallback when no Core Web Vitals source works."""
     pages = [p for p in ctx.pages if p.result and p.result.ok]
     if not pages:
-        return result(spec, score=None, unknown=True, evidence={}, recommendation="No successfully crawled pages to measure.", checked=ctx.origin, error="no pages", duration_ms=ms_since(t))
+        return result(spec, score=None, unknown=True, evidence={"vitals_unavailable": unavailable}, recommendation="No successfully crawled pages to measure.", checked=ctx.origin, error="no pages", duration_ms=ms_since(t))
     latencies = [p.result.elapsed_ms for p in pages]
     sizes = [len(p.result.content) for p in pages]
     avg_latency = sum(latencies) / len(latencies)
@@ -174,7 +210,7 @@ async def tech_07(spec, ctx):
         weight_score = 20
     score = latency_score * 0.6 + weight_score * 0.4
     rec = "Reduce server response time and page weight on representative pages; this proxy score is not a substitute for a real Lighthouse/CrUX audit." if score < 90 else None
-    return result(spec, score=score, evidence={"pages_measured": len(pages), "avg_latency_ms": round(avg_latency), "avg_page_bytes": round(avg_size), "note": "Latency/weight proxy -- no Lighthouse LCP/INP/CLS run is wired into this build."}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.4)
+    return result(spec, score=score, evidence={"vitals_source": "proxy", "pages_measured": len(pages), "avg_latency_ms": round(avg_latency), "avg_page_bytes": round(avg_size), "vitals_unavailable": unavailable, "note": "Latency/weight proxy: real Core Web Vitals could not be measured for the reasons listed."}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.4)
 
 
 # A fixed layout width of 1000px or more declared as a CSS rule (`min-width: 1200px`), which

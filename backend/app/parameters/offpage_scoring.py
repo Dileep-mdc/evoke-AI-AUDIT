@@ -25,8 +25,13 @@ def off_02(entity_found: bool, has_description: bool, brand_in_label: bool) -> f
     return min(100, 50 + (30 if has_description else 0) + (20 if brand_in_label else 0))
 
 
+def presence_target(platforms_checked: int) -> int:
+    """Sites needed for full presence points: the declared target, or every site checked if fewer."""
+    return max(1, min(platforms_checked, rules.threshold("platforms_for_full_marks")))
+
+
 def off_03(platforms_found: int, platforms_total: int, name_share: float, location_share: float) -> float:
-    return platforms_found / platforms_total * 70 + name_share * 15 + location_share * 15
+    return min(platforms_found, platforms_total) / platforms_total * 70 + name_share * 15 + location_share * 15
 
 
 def off_04(claim_kinds_found: int) -> float:
@@ -35,7 +40,7 @@ def off_04(claim_kinds_found: int) -> float:
 
 
 def off_05(platforms_found: int, platforms_total: int, category_match: bool) -> float:
-    return platforms_found / platforms_total * 70 + (30 if category_match else 0)
+    return min(platforms_found, platforms_total) / platforms_total * 70 + (30 if category_match else 0)
 
 
 def off_06_volume(review_results: int) -> int:

@@ -13,6 +13,8 @@ from __future__ import annotations
 from collections import Counter
 from typing import Callable, Optional
 
+from .common import VITAL_NAMES, VITALS, vital_rating, vital_score
+
 Result = Optional[tuple[str, float]]
 
 
@@ -247,8 +249,31 @@ _RATING = {100: "good", 70: "fair", 40: "slow", 20: "very slow"}
 _SIZE_RATING = {100: "light", 70: "fair", 40: "heavy", 20: "very heavy"}
 
 
+def _vital_value(metric: str, value: float) -> str:
+    if metric == "cls":
+        return _num(value, 3)
+    return f"{_num(value / 1000, 2)} s" if value >= 1000 else f"{_int(value)} ms"
+
+
+def _tech_07_vitals(ev: dict) -> Result:
+    source = ev.get("vitals_source")
+    metrics = ev.get("metrics") or {}
+    names = VITALS.get(source)
+    if not names or any(m not in metrics for m in names):
+        return None
+    points = {m: vital_score(m, float(metrics[m])) for m in names}
+    score = sum(points.values()) / len(points)
+    parts = [f"{VITAL_NAMES[m]} {_vital_value(m, float(metrics[m]))} ({vital_rating(m, float(metrics[m]))},"
+             f" {_num(points[m])} points)" for m in names]
+    where = ("Real Chrome users' experience over the last 28 days (75th percentile)" if source == "field"
+             else "A lab test of key pages on a throttled mobile connection")
+    return f"{where}: {', '.join(parts[:-1])} and {parts[-1]}. The score is the average of the three, {_so(score)}", _score(score)
+
+
 @_safe
 def tech_07(ev: dict) -> Result:
+    if ev.get("vitals_source") in ("field", "lab"):
+        return _tech_07_vitals(ev)
     latency = ev.get("avg_latency_ms")
     size = ev.get("avg_page_bytes")
     if latency is None or size is None:

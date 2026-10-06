@@ -267,6 +267,35 @@ ENTITY_SEARCH_LIMIT = int(os.getenv("ENTITY_SEARCH_LIMIT", "5"))
 OFFPAGE_VERIFY_SOURCES = int(os.getenv("OFFPAGE_VERIFY_SOURCES", "3"))
 OFFPAGE_VERIFY_TIMEOUT = float(os.getenv("OFFPAGE_VERIFY_TIMEOUT", "15"))
 
+# Core Web Vitals for TECH-07 (crawler/vitals.py). Field data first: Google's Chrome UX Report
+# API, the real-user LCP/INP/CLS Google itself uses. It takes a Google Cloud API key with the
+# Chrome UX Report API enabled; the Custom Search key above is reused when CRUX_API_KEY is unset.
+CRUX_API_KEY = os.getenv("CRUX_API_KEY", "").strip() or GOOGLE_API_KEY
+CRUX_ENDPOINT = os.getenv("CRUX_ENDPOINT", "https://chromeuxreport.googleapis.com/v1/records:queryRecord")
+# When CrUX has no data for the site (common below a few thousand monthly Chrome visitors), a lab
+# run in headless Chromium measures LCP, CLS and Total Blocking Time on this many key pages. It is
+# a separate pass from the rendering one, because that pass blocks images, fonts and stylesheets --
+# exactly what decides LCP and CLS -- to save time.
+CWV_LAB_PAGES = int(os.getenv("CWV_LAB_PAGES", "3"))
+CWV_LAB_TIMEOUT = float(os.getenv("CWV_LAB_TIMEOUT", "45"))
+# How long to keep observing after the load event, so a late hero image or a late layout shift
+# is still counted.
+CWV_LAB_SETTLE_MS = int(os.getenv("CWV_LAB_SETTLE_MS", "3000"))
+# Throttle the lab run the way Lighthouse's mobile preset does (4x slower CPU, slow-4G network),
+# so a lab figure is comparable with PageSpeed Insights rather than flattered by this machine.
+CWV_LAB_THROTTLE = os.getenv("CWV_LAB_THROTTLE", "true").strip().lower() in {"1", "true", "yes"}
+
+# AI spend per scan (llm/usage.py). Prices are US dollars per million tokens for LLM_MODEL and
+# default to gpt-4o-mini's list price; set them when you change the model. A web search run by the
+# OpenAI search agent also carries a per-call tool fee, which is only counted when set below.
+LLM_PRICE_INPUT_PER_M = float(os.getenv("LLM_PRICE_INPUT_PER_M", "0.15"))
+LLM_PRICE_OUTPUT_PER_M = float(os.getenv("LLM_PRICE_OUTPUT_PER_M", "0.60"))
+OPENAI_SEARCH_PRICE_PER_CALL = float(os.getenv("OPENAI_SEARCH_PRICE_PER_CALL", "0"))
+# Spending cap for one scan's AI calls, in US dollars. 0 means no cap. Once a scan reaches it,
+# further model calls are refused: classification stops where it is (each check's evidence says
+# how much of the site was judged) and the remaining checks keep their rules-based scores.
+LLM_SCAN_BUDGET_USD = float(os.getenv("LLM_SCAN_BUDGET_USD", "0"))
+
 WEIGHTS = {"technical": 0.35, "on_page": 0.40, "off_page": 0.25}
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)

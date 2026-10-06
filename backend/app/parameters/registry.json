@@ -77,7 +77,7 @@
     "name": "Page speed and Core Web Vitals (LCP, INP, CLS)",
     "weight": 1.0,
     "automation_level": "LLM-scored (rules-based fallback)",
-    "check_logic": "Approximates load performance from the response latency and byte size already recorded while crawling representative pages, since no Lighthouse/Chromium performance run is wired into this build; this is a latency/weight proxy, not a measured LCP/INP/CLS.",
+    "check_logic": "Core Web Vitals from Google's Chrome UX Report real-user data; when the site has no record, a throttled headless-Chromium lab run of key pages (LCP, CLS, TBT); latency/weight proxy only when neither is available.",
     "ai_required": "Yes",
     "pass_threshold": 90,
     "partial_threshold": 60,

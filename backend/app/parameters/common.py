@@ -6,6 +6,7 @@ import time
 from typing import Any, Optional
 
 from ..errors import humanize_error
+from . import rules
 
 _ID_DIGITS_RE = re.compile(r"(\d+)")
 
@@ -264,6 +265,30 @@ def top_term_density(text: str, minimum_words: int = 40) -> tuple[float, list[tu
     counts = Counter(words)
     top = counts.most_common(5)
     return top[0][1] / len(words), top
+
+
+# The three Core Web Vitals TECH-07 scores, per data source, in display order.
+VITALS = {"field": ("lcp_ms", "inp_ms", "cls"), "lab": ("lcp_ms", "tbt_ms", "cls")}
+VITAL_NAMES = {"lcp_ms": "Largest Contentful Paint", "inp_ms": "Interaction to Next Paint",
+               "tbt_ms": "Total Blocking Time", "cls": "Cumulative Layout Shift"}
+
+
+def vital_score(metric: str, value: float) -> float:
+    """Points for one Core Web Vital (lower is better), from the thresholds in scoring_rules.json."""
+    good, poor = rules.threshold(f"vitals_{metric}", "good"), rules.threshold(f"vitals_{metric}", "poor")
+    if value <= good:
+        return float(rules.threshold("vitals_points", "good"))
+    if value >= poor:
+        return float(rules.threshold("vitals_points", "poor"))
+    best = rules.threshold("vitals_points", "needs_improvement_best")
+    worst = rules.threshold("vitals_points", "needs_improvement_worst")
+    return best - (best - worst) * (value - good) / (poor - good)
+
+
+def vital_rating(metric: str, value: float) -> str:
+    if value <= rules.threshold(f"vitals_{metric}", "good"):
+        return "good"
+    return "poor" if value >= rules.threshold(f"vitals_{metric}", "poor") else "needs improvement"
 
 
 def band(value: float, thresholds: tuple[tuple[float, float], ...], floor: float) -> float:

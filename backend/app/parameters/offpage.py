@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from . import offpage_scoring as scoring
 from .common import ms_since, result, timed
-from .offpage_agents import ORCHESTRATOR, PROFILE_DOMAINS, REVIEW_DOMAINS, Findings
+from .offpage_agents import ORCHESTRATOR, Findings
 
 RETRY_SEARCH = "Retry once web search is available."
 
@@ -86,11 +86,12 @@ async def off_03(spec, ctx):
     found, profiles = f.values["platforms_found"], f.values["profiles"]
     name_share = sum(1 for v in profiles.values() if v["name_matches"]) / len(found) if found else 0.0
     loc_share = sum(1 for v in profiles.values() if v["location_matches"]) / len(found) if found else 0.0
-    inputs = {"platforms_found": len(found), "platforms_total": len(PROFILE_DOMAINS),
+    checked = f.values["platforms_checked"]
+    inputs = {"platforms_found": len(found), "platforms_total": scoring.presence_target(len(checked)),
               "name_share": name_share, "location_share": loc_share}
     score = scoring.off_03(**inputs)
     evidence = {**f.evidence, "name_consistent_share": round(name_share, 3), "location_consistent_share": round(loc_share, 3)}
-    missing = [d for d in PROFILE_DOMAINS if d not in found]
+    missing = [d for d in checked if d not in found]
     rec = None if score >= 90 else ("Create or claim company profiles on: " + ", ".join(missing) + ". " if missing else "") + "Use the same company name and office locations on every profile as on the website."
     return _row(spec, t, f, score, evidence, inputs, rec, confidence=0.5)
 
@@ -119,10 +120,12 @@ async def off_05(spec, ctx):
     found = f.values["platforms_found"]
     llm_match = f.values["llm_category_match"]
     category_match = f.values["rules_category_match"] if llm_match is None else llm_match
-    inputs = {"platforms_found": len(found), "platforms_total": len(REVIEW_DOMAINS), "category_match": category_match}
+    checked = f.values["platforms_checked"]
+    inputs = {"platforms_found": len(found), "platforms_total": scoring.presence_target(len(checked)),
+              "category_match": category_match}
     score = scoring.off_05(**inputs)
     evidence = {**f.evidence, "category_match": category_match}
-    missing = [d for d in REVIEW_DOMAINS if d not in found]
+    missing = [d for d in checked if d not in found]
     rec = None if score >= 90 else " ".join(filter(None, [
         f"Claim and complete a profile on: {', '.join(missing)}." if missing else "",
         "" if category_match else "List the company under the category it uses on its own site.",
