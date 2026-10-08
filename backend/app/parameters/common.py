@@ -102,6 +102,78 @@ def result(
     }
 
 
+# What to do when a check found none of what it looks for -- the recommendation on its FAIL row.
+NO_DATA_ADVICE = {
+    "TECH-11": "Add substantial body text to the key pages, broken up by a descriptive heading every 150-200 words.",
+    "TECH-14": "Add relevant images with descriptive alt text to the key pages, and a transcript for any video.",
+    "TECH-17": "Add structured data to the key pages: Organization on the home and about pages, Service or Product on offering pages, Article on articles.",
+    "TECH-21": "If the site serves several countries or languages, add hreflang tags that link each language version to the others.",
+    "ON-01": "Add descriptive H1-H3 headings to the key pages, phrased the way buyers ask about the service.",
+    "ON-02": "Add question-style headings (How / What / Why ...) with a direct 40-60 word answer under each.",
+    "ON-03": "Define each core service or concept in one or two plain sentences where it is first mentioned.",
+    "ON-04": "Open each key page with two plain sentences that say what the page offers and for whom.",
+    "ON-06": "Add an FAQ section to the key service pages and mark it up with FAQPage structured data.",
+    "ON-07": "Add pages where buyers compare options (features, alternatives, pricing) and present them in real HTML comparison tables.",
+    "ON-13": "Publish client stories that name the client, give measurable results and describe how the work was delivered.",
+    "ON-14": "Back the site's claims with specific figures, each linked to the study, report or data behind it.",
+    "ON-18": "Give every page its own distinct, descriptive title.",
+    "ON-20": "State the brand name together with its service categories in page titles, headings and opening copy.",
+    "OFF-05": "Get the company listed and reviewed on the review platforms buyers in this market use.",
+    "OFF-06": "Ask clients for reviews on the review platforms buyers in this market use, and keep them recent.",
+}
+
+
+def no_data(spec: dict, *, reason: str, checked: str, evidence: Optional[dict] = None,
+            recommendation: Optional[str] = None, duration_ms: int = 0) -> dict:
+    """A check that found none of what it looks for on the site: a FAIL at 0, with the fix.
+
+    Nothing to evaluate is scored as missing, not left out: an FAQ check on a site with no FAQs
+    fails, and counts in the pillar score like any other failure. `reason` says what was missing.
+    """
+    ev = {**(evidence or {}), "no_data": True, "no_data_reason": reason, "summary": f"Failed: {reason}."}
+    advice = recommendation or NO_DATA_ADVICE.get(spec["parameter_id"]) or f"Add what this check looks for: {spec['name'].lower()}."
+    return result(spec, score=0.0, evidence=ev, recommendation=advice, checked=checked, duration_ms=duration_ms,
+                  confidence=0.9)
+
+
+def upgrade_na_row(row: dict) -> bool:
+    """Turn a row saved as N/A (before N/A was retired) into what it is scored as now; True if changed.
+
+    Rows the N/A helper wrote (they carry `na_reason`) become a no-data FAIL at 0. Two kinds stay
+    unscored instead, because nothing about the site was ever measured: a check the industry profile
+    skipped without running it (evidence `industry`), which a re-check can now run for real, and
+    TECH-12's "no rendered copy was fetched", a gap in the crawl rather than in the site.
+    """
+    ev = row.get("evidence") or {}
+    if not isinstance(ev, dict):
+        return False
+    if ev.get("no_data") and ("industry" in ev or re.search(r", so | \(missing ", ev.get("no_data_reason") or "")):
+        # Converted by the first version of this upgrade, which kept those two cases as they were.
+        ev = {k: v for k, v in ev.items() if k not in ("no_data", "no_data_reason", "summary")}
+        ev["na_reason"] = row["evidence"]["no_data_reason"]
+    elif not ev.get("not_applicable"):
+        return False
+    ev = {k: v for k, v in ev.items() if k != "not_applicable"}
+    reason = ev.pop("na_reason", None)
+    if reason is None:
+        row["evidence"] = {**ev, "retry_pointless": True}
+        return True
+    if "industry" in ev:
+        row.update(status="UNKNOWN", score=None, evidence={"summary": "Not measured yet: run a re-check to measure it."},
+                   recommendation=None, error="Not measured yet: run a re-check to measure it.")
+        return True
+    # The old wording explained why nothing was scored ("..., so there was no FAQ to validate");
+    # the finding is the part before that.
+    reason = re.split(r", so | \(missing ", reason)[0]
+    spec = {"parameter_id": row["parameter_id"], "section": row["section"], "name": row["name"],
+            "max_score": row.get("max_score", 100), "weight": row.get("weight", 1)}
+    fresh = no_data(spec, reason=reason.rstrip("."), checked=row.get("checked_url_or_source") or "", evidence=ev,
+                    duration_ms=row.get("duration_ms") or 0)
+    for key in ("status", "score", "evidence", "recommendation", "confidence", "error"):
+        row[key] = fresh.get(key)
+    return True
+
+
 def scorable_pages(ctx) -> list:
     """The pages a content parameter may legitimately score, and nothing else.
 
@@ -267,6 +339,37 @@ def top_term_density(text: str, minimum_words: int = 40) -> tuple[float, list[tu
     return top[0][1] / len(words), top
 
 
+# Joining words skipped when forming an organisation's initials: "American Academy OF
+# Orthopaedic Surgeons" abbreviates to AAOS, not AAOOS.
+_NAME_GLUE = {"of", "the", "and", "for", "in", "on", "at", "to", "de", "du", "la"}
+_ACRONYM_AFTER = re.compile(r"^(?P<name>.+?)[\s\-|:,(\u2013\u2014]+(?P<acr>[A-Z][A-Z0-9&.]{1,9})\)?$")
+_ACRONYM_BEFORE = re.compile(r"^\(?(?P<acr>[A-Z][A-Z0-9&.]{1,9})\)?[\s\-|:\u2013\u2014]+(?P<name>.+)$")
+
+
+def drop_acronym(name: str) -> str:
+    """The name without an abbreviation of itself stuck on the front or end.
+
+    Sites often declare their name as "American Academy of Orthopaedic Surgeons AAOS" or
+    "AAOS | American Academy ...". Wikipedia and Wikidata list the plain name, and every
+    off-page search looks for the exact phrase, so the extra word made the company
+    unfindable. The abbreviation is only removed when it really is the initials of the rest,
+    so a name that merely ends in capitals ("Evoke Technologies", "Bank of America BAC") is kept.
+    """
+    text = " ".join((name or "").split())
+    for pattern in (_ACRONYM_AFTER, _ACRONYM_BEFORE):
+        m = pattern.match(text)
+        if not m:
+            continue
+        rest = m.group("name").strip(" -|:,(")
+        acr = re.sub(r"[^A-Z0-9]", "", m.group("acr").upper())
+        words = re.findall(r"[A-Za-z][\w'-]*", rest)
+        initials = {"".join(w[0] for w in words).upper(),
+                    "".join(w[0] for w in words if w.lower() not in _NAME_GLUE).upper()}
+        if len(words) >= 2 and acr in initials:
+            return rest
+    return text
+
+
 # The three Core Web Vitals TECH-07 scores, per data source, in display order.
 VITALS = {"field": ("lcp_ms", "inp_ms", "cls"), "lab": ("lcp_ms", "tbt_ms", "cls")}
 VITAL_NAMES = {"lcp_ms": "Largest Contentful Paint", "inp_ms": "Interaction to Next Paint",
@@ -356,6 +459,9 @@ def near_duplicate_pairs(documents: list[tuple[str, str]], threshold: float) -> 
 
 def primary_brand(ctx) -> str:
     """The site's own brand term, derived per scan -- never a fixed company name."""
+    brand = (getattr(ctx, "identity", None) or {}).get("brand")
+    if brand:
+        return brand
     name = (getattr(ctx, "company_name", "") or "").strip()
     if name:
         return name.split()[0].lower()
@@ -370,6 +476,15 @@ _NAV_STOPWORDS = {
     "faqs", "team", "leadership", "investors", "events", "media", "press", "gallery",
     "our story", "clients", "testimonials", "get started", "book a demo", "request a demo",
 }
+# Menu labels addressed to an audience ("Patients & Public", "For Members") name who a page is for,
+# not what the organisation does, so they are never taken as its category.
+_AUDIENCE_LABEL = re.compile(
+    r"\b(?:patients?|public|members?|membership|partners?|investors?|customers?|students?|parents?|employers?|"
+    r"job seekers|media|donors?|volunteers?|shop|store|cart|account|my |login|support|help|events?|news|"
+    r"jobs|careers?|community|subscribe|donate|"
+    # The language picker is a menu too: "English", "Deutsch", "Español".
+    r"english|deutsch|español|espanol|français|francais|italiano|português|portugues|nederlands|polski|"
+    r"svenska|dansk|norsk|suomi|türkçe|turkce|русский|中文|日本語|한국어|العربية|हिन्दी)\b", re.I)
 
 
 _TITLE_LEAD_RE = re.compile(r"^(?:(?:top|best|leading|trusted|premier|expert|#1|the|our)\s+)+")
@@ -410,9 +525,16 @@ def derive_site_categories(ctx, limit: int = 10) -> list[str]:
             txt = (link.get("text") or "").strip().lower()
             if txt and txt not in _NAV_STOPWORDS and 3 <= len(txt) <= 40 and not txt.startswith(("http", "www.")):
                 candidates.append(txt)
+    ident = getattr(ctx, "identity", None) or {}
+    own = [t.lower() for t in [ident.get("brand"), ident.get("acronym"), ident.get("short_name")] + list(getattr(ctx, "brand_terms", None) or []) if t]
     seen: list[str] = []
     for c in candidates:
-        if c not in seen:
+        c = re.sub(r"\s*\([^)]*\)", "", c).strip()      # "emergency medical services (ems)" -> the words
+        if any(re.search(rf"\b{re.escape(t)}\b", c) for t in own):
+            continue                                    # the organisation's own name is not a category
+        if _AUDIENCE_LABEL.search(c):
+            continue                                    # "patients & public" is an audience, not a category
+        if c and c not in seen:
             seen.append(c)
     return seen[:limit]
 

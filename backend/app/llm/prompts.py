@@ -98,15 +98,16 @@ def on08_prompt(lists: list[dict]) -> str:
     )
 
 
-def on11_prompt(pages: list[dict]) -> str:
-    rubric = "\n".join(f"- {point}" for point in SERVICE_PAGE_RUBRIC)
+def on11_prompt(pages: list[dict], points: tuple[str, ...] = SERVICE_PAGE_RUBRIC) -> str:
+    """`points` is the industry profile's checklist (parameters/industry.py)."""
+    rubric = "\n".join(f"- {point}" for point in points)
     return (
-        "A complete service page should cover all of the following:\n"
+        "A complete key page should cover all of the following:\n"
         f"{rubric}\n\n"
         "For each page excerpt below, decide which of those points the page actually covers. "
         "Judge on substance, not on whether a particular word appears.\n\n"
         f"Pages (JSON array of {{url, excerpt}}):\n{json.dumps(pages)}\n\n"
-        f'Reply as JSON: {{"results": [{{"url": <string>, "covered": <int 0-{len(SERVICE_PAGE_RUBRIC)}, '
+        f'Reply as JSON: {{"results": [{{"url": <string>, "covered": <int 0-{len(points)}, '
         "how many of the points above this page covers>}, ...]} with one entry per page given, "
         "in the same order."
     )

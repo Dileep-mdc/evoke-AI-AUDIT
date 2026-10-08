@@ -47,10 +47,10 @@ from openpyxl.styles import Alignment, Border, Font, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
-from .config import DATA_DIR
+from .config import DATA_DIR, OUTPUT_GZIP_LEVEL, OUTPUT_WRITE_WORKERS
 from .crawler.http import is_html
 from .page_selection import link_reason
-from .parameters.scoring import scrape_confidence
+from .parameters.scoring import display_status, scrape_confidence
 from .parameters.spec import spec_for
 
 FORMULAS_PATH = Path(__file__).resolve().parent / "parameters" / "formulas.json"
@@ -147,9 +147,9 @@ def save_crawl_failures(scan_id: str, ctx) -> Path:
 # How hard to compress the stored documents. HTML is extremely redundant, so even level 1
 # gets several-fold; 6 buys a meaningfully smaller store for CPU that is spent in zlib, which
 # releases the GIL and so actually parallelises across the writer pool below.
-_GZIP_LEVEL = 6
+_GZIP_LEVEL = OUTPUT_GZIP_LEVEL
 # Writing is I/O-bound with a compression step attached, which is the case threads are for.
-_RAW_WRITE_WORKERS = 8
+_RAW_WRITE_WORKERS = OUTPUT_WRITE_WORKERS
 
 
 def _page_filename(url: str, seen: set[str]) -> str:
@@ -608,8 +608,10 @@ def _write_pillar_sheet(wb: Workbook, sheet_name: str, rows: list[dict], reg_by_
         frozen = spec_for(pid, reg)
         evidence = p.get("evidence") or {}
         score = p.get("score")
-        status = (p.get("status") or "UNKNOWN").upper()
+        status = display_status(p)
         explanation = evidence.get("explanation") or evidence.get("summary") or p.get("error") or "No output recorded."
+        if evidence.get("cross_check"):
+            explanation = f"{explanation}\n\nNote: {evidence['cross_check']}"
         method = evidence.get("scoring_method") or "deterministic"
         # Only a PASS may read as "nothing to do here". result() strips the recommendation
         # from a passing row, so a row the model later downgraded arrives with an empty one --
@@ -628,7 +630,7 @@ def _write_pillar_sheet(wb: Workbook, sheet_name: str, rows: list[dict], reg_by_
             FORMULAS.get(pid) or frozen.get("metric") or "",
             readable_curated(evidence.get("curated_input")),
             link_reason(pid, evidence),
-            score if score is not None else "N/A",
+            score if score is not None else "-",
             status,
             SCORED_BY_LABEL.get(method, method),
             explanation,
@@ -714,7 +716,7 @@ def _write_how_to_read_sheet(wb: Workbook) -> None:
     line("What Was Found on Your Site", "The actual facts pulled from this site and graded for this "
                                           "parameter, listed one per line. This is exactly what was scored "
                                           "- nothing else was considered.")
-    line("Score (%)", "This parameter's individual score, 0-100. 'N/A' means it could not be scored.")
+    line("Score (%)", "This parameter's individual score, 0-100. '-' means it could not be measured.")
     line("Status", "The verdict for this parameter on this scan. See the color legend below.")
     line("Scored By", "'AI model' when the model graded it; 'Rules-based' when the model was unavailable and "
                        "the deterministic score stands in.")
@@ -768,6 +770,8 @@ def build_excel(report: dict, registry: list[dict]) -> bytes:
     kv("Input URL", report.get("input_url"))
     kv("Scan ID", report.get("scan_id"))
     kv("Generated At", generated_at)
+    if report.get("audited_at") and report.get("audited_at") != report.get("generated_at"):
+        kv("Website Read At", _friendly_timestamp(report["audited_at"]))
     r += 1
 
     overall_row = kv("Overall Score", report.get("overall_score"), bold_value=True)
@@ -785,6 +789,17 @@ def build_excel(report: dict, registry: list[dict]) -> bytes:
 
     kv("Parameters Scored", (report.get("coverage") or {}).get("known"))
     kv("Parameters Unknown", (report.get("coverage") or {}).get("unknown"))
+    if report.get("identity"):
+        ident = report["identity"]
+        name = ident.get("name") + (f" ({ident['acronym']})" if ident.get("acronym") else "")
+        kv("Organisation", f"{name} -- {'confirmed on Wikidata ' + ident['wikidata_id'] if ident.get('wikidata_id') else 'from the site itself'}")
+    if report.get("industry"):
+        ind = report["industry"]
+        kv("Industry Profile", f"{ind.get('label')} ({'detected from the site' if ind.get('detected') else 'chosen for this scan'})")
+    if report.get("content_analysis"):
+        kv("Content Analysed From", report["content_analysis"].get("summary"))
+    if report.get("gating"):
+        kv("Gating Issue", report["gating"].get("detail"), bold_value=True)
     points = report.get("points") or {}
     if points:
         kv("Points Earned / Measurable", f"{points.get('earned', 0):.2f} / {points.get('measurable', 0):.2f}")

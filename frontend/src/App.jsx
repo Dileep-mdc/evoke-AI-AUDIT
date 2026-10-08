@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
-import { createScan, downloadUrl, getParameter, getProgress, getReport, getStatus, listScans } from "./api";
+import { Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { createScan, downloadUrl, getParameter, getProgress, getRecheck, getReport, getStatus, listScans, startRecheck } from "./api";
 import logoIcon from "./assets/logo-icon.png";
 
 function band(score) {
@@ -86,7 +86,10 @@ function isLongText(s) {
 
 function EvidenceValue({ value, keyHint }) {
   if (value == null || value === "") return <span className="ev-empty">Not recorded</span>;
-  if (typeof value === "boolean") return <Chip tone={value ? "good" : "bad"}>{value ? "Yes" : "No"}</Chip>;
+  if (typeof value === "boolean") {
+    const yesIsBad = /block|broken|missing|error|fail|duplicate|thin|generic|starved|chain/i.test(keyHint || "");
+    return <Chip tone={value === yesIsBad ? "bad" : "good"}>{value ? "Yes" : "No"}</Chip>;
+  }
   if (typeof value === "number") {
     const hintsStatus = /status/i.test(keyHint || "") && value >= 100 && value < 600;
     if (hintsStatus) return <Chip tone={httpStatusTone(value)}>{value}</Chip>;
@@ -230,6 +233,12 @@ function ScoreCalculation({ p }) {
           <p>{p.logic.scoring}</p>
         </div>
       )}
+      {measured && ev.no_data && (
+        <p className="calc-note">
+          <span className="badge FAIL">FAIL</span>{" "}
+          Nothing this check looks for was found on the site{ev.no_data_reason ? ` (${ev.no_data_reason})` : ""}, so it scores 0.
+        </p>
+      )}
       {!measured && (
         <p className="calc-note">
           <span className={`badge ${p.status}`}>{p.status}</span>{" "}
@@ -294,60 +303,13 @@ function money(n) {
   return `$${Number(n).toFixed(n > 0 && n < 0.01 ? 4 : 2)}`;
 }
 
-// Setup and coverage notices. The backend writes the setup ones (GET /api/status), so the wording
-// of what is not configured lives next to the configuration it describes.
-function Notices({ items, className = "" }) {
-  if (!items || !items.length) return null;
-  return (
-    <div className={`notices ${className}`}>
-      {items.map((n, i) => (
-        <div key={i} className={`notice notice-${n.level}`}>
-          <b>{n.title}</b>
-          {n.text && <p>{n.text}</p>}
-          {n.list && <ul className="notice-list">{n.list.map((x, j) => <li key={j}>{x}</li>)}</ul>}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// AI spend of a scan: live while it runs (progress feed), final on the report.
-function AiUsage({ usage, final = false }) {
-  if (!usage) return null;
-  const est = usage.estimate;
-  return (
-    <div className="ai-usage">
-      {final ? "AI used for this report: " : "AI so far: "}
-      <b>{(usage.calls || 0).toLocaleString()}</b> model calls
-      {usage.search_calls ? <>, <b>{usage.search_calls}</b> web searches</> : null}, about <b>{money(usage.cost_usd)}</b>
-      {!usage.search_fee_counted && usage.search_calls ? " (search tool fees not included)" : ""}
-      {!final && est && (
-        <> · expected for this site: about <b>{est.calls.toLocaleString()}</b> calls, <b>{money(est.cost_usd)}</b> (from {est.based_on_scans} earlier scan{est.based_on_scans === 1 ? "" : "s"})</>
-      )}
-      {usage.budget_usd ? <> · cap <b>{money(usage.budget_usd)}</b></> : null}
-      {usage.budget_reached && (
-        <div className="ai-usage-cap">Spending cap reached: further AI calls were skipped, so the remaining checks use their rules-based scores and each check's evidence shows how much of the site was judged.</div>
-      )}
-    </div>
-  );
-}
-
-function unmeasuredReasons(rows) {
-  const reasons = [...new Set(rows.map((p) => {
-    const e = String(p.error || "");
-    if (/not configured/i.test(e)) return "web search is not configured";
-    if (/budget/i.test(e)) return "the AI spending cap was reached";
-    return e ? friendlyError(e) : "source unavailable";
-  }))];
-  return reasons.slice(0, 2).join("; ");
-}
-
 function Icon({ name }) {
   const common = { width: 18, height: 18, fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round", strokeLinejoin: "round" };
   if (name === "home") return <svg {...common}><path d="M3 10.5 9 4l6 6.5" /><path d="M5 9.5V16h8V9.5" /></svg>;
   if (name === "chart") return <svg {...common}><path d="M2 10.5h3l1.8-5.2L10 15l1.8-8.2 1.4 3.7H16" /></svg>;
   if (name === "folder") return <svg {...common}><path d="M3 6h5l2 2h7v8H3z" /></svg>;
   if (name === "export") return <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M8 10V3" /><path d="m5 5 3-3 3 3" /><path d="M3 11v3h10v-3" /></svg>;
+  if (name === "rerun") return <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" /><path d="M13.5 2.5v3h-3" /></svg>;
   if (name === "plus") return <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2"><path d="M7 2v10M2 7h10" /></svg>;
   if (name === "globe") return <svg {...common} width="20" height="20"><circle cx="9" cy="9" r="7" /><path d="M2 9h14M9 2c2.2 2 3.5 4.5 3.5 7s-1.3 5-3.5 7c-2.2-2-3.5-4.5-3.5-7s1.3-5 3.5-7z" /></svg>;
   return null;
@@ -357,25 +319,35 @@ function Logo() {
   return <img src={logoIcon} alt="" width="26" height="26" style={{ display: "block", objectFit: "contain" }} />;
 }
 
-function Shell({ children, view, onView, onSearch, search, toast }) {
+// The sidebar's pages. Each is a real URL, so Back, refresh and a copied link all keep your place.
+const RAIL = [
+  { path: "/", icon: "home", label: "New report", active: (p) => p === "/" },
+  { path: "/analytics", icon: "chart", label: "Analytics", active: (p) => p.startsWith("/report/") || p.startsWith("/scan/") || p === "/analytics" },
+  { path: "/reports", icon: "folder", label: "Reports", active: (p) => p.startsWith("/reports") },
+];
+
+function Shell({ children, onSearch, search, toast }) {
   const [open, setOpen] = useState(null);
+  const [draft, setDraft] = useState("");
   const nav = useNavigate();
-  const rail = [
-    ["home", "home", "New report"],
-    ["analytics", "chart", "Analytics"],
-    ["reports", "folder", "Reports"],
-  ];
+  const { pathname } = useLocation();
+  // Pages with their own search (a report's checks, the reports list) filter as you type; on any
+  // other page, Enter searches the reports.
+  const value = onSearch ? search : draft;
 
   return (
     <div className="app">
       <header className="topnav">
-        <button className="logo-btn" title="CiteSight" onClick={() => { onView("home"); nav("/"); }}><Logo /></button>
+        <button className="logo-btn" title="New report" aria-label="New report" onClick={() => nav("/")}><Logo /></button>
         <div className="search-wrap">
           <input
-            value={search}
-            onChange={(e) => onSearch(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") onView("analytics"); }}
-            placeholder="Search"
+            value={value}
+            onChange={(e) => (onSearch ? onSearch(e.target.value) : setDraft(e.target.value))}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !onSearch && draft.trim()) nav(`/reports?q=${encodeURIComponent(draft.trim())}`);
+            }}
+            placeholder={pathname.startsWith("/report/") ? "Search this report's checks" : "Search reports"}
+            aria-label="Search"
           />
         </div>
         <div className="top-links">
@@ -383,25 +355,28 @@ function Shell({ children, view, onView, onSearch, search, toast }) {
         </div>
         {open === "profile" && (
           <div className="dropdown" onMouseLeave={() => setOpen(null)}>
-            <button onClick={() => { onView("settings"); setOpen(null); }}>Settings</button>
+            <button onClick={() => { setOpen(null); nav("/settings"); }}>Settings</button>
           </div>
         )}
       </header>
       <div className="workspace">
-        <nav className="rail">
-          {rail.map(([id, icon, label]) => (
-            <button
-              key={id}
-              className={`rail-btn ${view === id || (id === "analytics" && view === "analytics") ? "active" : ""}`}
-              title={label}
-              onClick={() => {
-                if (id === "home") nav("/");
-                onView(id === "home" ? "home" : id);
-              }}
-            >
-              <Icon name={icon} />
-            </button>
-          ))}
+        <nav className="rail" aria-label="Main">
+          {RAIL.map((item) => {
+            const active = item.active(pathname);
+            return (
+              <button
+                key={item.path}
+                className={`rail-btn ${active ? "active" : ""}`}
+                title={item.label}
+                aria-label={item.label}
+                aria-current={active ? "page" : undefined}
+                onClick={() => nav(item.path)}
+              >
+                <Icon name={item.icon} />
+                <span className="rail-label">{item.label}</span>
+              </button>
+            );
+          })}
         </nav>
         <main className="stage">{children}</main>
       </div>
@@ -413,11 +388,10 @@ function Shell({ children, view, onView, onSearch, search, toast }) {
 function Landing() {
   const nav = useNavigate();
   const [url, setUrl] = useState("");
+  const [industry, setIndustry] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState(null);
-  const [industry, setIndustry] = useState("");
-  const [region, setRegion] = useState("");
 
   useEffect(() => {
     getStatus().then(setStatus).catch(() => setStatus(null));
@@ -432,7 +406,7 @@ function Landing() {
     setBusy(true);
     setError("");
     try {
-      const scan = await createScan(target, { industry, region });
+      const scan = await createScan(target, { industry });
       nav(`/scan/${scan.scan_id}`);
     } catch (e) {
       setError(e.message);
@@ -453,7 +427,6 @@ function Landing() {
       <p className="hero-sub">
         Understand how your brand appears in AI-generated answers. Monitor visibility, sentiment and brand mentions across top AI platforms.
       </p>
-      <Notices items={status?.warnings} />
       <div className="hero-input-pill">
         <input
           value={url}
@@ -465,24 +438,25 @@ function Landing() {
           {busy ? "Starting…" : "Start Your Audit"}
         </button>
       </div>
+      <div className="hero-options">
+        <label htmlFor="industry">Industry</label>
+        <select id="industry" value={industry} onChange={(e) => setIndustry(e.target.value)} disabled={busy}>
+          <option value="">Detect automatically</option>
+          {(status?.platforms?.industries || []).map((i) => (
+            <option key={i.key} value={i.key}>{i.label}</option>
+          ))}
+        </select>
+      </div>
+      <p className="hero-option-hint">
+        {industry
+          ? "Checks, review sites and content expectations follow this industry."
+          : "The industry is read from the site's own pages; pick one if it should be audited as something else."}
+      </p>
       {error && <p className="hero-error">{error}</p>}
-      {status?.platforms && (
-        <div className="scan-options">
-          <span>Off-Page sites to add:</span>
-          <select value={industry} onChange={(e) => setIndustry(e.target.value)} aria-label="Industry">
-            <option value="">Any industry</option>
-            {status.platforms.industries.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
-          </select>
-          <select value={region} onChange={(e) => setRegion(e.target.value)} aria-label="Region">
-            <option value="">Any region</option>
-            {status.platforms.regions.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
-          </select>
-        </div>
-      )}
       <p className="scan-cost-hint">
         {status?.cost?.typical_per_100_pages
           ? `Typical AI cost: about ${money(status.cost.typical_per_100_pages.cost_usd)} per 100 pages (from the last ${status.cost.typical_per_100_pages.based_on_scans} scans).`
-          : "AI cost is measured on every scan and shown while it runs."}
+          : ""}
         {status?.cost?.budget_usd ? ` Spending cap: ${money(status.cost.budget_usd)} per scan.` : ""}
       </p>
       <div className="hero-sub-heading">Understand where your brand stands in AI search:</div>
@@ -499,59 +473,101 @@ function Landing() {
   );
 }
 
+// Words for the scan's phase. "queued" is the brief moment before the crawl starts.
+const PHASES = { queued: "Starting", crawling: "Reading the website", evaluating: "Scoring the checks" };
+const POLL_MS = 1500;
+const POLL_TIMEOUT_MS = 30000;
+// A gap this long since the last update means the server is busy, not gone.
+const BUSY_AFTER_MS = 6000;
+
+function savedProgress(scanId) {
+  try {
+    return JSON.parse(sessionStorage.getItem(`scan-progress-${scanId}`) || "null");
+  } catch {
+    return null;
+  }
+}
+
 function Scanning() {
   const { scanId } = useParams();
   const nav = useNavigate();
-  const [p, setP] = useState(null);
+  // Start from the last progress this tab saw, so a reload never drops back to an empty card.
+  const [p, setP] = useState(() => savedProgress(scanId));
   const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     let alive = true;
     let fails = 0;
+    let timer = null;
+    let lastUpdate = Date.now();
+    const busyCheck = setInterval(() => alive && setBusy(Date.now() - lastUpdate > BUSY_AFTER_MS), 1000);
+
+    // One request at a time: the next poll is scheduled only after this one settles, so a slow
+    // response cannot pile further requests up behind it.
     const tick = async () => {
+      const ctrl = new AbortController();
+      const cut = setTimeout(() => ctrl.abort(), POLL_TIMEOUT_MS);
       try {
-        const data = await getProgress(scanId);
+        const data = await getProgress(scanId, ctrl.signal);
         if (!alive) return;
         fails = 0;
+        lastUpdate = Date.now();
+        setBusy(false);
         setErr("");
         setP(data);
-        if (data.status === "completed") nav(`/report/${scanId}`, { replace: true });
-        if (data.status === "error") setErr("Scan failed. Start a new report with a full URL such as https://www.example.com");
+        try { sessionStorage.setItem(`scan-progress-${scanId}`, JSON.stringify(data)); } catch { /* storage unavailable */ }
+        if (data.status === "completed") {
+          nav(`/report/${scanId}`, { replace: true });
+          return;
+        }
+        if (data.status === "error") {
+          setErr("Scan failed. Start a new report with a full URL such as https://www.example.com");
+          return;
+        }
       } catch (e) {
-        fails += 1;
-        if (alive && fails >= 3) setErr("Waiting for the server to reconnect…");
+        if (!alive) return;
+        // A request cut off by the timeout is the server being busy; a refused one is it being down.
+        if (e.name !== "AbortError") fails += 1;
+        if (fails >= 3) setErr("Waiting for the server to reconnect…");
+      } finally {
+        clearTimeout(cut);
       }
+      if (alive) timer = setTimeout(tick, POLL_MS);
     };
     tick();
-    const id = setInterval(tick, 1500);
-    return () => { alive = false; clearInterval(id); };
+    return () => { alive = false; clearTimeout(timer); clearInterval(busyCheck); };
   }, [scanId, nav]);
 
-  const pipes = p
-    ? [
-        ["Technical", p.technical_completed, p.technical_total],
-        ["On-Page", p.onpage_completed, p.onpage_total],
-        ["Off-Page", p.offpage_completed, p.offpage_total],
-      ]
-    : [];
+  const pipes = [
+    ["Technical", p?.technical_completed, p?.technical_total],
+    ["On-Page", p?.onpage_completed, p?.onpage_total],
+    ["Off-Page", p?.offpage_completed, p?.offpage_total],
+  ];
 
   return (
     <div className="card" style={{ maxWidth: 720, margin: "40px auto" }}>
       <div className="kicker">Scan in progress</div>
-      <h1 style={{ fontSize: 28 }}>{p?.domain || "Evaluating website"}</h1>
+      <h1 style={{ fontSize: 28 }}>{p?.domain || "Connecting to your audit…"}</h1>
       <p style={{ color: "var(--muted)" }}>
-        {p?.status === "crawling"
-          ? "Fetching live pages and sitemaps. This usually takes a few minutes."
+        {!p
+          ? "Loading the audit's progress."
+          : p.status === "crawling"
+          ? "Reading every page of the website. This usually takes a few minutes."
           : "Scores stay hidden until every runnable check finishes."}
       </p>
       {pipes.map(([name, done, total]) => (
         <div className="pipe" key={name}>
-          <div className="pipe-top"><span>{name}</span><span>{done}/{total}</span></div>
-          <div className="bar"><span style={{ width: `${(done / Math.max(1, total)) * 100}%` }} /></div>
+          <div className="pipe-top"><span>{name}</span><span>{p ? `${done || 0}/${total || 0}` : "—"}</span></div>
+          <div className="bar"><span style={{ width: `${p ? ((done || 0) / Math.max(1, total || 0)) * 100 : 0}%` }} /></div>
         </div>
       ))}
-      <p style={{ color: "var(--muted)" }}>Overall {Math.round(p?.progress_percent || 0)}% · {p?.status || "queued"}</p>
-      <AiUsage usage={p?.ai_usage} />
+      {p && (
+        <p style={{ color: "var(--muted)" }}>Overall {Math.round(p.progress_percent || 0)}% · {PHASES[p.status] || p.status}</p>
+      )}
+      {busy && !err && (
+        <p className="scan-busy">Working through the heavier checks. Progress will update in a moment.</p>
+      )}
       {err && <p style={{ color: "var(--red)" }}>{err}</p>}
     </div>
   );
@@ -691,15 +707,15 @@ function ScanHistoryCard({ scan, featured, onOpen }) {
     scan.status === "completed"
       ? `Completed · Score ${fmt(scan.overall_score, 1)}/100`
       : scan.status === "error"
-      ? "Scan failed · retry to try again"
-      : "Scan in progress";
+      ? "Scan stopped before finishing · run it again"
+      : `In progress · ${Math.round(scan.progress_percent || 0)}%`;
 
   return (
     <div className="history-card">
       <div className="history-icon">
-        {!iconError ? (
+        {!iconError && __FAVICON_SERVICE__ ? (
           <img
-            src={`https://www.google.com/s2/favicons?sz=64&domain=${scan.domain}`}
+            src={`${__FAVICON_SERVICE__}${encodeURIComponent(scan.domain)}`}
             alt=""
             onError={() => setIconError(true)}
           />
@@ -710,7 +726,7 @@ function ScanHistoryCard({ scan, featured, onOpen }) {
       <b className="history-name">{scan.domain}</b>
       <p className="history-desc">{desc}</p>
       <button className={`btn history-btn ${featured ? "btn-primary" : "btn-ghost"}`} onClick={onOpen}>
-        View Details
+        {scan.status === "completed" ? "View Report" : scan.status === "error" ? "View Details" : "View Progress"}
       </button>
     </div>
   );
@@ -734,33 +750,56 @@ function Dashboard() {
   const nav = useNavigate();
   const [report, setReport] = useState(null);
   const [err, setErr] = useState("");
-  const [view, setView] = useState("analytics");
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState(null);
-  const [scans, setScans] = useState([]);
   const [toast, setToast] = useState("");
   const [activeSection, setActiveSection] = useState("technical");
+  // A re-check of this report's unmeasured checks: {state, done, total, message} from the server.
+  const [recheck, setRecheck] = useState(null);
 
   useEffect(() => {
-    // Dashboard stays mounted when navigating from one report straight to another
-    // (e.g. clicking "View Details" on a different scan while on the Reports tab),
-    // so state from the previous report must be reset here rather than relying on
-    // a fresh component mount -- otherwise the view stays on whatever tab was open
-    // instead of jumping to the new report's analytics/graph view.
-    setView("analytics");
+    // Dashboard stays mounted when navigating from one report straight to another, so the
+    // previous report's state is reset here rather than relying on a fresh mount.
     setReport(null);
     setErr("");
     setSelected(null);
     getReport(scanId).then(setReport).catch((e) => setErr(e.message));
   }, [scanId]);
 
-  useEffect(() => {
-    if (view === "reports") listScans().then(setScans).catch(() => setScans([]));
-  }, [view]);
 
-  function notify(msg) {
+  // Pick up a re-check already running for this report (started before a page reload).
+  useEffect(() => {
+    setRecheck(null);
+    getRecheck(scanId).then((r) => r.state === "running" && setRecheck(r)).catch(() => {});
+  }, [scanId]);
+
+  // While a re-check runs, follow it; when it ends, show the rebuilt report.
+  useEffect(() => {
+    if (recheck?.state !== "running") return undefined;
+    let alive = true;
+    const timer = setInterval(async () => {
+      try {
+        const r = await getRecheck(scanId);
+        if (!alive) return;
+        setRecheck(r);
+        if (r.state !== "running") {
+          if (r.state === "done") setReport(await getReport(scanId));
+          notify(r.state === "done" ? `Re-check finished: ${r.message}` : r.message, 6000);
+          setRecheck(null);
+        }
+      } catch {
+        /* a missed poll is retried on the next tick */
+      }
+    }, 3000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [recheck?.state, scanId]);
+
+  function notify(msg, ms = 2200) {
     setToast(msg);
-    setTimeout(() => setToast(""), 2200);
+    setTimeout(() => setToast(""), ms);
   }
 
   async function openParameter(row) {
@@ -805,46 +844,16 @@ function Dashboard() {
     return out;
   }, [params, search]);
 
-  // Unmeasured checks are left out of the score, not counted as 0 -- so a score with gaps must
-  // say so, or an audit that could not run a third of a pillar reads as a complete one.
-  const reportNotices = useMemo(() => {
-    const names = { technical: "Technical", on_page: "On-Page", off_page: "Off-Page" };
-    const gaps = Object.entries(names)
-      .map(([key, name]) => {
-        const rows = params.filter((p) => p.section === key);
-        return { name, total: rows.length, unknown: rows.filter((p) => p.status === "UNKNOWN") };
-      })
-      .filter((g) => g.unknown.length);
-    const out = [];
-    if (gaps.length) {
-      out.push({
-        level: "warning",
-        title: "Partial score: some checks could not be measured",
-        text: "Checks that could not be measured are left out of the score rather than counted as 0, so the overall score covers only the checks that ran.",
-        list: gaps.map((g) => `${g.name}: ${g.unknown.length} of ${g.total} not measured (${unmeasuredReasons(g.unknown)})`),
-      });
-    }
-    const plat = report?.platforms;
-    if (plat && (plat.industry || plat.region)) {
-      out.push({
-        level: "info",
-        title: `Off-Page sites checked: ${plat.label}`,
-        text: `Review sites: ${(plat.review || []).join(", ")}. Business profiles: ${(plat.profile || []).join(", ")}.`,
-      });
-    }
-    return out;
-  }, [params, report]);
-  const partial = reportNotices.some((n) => n.level === "warning");
 
   if (err) {
     return (
-      <Shell view="home" onView={setView} search={search} onSearch={setSearch} toast={toast}>
+      <Shell search={search} onSearch={setSearch} toast={toast}>
         <div className="card"><h2>Report unavailable</h2><p>{err}</p><button className="btn btn-primary" onClick={() => nav("/")}>Create New Report</button></div>
       </Shell>
     );
   }
   if (!report) {
-    return <Shell view="analytics" onView={setView} search={search} onSearch={setSearch}><div className="card">Loading report…</div></Shell>;
+    return <Shell search={search} onSearch={setSearch}><div className="card">Loading report…</div></Shell>;
   }
 
   function exportPdf() {
@@ -852,21 +861,60 @@ function Dashboard() {
     notify("Preparing PDF download");
   }
 
+  // Only the checks that could not be measured are run again, against the pages this audit
+  // already read; every other result stays as it is and the report is rebuilt in place.
+  const unmeasured = params.filter((p) => p.status === "UNKNOWN");
+  async function startRecheckRun() {
+    setRecheck({ state: "running", done: 0, total: unmeasured.length, message: "Starting" });
+    try {
+      setRecheck(await startRecheck(scanId));
+    } catch (e) {
+      setRecheck(null);
+      notify(`Could not start the re-check: ${e.message}`, 5000);
+    }
+  }
+  const rechecking = recheck?.state === "running";
+  const recheckLabel = !rechecking
+    ? `Re-check unmeasured (${unmeasured.length})`
+    : recheck.message?.startsWith("Re-checking")
+      ? `Re-checking ${recheck.done}/${recheck.total}…`
+      : `${recheck.message || "Starting"}…`;
+
   return (
-    <Shell view={view} onView={(v) => { setView(v); if (v === "home") nav("/"); }} search={search} onSearch={(v) => { setSearch(v); if (v) setView("analytics"); }} toast={toast}>
-      {view === "analytics" && (
+    <Shell search={search} onSearch={setSearch} toast={toast}>
         <>
           <div className="page-head">
             <div>
               <h1>{report.domain}</h1>
+              {report.generated_at && (
+                <p>
+                  Generated {new Date(report.generated_at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}
+                  {report.rechecked && " · re-checked"}
+                </p>
+              )}
             </div>
             <div className="head-actions">
+              {(rechecking || unmeasured.length > 0) && (
+                <button
+                  className="btn btn-ghost"
+                  onClick={startRecheckRun}
+                  disabled={rechecking}
+                  title={`Runs only ${unmeasured.map((p) => p.parameter_id).join(", ")} again, using the pages this audit already read`}
+                >
+                  <Icon name="rerun" /> {recheckLabel}
+                </button>
+              )}
               <button className="btn btn-ghost" onClick={exportPdf}><Icon name="export" /> Export to PDF</button>
               <button className="btn btn-primary" onClick={() => nav("/")}><Icon name="plus" /> Create New Report</button>
             </div>
           </div>
 
-          <Notices items={reportNotices} className="report-notices" />
+          {report.gating && (
+            <div className="gating-banner" role="alert">
+              <b>⚠ {report.gating.title}</b>
+              <p>{report.gating.detail}</p>
+            </div>
+          )}
 
           <div className="card visibility-card">
             <div className="card-head">
@@ -903,7 +951,6 @@ function Dashboard() {
                 </table>
                 <div className="overall-score-line">
                   Overall Score <span className={`overall-score-value band ${overallBand.cls}`}>{fmt(overall)}</span>
-                  {partial && <span className="drawer-note"> (partial: not every check could be measured)</span>}
                 </div>
               </div>
               <div className="gauge-row">
@@ -912,7 +959,6 @@ function Dashboard() {
                 ))}
               </div>
             </div>
-            <AiUsage usage={report.ai_usage} final />
             <div className="legend-row">
               <span className="band excellent">90+ Excellent</span>
               <span className="band good">75–89 Good</span>
@@ -933,27 +979,6 @@ function Dashboard() {
             />
           </div>
         </>
-      )}
-
-      {view === "reports" && (
-        <div className="panel">
-          <div className="page-head">
-            <div><h1 style={{ fontSize: 24 }}>Search History</h1><p>Explore historical search insights and findings.</p></div>
-            <button className="btn btn-primary" onClick={() => nav("/")}><Icon name="plus" /> Create New Report</button>
-          </div>
-          <ScanHistoryGrid
-            scans={scans}
-            onOpen={(s) => { if (s.status === "completed") nav(`/report/${s.scan_id}`); else nav(`/scan/${s.scan_id}`); }}
-          />
-        </div>
-      )}
-
-      {view === "settings" && (
-        <div className="card panel">
-          <h2>Settings</h2>
-          <p>Account and report preferences will appear here.</p>
-        </div>
-      )}
 
       {selected && (
         <div className="drawer-back" onClick={() => setSelected(null)}>
@@ -984,8 +1009,18 @@ function Dashboard() {
             </div>
             <div className="drawer-fact">
               <span className="drawer-fact-label">Recommended fix</span>
-              <span>{fixText(selected)}</span>
+              <span>{(() => {
+                const note = parseEvidence(selected.evidence)?.cross_check;
+                const text = fixText(selected);
+                return note && text.startsWith(note) ? text.slice(note.length).trim() || text : text;
+              })()}</span>
             </div>
+            {parseEvidence(selected.evidence)?.cross_check && (
+              <div className="drawer-fact">
+                <span className="drawer-fact-label">Read together with other checks</span>
+                <span>{parseEvidence(selected.evidence).cross_check}</span>
+              </div>
+            )}
             <EvidencePanel evidence={selected.evidence} error={selected.error} />
             <ScoreCalculation p={selected} />
           </div>
@@ -996,47 +1031,78 @@ function Dashboard() {
 }
 
 function HomePage() {
-  const [view, setView] = useState("home");
-  const [search, setSearch] = useState("");
+  return <Shell><Landing /></Shell>;
+}
+
+function ReportsPage() {
+  const [params, setParams] = useSearchParams();
+  const [scans, setScans] = useState(null);
   const nav = useNavigate();
-
-  let body = <Landing />;
-  if (view === "reports") {
-    body = <ReportsHome />;
-  } else if (view === "settings") {
-    body = <div className="card panel"><h2>Settings</h2><p>Account and report preferences will appear here.</p></div>;
-  } else if (view === "analytics") {
-    body = (
-      <div className="card panel">
-        <h2>Analytics</h2>
-        <p>Open an existing report or create a new one to see the visibility dashboard.</p>
-        <button className="btn btn-primary" onClick={() => setView("reports")}>View reports</button>
-      </div>
-    );
-  }
-
+  const q = params.get("q") || "";
+  useEffect(() => {
+    let alive = true;
+    const load = () => listScans().then((d) => alive && setScans(d)).catch(() => alive && setScans((prev) => prev || []));
+    load();
+    // Audits in progress move; the list follows them without a manual refresh.
+    const id = setInterval(load, 5000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+  // Audits that stopped before finishing have no report to open, so they are not listed.
+  const shown = (scans || [])
+    .filter((s) => s.status !== "error")
+    .filter((s) => !q || s.domain.toLowerCase().includes(q.toLowerCase()));
   return (
-    <Shell view={view} onView={(v) => { if (v === "home") { setView("home"); nav("/"); } else setView(v); }} search={search} onSearch={setSearch}>
-      {body}
+    <Shell search={q} onSearch={(v) => setParams(v ? { q: v } : {}, { replace: true })}>
+      <div className="panel">
+        <div className="page-head">
+          <div><h1 style={{ fontSize: 24 }}>Reports</h1><p>Every audit, newest first. Open one to see its report or progress.</p></div>
+          <button className="btn btn-primary" onClick={() => nav("/")}><Icon name="plus" /> Create New Report</button>
+        </div>
+        {scans === null ? (
+          <div className="card">Loading reports…</div>
+        ) : q && !shown.length ? (
+          <div className="card">No reports match “{q}”.</div>
+        ) : (
+          <ScanHistoryGrid
+            scans={shown}
+            onOpen={(s) => nav(s.status === "completed" ? `/report/${s.scan_id}` : `/scan/${s.scan_id}`)}
+          />
+        )}
+      </div>
     </Shell>
   );
 }
 
-function ReportsHome() {
-  const [scans, setScans] = useState([]);
+// Analytics is the latest finished report: the page you most often want after an audit.
+function AnalyticsPage() {
+  const [target, setTarget] = useState(undefined);
   const nav = useNavigate();
-  useEffect(() => { listScans().then(setScans).catch(() => setScans([])); }, []);
+  useEffect(() => {
+    listScans()
+      .then((d) => setTarget(d.find((s) => s.status === "completed")?.scan_id || null))
+      .catch(() => setTarget(null));
+  }, []);
+  if (target) return <Navigate to={`/report/${target}`} replace />;
   return (
-    <div className="panel">
-      <div className="page-head">
-        <div><h1 style={{ fontSize: 24 }}>Search History</h1><p>Explore historical search insights and findings.</p></div>
-        <button className="btn btn-primary" onClick={() => nav("/")}><Icon name="plus" /> Create New Report</button>
-      </div>
-      <ScanHistoryGrid
-        scans={scans}
-        onOpen={(s) => nav(s.status === "completed" ? `/report/${s.scan_id}` : `/scan/${s.scan_id}`)}
-      />
-    </div>
+    <Shell>
+      {target === undefined ? (
+        <div className="card">Opening your latest report…</div>
+      ) : (
+        <div className="card panel">
+          <h2>No finished reports yet</h2>
+          <p>Run an audit and its report will open here when it finishes.</p>
+          <button className="btn btn-primary" onClick={() => nav("/")}><Icon name="plus" /> Create New Report</button>
+        </div>
+      )}
+    </Shell>
+  );
+}
+
+function SettingsPage() {
+  return (
+    <Shell>
+      <div className="card panel"><h2>Settings</h2><p>Account and report preferences will appear here.</p></div>
+    </Shell>
   );
 }
 
@@ -1044,6 +1110,9 @@ export default function App() {
   return (
     <Routes>
       <Route path="/" element={<HomePage />} />
+      <Route path="/reports" element={<ReportsPage />} />
+      <Route path="/analytics" element={<AnalyticsPage />} />
+      <Route path="/settings" element={<SettingsPage />} />
       <Route path="/scan/:scanId" element={<ScanPage />} />
       <Route path="/report/:scanId" element={<Dashboard />} />
       <Route path="*" element={<Navigate to="/" replace />} />
@@ -1052,10 +1121,8 @@ export default function App() {
 }
 
 function ScanPage() {
-  const [search, setSearch] = useState("");
-  const nav = useNavigate();
   return (
-    <Shell view="analytics" onView={(v) => { if (v === "home") nav("/"); }} search={search} onSearch={setSearch}>
+    <Shell>
       <Scanning />
     </Shell>
   );

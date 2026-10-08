@@ -23,7 +23,7 @@ from ..config import (
     RENDER_DELTA_THRESHOLD,
     RENDER_SHELL_WORDS,
 )
-from ..parameters.common import flatten_schema
+from ..parameters.common import drop_acronym, flatten_schema
 from .extract import extract_many, extract_text_sync
 from .fetch_many import crawl_raw
 from .http import (
@@ -595,6 +595,11 @@ class SiteContext:
     # The off-page review/profile/community sites this scan checks (parameters/platforms.py).
     # Empty means the default set; the scan request fills it when an industry or region is chosen.
     platforms: dict = field(default_factory=dict)
+    # The industry profile this scan is audited against (parameters/industry.py): detected from the
+    # site's pages unless the scan request named one. Empty means the general profile.
+    industry: dict = field(default_factory=dict)
+    # Who owns the site (parameters/identity.py): official name, abbreviation, brand term, Wikidata ID.
+    identity: dict = field(default_factory=dict)
 
 
 def _priority_urls(origin: str, sitemap_urls: list[str], homepage_links: list[str]) -> list[str]:
@@ -902,6 +907,8 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
             name = org.strip()
         elif homepage.title:
             name = homepage.title.split("|")[0].split("-")[0].strip() or name
+    # "American Academy of Orthopaedic Surgeons AAOS" -> the name Wikipedia and the web use.
+    name = drop_acronym(name)
     brand_terms = list(dict.fromkeys([t for t in (name.lower(), stem.lower(), host.lower()) if t]))
 
     return SiteContext(

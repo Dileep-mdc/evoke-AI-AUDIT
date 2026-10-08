@@ -30,8 +30,13 @@ def presence_target(platforms_checked: int) -> int:
     return max(1, min(platforms_checked, rules.threshold("platforms_for_full_marks")))
 
 
-def off_03(platforms_found: int, platforms_total: int, name_share: float, location_share: float) -> float:
-    return min(platforms_found, platforms_total) / platforms_total * 70 + name_share * 15 + location_share * 15
+def off_03(platforms_found: int, platforms_total: int, name_share: float, location_share: Optional[float]) -> float:
+    """Presence 70 + name match 15 + location match 15. With no office location stated on the site
+    (location_share None), the name match carries all 30 consistency points."""
+    presence = min(platforms_found, platforms_total) / platforms_total * 70
+    if location_share is None:
+        return presence + name_share * 30
+    return presence + name_share * 15 + location_share * 15
 
 
 def off_04(claim_kinds_found: int) -> float:
@@ -39,8 +44,13 @@ def off_04(claim_kinds_found: int) -> float:
     return 55.0 if claim_kinds_found else 40.0
 
 
-def off_05(platforms_found: int, platforms_total: int, category_match: bool) -> float:
-    return min(platforms_found, platforms_total) / platforms_total * 70 + (30 if category_match else 0)
+def off_05(platforms_found: int, platforms_total: int, category_match: Optional[bool]) -> float:
+    """Presence 70 + category placement 30. With no category derivable from the site
+    (category_match None), presence carries the whole score."""
+    share = min(platforms_found, platforms_total) / platforms_total
+    if category_match is None:
+        return share * 100
+    return share * 70 + (30 if category_match else 0)
 
 
 def off_06_volume(review_results: int) -> int:

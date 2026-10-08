@@ -37,3 +37,11 @@ def no_live_web_search_during_tests():
     tools.SEARCH_PROVIDER = "google"
     yield
     tools.SEARCH_PROVIDER = original
+
+
+@pytest.fixture(autouse=True)
+def no_request_pacing_during_tests(monkeypatch):
+    """backend/.env records the OpenAI project's requests-per-minute limit. Each test starts
+    unpaced and with no learned limit; a test that is about pacing or sampling sets its own."""
+    monkeypatch.setattr(llm_client, "_rpm_limit", None)
+    monkeypatch.setattr(llm_client, "_tat", 0.0)

@@ -9,6 +9,8 @@ from reportlab.lib.units import inch
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .config import WEIGHTS
+from .parameters.scoring import display_status
+from .scan_output import _friendly_timestamp
 
 
 NAVY = colors.HexColor("#14367A")
@@ -36,8 +38,22 @@ def build_pdf(report: dict) -> bytes:
     story = [
         Paragraph("AI Visibility Audit", title),
         Paragraph(f"Report for <b>{report.get('domain')}</b>", body),
-        Paragraph(f"Generated: {report.get('generated_at') or '—'} · Engine {report.get('crawler_version') or '1.0.0'}", small),
+        Paragraph(f"Generated: {_friendly_timestamp(report.get('generated_at')) or '—'}"
+                  + (f" · Website read: {_friendly_timestamp(report['audited_at'])}"
+                     if report.get("audited_at") and report.get("audited_at") != report.get("generated_at") else "")
+                  + f" · Engine {report.get('crawler_version') or '1.0.0'}", small),
         Spacer(1, 8),
+    ]
+    if report.get("identity"):
+        ident = report["identity"]
+        story.append(Paragraph(f"Organisation: <b>{ident.get('name')}</b>" + (f" ({ident['acronym']})" if ident.get("acronym") else ""), small))
+    if report.get("industry"):
+        story.append(Paragraph(f"Industry profile: <b>{report['industry'].get('label')}</b>", small))
+    if report.get("content_analysis"):
+        story.append(Paragraph(f"Content analysed from: {report['content_analysis'].get('summary')}", small))
+    if report.get("gating"):
+        story.append(Paragraph(f"<b>{report['gating'].get('title')}.</b> {report['gating'].get('detail')}", body))
+    story += [
         Paragraph("Scores", h),
     ]
     score_data = [[
@@ -62,8 +78,9 @@ def build_pdf(report: dict) -> bytes:
     ]))
     story += [t, Spacer(1, 8)]
     story.append(Paragraph(
-        f"Passed {counts.get('pass', 0)} · Partial {counts.get('partial', 0)} · Failed {counts.get('fail', 0)} · Unknown {counts.get('unknown', 0)}. "
-        f"UNKNOWN parameters are excluded from category denominators.",
+        f"Passed {counts.get('pass', 0)} · Partial {counts.get('partial', 0)} · Failed {counts.get('fail', 0)} · "
+        f"Unknown {counts.get('unknown', 0)}. "
+        f"Unknown parameters are excluded from category denominators.",
         body,
     ))
     story.append(Paragraph("Top issues", h))
@@ -91,7 +108,7 @@ def build_pdf(report: dict) -> bytes:
     rows = [["ID", "Parameter", "Status", "Score"]]
     for p in report.get("parameters") or []:
         score = "—" if p.get("score") is None else f"{p.get('score')}"
-        rows.append([p.get("parameter_id"), Paragraph(p.get("name", ""), small), p.get("status"), score])
+        rows.append([p.get("parameter_id"), Paragraph(p.get("name", ""), small), display_status(p), score])
     pt = Table(rows, colWidths=[0.9 * inch, 4.4 * inch, 1.0 * inch, 0.7 * inch])
     style_cmds = [
         ("BACKGROUND", (0, 0), (-1, 0), NAVY),
@@ -110,14 +127,20 @@ def build_pdf(report: dict) -> bytes:
     story.append(Spacer(1, 10))
     # Read the weights rather than restating them, so the sentence cannot contradict the
     # scores printed above it if a weight is ever retuned.
-    weights = report.get("weights") or WEIGHTS
+    # The weights the overall score actually used: the stated ones, unless a whole pillar could
+    # not be measured and the others were rescaled -- which the sentence then says.
+    weights = report.get("effective_weights") or report.get("weights") or WEIGHTS
     blend = ", ".join(
         f"{label} ({weights[key] * 100:.0f}%)"
         for key, label in (("technical", "Technical"), ("on_page", "Content &amp; Answers"), ("off_page", "Reputation &amp; Authority"))
-        if key in weights
+        if weights.get(key)
     )
+    rescaled = any(abs(weights.get(k, 0) - v) > 1e-6 for k, v in WEIGHTS.items())
     story.append(Paragraph(
-        f"Scores are a weighted blend of {blend}. "
+        f"The overall score is a weighted blend of the pillar scores: {blend}. "
+        + ("A pillar with no measurable checks was left out and the others rescaled in proportion. " if rescaled else "")
+        + "Within a pillar, checks that could not be measured are left out, so they do not shift the pillar weights. "
+        "A check that found none of what it looks for on the site fails at 0. "
         "Each parameter is Pass / Partial / Fail / Unknown. This PDF uses the same persisted scan results as the dashboard.",
         small,
     ))

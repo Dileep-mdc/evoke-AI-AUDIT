@@ -1,0 +1,952 @@
+{
+  "_comment": [
+    "Industry profiles: what a good website looks like differs by industry, so the audit adapts to it.",
+    "",
+    "A scan detects the site's industry from its own pages (detect: words on the homepage and in page",
+    "titles, URL paths, and structured-data types) or takes it from the scan request. The profile then sets:",
+    "  platforms        review / profile / community sites for the off-page checks (OFF-03, OFF-05/06, OFF-07).",
+    "                   These REPLACE the default lists; a region chosen for the scan still adds its sites.",
+    "                   An empty list means the channel does not apply to the industry.",
+    "  content_rubric   what a complete key page covers (ON-10), with keywords for the no-AI fallback.",
+    "  page_schema      structured-data types accepted on the industry's key pages (TECH-17).",
+    "",
+    "`general` is used when no industry is clearly indicated. Edit this file to tune detection, add an",
+    "industry or change a list; no code change is needed. INDUSTRY_PROFILES_PATH points at a different file."
+  ],
+  "detection": {
+    "_what": "A profile is chosen when it collects at least min_signals and beats the runner-up by margin x; otherwise `general`.",
+    "min_signals": 4,
+    "margin": 1.5
+  },
+  "profiles": {
+    "general": {
+      "label": "General",
+      "platforms": {
+        "review": [
+          "g2.com",
+          "clutch.co",
+          "gartner.com",
+          "trustradius.com"
+        ],
+        "profile": [
+          "linkedin.com",
+          "crunchbase.com",
+          "bloomberg.com",
+          "zoominfo.com"
+        ],
+        "community": [
+          "reddit.com",
+          "quora.com"
+        ]
+      },
+      "content_rubric": [
+        {
+          "point": "the problem or need it addresses",
+          "keywords": [
+            "problem",
+            "need",
+            "challenge",
+            "pain point"
+          ]
+        },
+        {
+          "point": "the approach, process or methodology",
+          "keywords": [
+            "approach",
+            "process",
+            "how it works",
+            "how we",
+            "methodology"
+          ]
+        },
+        {
+          "point": "what is included (features or capabilities)",
+          "keywords": [
+            "feature",
+            "capabilit",
+            "what you get",
+            "includes"
+          ]
+        },
+        {
+          "point": "the outcomes or benefits",
+          "keywords": [
+            "outcome",
+            "result",
+            "benefit"
+          ]
+        },
+        {
+          "point": "who it is for (industry, audience or market)",
+          "keywords": [
+            "industry",
+            "audience",
+            "market",
+            "who we serve",
+            "for you"
+          ]
+        },
+        {
+          "point": "pricing or commercial model",
+          "keywords": [
+            "pricing",
+            "price",
+            "cost",
+            "plan",
+            "package"
+          ]
+        },
+        {
+          "point": "proof (clients, case studies, testimonials or ratings)",
+          "keywords": [
+            "review",
+            "testimonial",
+            "case stud",
+            "client",
+            "rated"
+          ]
+        },
+        {
+          "point": "a clear next step or way to get in touch",
+          "keywords": [
+            "contact",
+            "get started",
+            "book",
+            "schedule",
+            "sign up"
+          ]
+        }
+      ],
+      "page_schema": {
+        "service": [
+          "service",
+          "product",
+          "offer",
+          "professionalservice"
+        ]
+      }
+    },
+    "it_services": {
+      "label": "IT services & consulting",
+      "detect": {
+        "keywords": [
+          "it services",
+          "consulting",
+          "digital transformation",
+          "software development",
+          "managed services",
+          "outsourcing",
+          "staff augmentation",
+          "application development",
+          "cloud migration",
+          "devops",
+          "system integrator",
+          "offshore"
+        ],
+        "url_hints": [
+          "/services",
+          "/solutions",
+          "/case-studies",
+          "/industries"
+        ],
+        "schema_types": [
+          "professionalservice"
+        ]
+      },
+      "platforms": {
+        "review": [
+          "clutch.co",
+          "goodfirms.co",
+          "g2.com",
+          "gartner.com",
+          "designrush.com"
+        ],
+        "profile": [
+          "linkedin.com",
+          "crunchbase.com",
+          "bloomberg.com",
+          "zoominfo.com"
+        ],
+        "community": [
+          "reddit.com",
+          "quora.com"
+        ]
+      },
+      "content_rubric": [
+        {
+          "point": "the business problem or need the service addresses",
+          "keywords": [
+            "problem",
+            "need",
+            "challenge",
+            "pain point"
+          ]
+        },
+        {
+          "point": "the delivery approach, process or methodology",
+          "keywords": [
+            "approach",
+            "process",
+            "methodology",
+            "how we",
+            "framework"
+          ]
+        },
+        {
+          "point": "what is delivered (scope, capabilities, technologies)",
+          "keywords": [
+            "capabilit",
+            "technolog",
+            "includes",
+            "scope",
+            "deliver"
+          ]
+        },
+        {
+          "point": "the outcomes or business benefits",
+          "keywords": [
+            "outcome",
+            "result",
+            "benefit",
+            "roi"
+          ]
+        },
+        {
+          "point": "the industries or clients it is for",
+          "keywords": [
+            "industry",
+            "industries",
+            "clients",
+            "who we serve"
+          ]
+        },
+        {
+          "point": "the engagement or commercial model",
+          "keywords": [
+            "engagement",
+            "model",
+            "pricing",
+            "fixed price",
+            "time and material"
+          ]
+        },
+        {
+          "point": "proof (case studies, named clients, testimonials, ratings)",
+          "keywords": [
+            "case stud",
+            "testimonial",
+            "client",
+            "rated",
+            "review"
+          ]
+        },
+        {
+          "point": "a clear next step or way to get in touch",
+          "keywords": [
+            "contact",
+            "get started",
+            "talk to",
+            "book",
+            "schedule"
+          ]
+        }
+      ],
+      "page_schema": {
+        "service": [
+          "service",
+          "professionalservice",
+          "offer"
+        ]
+      }
+    },
+    "software": {
+      "label": "Software & SaaS",
+      "detect": {
+        "keywords": [
+          "free trial",
+          "start free",
+          "sign up",
+          "saas",
+          "request a demo",
+          "book a demo",
+          "integrations",
+          "api",
+          "per user",
+          "per month",
+          "pricing plans",
+          "dashboard"
+        ],
+        "url_hints": [
+          "/pricing",
+          "/integrations",
+          "/features",
+          "/signup",
+          "/docs"
+        ],
+        "schema_types": [
+          "softwareapplication",
+          "webapplication"
+        ]
+      },
+      "platforms": {
+        "review": [
+          "g2.com",
+          "capterra.com",
+          "trustradius.com",
+          "gartner.com",
+          "softwareadvice.com",
+          "getapp.com"
+        ],
+        "profile": [
+          "linkedin.com",
+          "crunchbase.com",
+          "bloomberg.com",
+          "zoominfo.com"
+        ],
+        "community": [
+          "reddit.com",
+          "quora.com",
+          "stackoverflow.com"
+        ]
+      },
+      "content_rubric": [
+        {
+          "point": "the problem the product solves",
+          "keywords": [
+            "problem",
+            "challenge",
+            "pain point",
+            "struggle"
+          ]
+        },
+        {
+          "point": "how it works and its key features",
+          "keywords": [
+            "feature",
+            "how it works",
+            "capabilit",
+            "workflow"
+          ]
+        },
+        {
+          "point": "integrations and compatibility",
+          "keywords": [
+            "integrat",
+            "connect",
+            "api",
+            "compatible"
+          ]
+        },
+        {
+          "point": "who it is for (roles, team sizes, industries)",
+          "keywords": [
+            "for teams",
+            "industry",
+            "who it's for",
+            "built for"
+          ]
+        },
+        {
+          "point": "pricing or plans",
+          "keywords": [
+            "pricing",
+            "price",
+            "plan",
+            "per user",
+            "free"
+          ]
+        },
+        {
+          "point": "security and compliance",
+          "keywords": [
+            "security",
+            "compliance",
+            "soc 2",
+            "gdpr",
+            "iso 27001",
+            "encryption"
+          ]
+        },
+        {
+          "point": "proof (customer stories, reviews, ratings)",
+          "keywords": [
+            "customer",
+            "review",
+            "testimonial",
+            "rated",
+            "case stud"
+          ]
+        },
+        {
+          "point": "a clear next step (trial, demo, sign-up)",
+          "keywords": [
+            "free trial",
+            "demo",
+            "sign up",
+            "get started"
+          ]
+        }
+      ],
+      "page_schema": {
+        "service": [
+          "softwareapplication",
+          "webapplication",
+          "product",
+          "offer",
+          "service"
+        ]
+      }
+    },
+    "manufacturing": {
+      "label": "Manufacturing & industrial products",
+      "detect": {
+        "keywords": [
+          "manufacturer",
+          "manufacturing",
+          "datasheet",
+          "data sheet",
+          "specifications",
+          "catalog",
+          "catalogue",
+          "distributor",
+          "where to buy",
+          "cad",
+          "part number",
+          "industrial",
+          "oem",
+          "enclosures",
+          "product line"
+        ],
+        "url_hints": [
+          "/products",
+          "/product/",
+          "/catalog",
+          "/where-to-buy",
+          "/distributors",
+          "/literature"
+        ],
+        "schema_types": [
+          "product",
+          "productmodel",
+          "productgroup"
+        ]
+      },
+      "platforms": {
+        "review": [],
+        "profile": [
+          "linkedin.com",
+          "thomasnet.com",
+          "globalspec.com",
+          "kompass.com",
+          "zoominfo.com",
+          "crunchbase.com",
+          "bloomberg.com"
+        ],
+        "community": [
+          "reddit.com",
+          "quora.com",
+          "eng-tips.com"
+        ]
+      },
+      "content_rubric": [
+        {
+          "point": "what the product is and the applications it is for",
+          "keywords": [
+            "application",
+            "used for",
+            "ideal for",
+            "designed for"
+          ]
+        },
+        {
+          "point": "key specifications (ratings, dimensions, materials)",
+          "keywords": [
+            "specification",
+            "rating",
+            "dimension",
+            "material",
+            "voltage",
+            "ip rating"
+          ]
+        },
+        {
+          "point": "standards and certifications (UL, CE, ISO, IEC)",
+          "keywords": [
+            "ul ",
+            "ce ",
+            "iso",
+            "iec",
+            "certified",
+            "compliant",
+            "nema"
+          ]
+        },
+        {
+          "point": "options, variants or configurations",
+          "keywords": [
+            "option",
+            "variant",
+            "configur",
+            "sizes",
+            "models"
+          ]
+        },
+        {
+          "point": "downloadable documents (datasheets, CAD, manuals)",
+          "keywords": [
+            "datasheet",
+            "data sheet",
+            "cad",
+            "manual",
+            "download",
+            "brochure"
+          ]
+        },
+        {
+          "point": "related or compatible products and accessories",
+          "keywords": [
+            "accessor",
+            "compatible",
+            "related products",
+            "pairs with"
+          ]
+        },
+        {
+          "point": "where to buy (distributors, dealers, quote)",
+          "keywords": [
+            "where to buy",
+            "distributor",
+            "dealer",
+            "request a quote",
+            "find a"
+          ]
+        },
+        {
+          "point": "technical support or a way to get in touch",
+          "keywords": [
+            "support",
+            "contact",
+            "technical",
+            "service"
+          ]
+        }
+      ],
+      "page_schema": {
+        "service": [
+          "product",
+          "productmodel",
+          "productgroup",
+          "offer"
+        ]
+      }
+    },
+    "healthcare": {
+      "label": "Healthcare & medical",
+      "detect": {
+        "keywords": [
+          "patient",
+          "patients",
+          "clinical",
+          "physician",
+          "physicians",
+          "surgeon",
+          "surgeons",
+          "medical",
+          "hospital",
+          "treatment",
+          "healthcare",
+          "diagnosis",
+          "clinic"
+        ],
+        "url_hints": [
+          "/patients",
+          "/physicians",
+          "/conditions",
+          "/treatments",
+          "/find-a-doctor"
+        ],
+        "schema_types": [
+          "medicalorganization",
+          "hospital",
+          "physician",
+          "medicalwebpage",
+          "medicalclinic"
+        ]
+      },
+      "platforms": {
+        "review": [
+          "healthgrades.com",
+          "vitals.com",
+          "zocdoc.com",
+          "webmd.com"
+        ],
+        "profile": [
+          "linkedin.com",
+          "crunchbase.com",
+          "zoominfo.com",
+          "bloomberg.com"
+        ],
+        "community": [
+          "reddit.com",
+          "quora.com"
+        ]
+      },
+      "content_rubric": [
+        {
+          "point": "the condition, topic or service explained in plain language",
+          "keywords": [
+            "what is",
+            "overview",
+            "condition",
+            "symptom"
+          ]
+        },
+        {
+          "point": "who it affects or is for",
+          "keywords": [
+            "who",
+            "patients",
+            "children",
+            "adults",
+            "risk"
+          ]
+        },
+        {
+          "point": "diagnosis or treatment options",
+          "keywords": [
+            "diagnos",
+            "treatment",
+            "therapy",
+            "surgery",
+            "procedure"
+          ]
+        },
+        {
+          "point": "expected outcomes, recovery and risks",
+          "keywords": [
+            "recovery",
+            "outcome",
+            "risk",
+            "complication",
+            "prognosis"
+          ]
+        },
+        {
+          "point": "evidence or clinical sources",
+          "keywords": [
+            "study",
+            "evidence",
+            "research",
+            "guideline",
+            "journal"
+          ]
+        },
+        {
+          "point": "the credentials of the clinicians or reviewers",
+          "keywords": [
+            "md",
+            "reviewed by",
+            "board certified",
+            "fellow",
+            "credential"
+          ]
+        },
+        {
+          "point": "when it was last reviewed",
+          "keywords": [
+            "reviewed",
+            "updated",
+            "last modified"
+          ]
+        },
+        {
+          "point": "when to seek care or how to get an appointment",
+          "keywords": [
+            "appointment",
+            "find a",
+            "contact",
+            "when to see"
+          ]
+        }
+      ],
+      "page_schema": {
+        "service": [
+          "medicalwebpage",
+          "medicalorganization",
+          "medicalprocedure",
+          "medicalcondition",
+          "physician",
+          "service"
+        ]
+      }
+    },
+    "retail": {
+      "label": "Retail & e-commerce",
+      "detect": {
+        "keywords": [
+          "add to cart",
+          "add to bag",
+          "shop now",
+          "free shipping",
+          "checkout",
+          "returns",
+          "in stock",
+          "wishlist",
+          "sale",
+          "new arrivals"
+        ],
+        "url_hints": [
+          "/shop",
+          "/cart",
+          "/checkout",
+          "/collections",
+          "/product/"
+        ],
+        "schema_types": [
+          "offer",
+          "aggregateoffer",
+          "store",
+          "onlinestore"
+        ]
+      },
+      "platforms": {
+        "review": [
+          "trustpilot.com",
+          "sitejabber.com",
+          "bbb.org",
+          "reviews.io"
+        ],
+        "profile": [
+          "linkedin.com",
+          "crunchbase.com",
+          "bloomberg.com",
+          "zoominfo.com"
+        ],
+        "community": [
+          "reddit.com",
+          "quora.com"
+        ]
+      },
+      "content_rubric": [
+        {
+          "point": "a clear description of the product",
+          "keywords": [
+            "description",
+            "about this",
+            "details",
+            "overview"
+          ]
+        },
+        {
+          "point": "specifications, sizes or materials",
+          "keywords": [
+            "size",
+            "dimension",
+            "material",
+            "specification",
+            "weight"
+          ]
+        },
+        {
+          "point": "price and availability",
+          "keywords": [
+            "price",
+            "in stock",
+            "available",
+            "sale"
+          ]
+        },
+        {
+          "point": "shipping and delivery",
+          "keywords": [
+            "shipping",
+            "delivery",
+            "dispatch"
+          ]
+        },
+        {
+          "point": "returns, warranty or guarantee",
+          "keywords": [
+            "return",
+            "warranty",
+            "guarantee",
+            "refund"
+          ]
+        },
+        {
+          "point": "customer reviews or ratings",
+          "keywords": [
+            "review",
+            "rating",
+            "stars",
+            "customers say"
+          ]
+        },
+        {
+          "point": "how to choose or use it",
+          "keywords": [
+            "how to",
+            "guide",
+            "fit",
+            "care"
+          ]
+        },
+        {
+          "point": "a clear way to buy or ask a question",
+          "keywords": [
+            "add to cart",
+            "buy",
+            "contact",
+            "chat"
+          ]
+        }
+      ],
+      "page_schema": {
+        "service": [
+          "product",
+          "offer",
+          "aggregateoffer",
+          "productgroup"
+        ]
+      }
+    },
+    "finance": {
+      "label": "Financial services",
+      "detect": {
+        "keywords": [
+          "bank",
+          "banking",
+          "loan",
+          "loans",
+          "mortgage",
+          "credit card",
+          "insurance",
+          "investment",
+          "interest rate",
+          "apr",
+          "wealth management",
+          "fdic",
+          "savings account"
+        ],
+        "url_hints": [
+          "/loans",
+          "/mortgage",
+          "/credit-cards",
+          "/insurance",
+          "/accounts",
+          "/invest"
+        ],
+        "schema_types": [
+          "financialservice",
+          "bankorcreditunion",
+          "financialproduct",
+          "loanorcredit",
+          "insuranceagency"
+        ]
+      },
+      "platforms": {
+        "review": [
+          "trustpilot.com",
+          "bbb.org",
+          "consumeraffairs.com",
+          "nerdwallet.com"
+        ],
+        "profile": [
+          "linkedin.com",
+          "crunchbase.com",
+          "bloomberg.com",
+          "zoominfo.com"
+        ],
+        "community": [
+          "reddit.com",
+          "quora.com"
+        ]
+      },
+      "content_rubric": [
+        {
+          "point": "what the product or service is, in plain language",
+          "keywords": [
+            "what is",
+            "overview",
+            "how it works"
+          ]
+        },
+        {
+          "point": "rates, fees and costs",
+          "keywords": [
+            "rate",
+            "fee",
+            "apr",
+            "cost",
+            "charges"
+          ]
+        },
+        {
+          "point": "eligibility and requirements",
+          "keywords": [
+            "eligib",
+            "requirement",
+            "qualify",
+            "documents"
+          ]
+        },
+        {
+          "point": "risks, terms and disclosures",
+          "keywords": [
+            "risk",
+            "terms",
+            "disclosure",
+            "conditions"
+          ]
+        },
+        {
+          "point": "regulatory or protection information",
+          "keywords": [
+            "regulated",
+            "fdic",
+            "insured",
+            "licensed",
+            "fca",
+            "sec"
+          ]
+        },
+        {
+          "point": "how it compares with alternatives",
+          "keywords": [
+            "compare",
+            "vs",
+            "alternative",
+            "options"
+          ]
+        },
+        {
+          "point": "how to apply or open an account",
+          "keywords": [
+            "apply",
+            "open an account",
+            "get started"
+          ]
+        },
+        {
+          "point": "a way to get help or advice",
+          "keywords": [
+            "contact",
+            "advisor",
+            "help",
+            "support"
+          ]
+        }
+      ],
+      "page_schema": {
+        "service": [
+          "financialproduct",
+          "financialservice",
+          "loanorcredit",
+          "bankaccount",
+          "service",
+          "product"
+        ]
+      }
+    }
+  }
+}

@@ -3,7 +3,10 @@
     Website URL -> OffPageOrchestrator -> specialist agent -> tools -> evidence
                 -> Evidence & Validation Agent -> evaluator (offpage.py) -> scoring engine
 
-Seven agents cover the nine parameters:
+Before any of them runs, the Company Identity Agent (identity.py) establishes who owns the site --
+official name, abbreviation, brand term, and the Wikidata entity whose official website is this
+domain -- so every agent searches for the right organisation. Seven agents then cover the nine
+parameters:
 
     Knowledge Entity Agent            OFF-01, OFF-02   Wikipedia/Wikidata and entity research
     Company Profile Agent             OFF-03           profile completeness and consistency
@@ -88,6 +91,26 @@ def _wikidata_page(entity: Optional[dict]) -> list[str]:
     return [f"https://{urlparse(WIKIDATA_API).netloc}/wiki/{entity['id']}"] if entity and entity.get("id") else []
 
 
+def _entity_summary(hit: Optional[dict]) -> Optional[dict]:
+    """The fields of a Wikidata search hit a reader needs; the rest is API bookkeeping."""
+    return {k: hit[k] for k in ("id", "label", "description") if hit.get(k)} if hit else None
+
+
+def _identity(ctx) -> dict:
+    """What the Company Identity Agent established about the site's owner (parameters/identity.py)."""
+    return getattr(ctx, "identity", None) or {}
+
+
+def _names_brand(label: str, ctx) -> bool:
+    """Whether an entity's name carries the organisation's brand: the brand term, its abbreviation,
+    or its full name. "American Academy of Orthopaedic Surgeons" carries AAOS's brand."""
+    ident = _identity(ctx)
+    core = tools._core_name(label or "")
+    plain = f" {core} "
+    terms = [primary_brand(ctx), ident.get("acronym"), ident.get("name"), ident.get("short_name"), ctx.company_name]
+    return any(t and (f" {tools._core_name(t)} " in plain or tools._core_name(t) == core) for t in terms)
+
+
 def _wikipedia_page(title: str) -> str:
     return f"https://{urlparse(WIKIPEDIA_API).netloc}/wiki/{quote(title.replace(' ', '_'))}"
 
@@ -119,30 +142,58 @@ class KnowledgeEntityAgent(Agent):
         is asked. An entry counts when its name is the company's (see tools.names_company)."""
         wd_data, wd_meta = await tools.wikidata_search(ctx.company_name, ctx)
         wp_data, wp_meta = await tools.wikipedia_search(ctx.company_name, ctx)
-        f = Findings("OFF-01", self.name, "Wikidata and Wikipedia", checked=wp_meta["url"], verify=False)
-        f.evidence = {"provider": "Wikidata + Wikipedia", "matched_on": tools.short_name(ctx.company_name)}
+        wd_page = tools.wikidata_search_page(wd_meta.get("name") or ctx.company_name)
+        wp_page = tools.wikipedia_search_page(wp_meta.get("name") or ctx.company_name)
+        f = Findings("OFF-01", self.name, "Wikidata and Wikipedia", checked=wp_page, verify=False)
+        f.evidence = {"provider": "Wikidata + Wikipedia",
+                      "matched_on": tools.short_name(tools.drop_acronym(ctx.company_name))}
 
-        if wd_data is not None:
+        ident = _identity(ctx)
+        if ident.get("wikidata_id"):
+            # Already established by the official website (identity agent): no name match needed.
+            entry = {"id": ident["wikidata_id"], "label": ident.get("name"), "description": ident.get("wikidata_description")}
+            f.evidence["wikidata"] = {"present": True, "entry": entry, "page_url": _wikidata_page(entry)[0],
+                                      "matched_by": "official website",
+                                      "finding": f"Wikidata item found: {entry['label']} (its official website is this site)"}
+            f.values["on_wikidata"] = True
+            f.source_urls += _wikidata_page(entry)
+        elif wd_data is not None:
             hits = wd_data.get("search") or []
             entry = tools.extract_entity(hits, ctx.company_name)
-            f.evidence["wikidata"] = {"present": entry is not None, "entry": entry,
-                                      "results": [h.get("label") for h in hits[:5]]}
+            f.evidence["wikidata"] = {"present": entry is not None, "entry": _entity_summary(entry),
+                                      "results": [h.get("label") for h in hits[:5]],
+                                      ("page_url" if entry else "search_url"): (_wikidata_page(entry) or [wd_page])[0],
+                                      "finding": (f"Wikidata item found: {entry.get('label')}" if entry
+                                                  else "No Wikidata item for the company")}
             f.values["on_wikidata"] = entry is not None
             f.source_urls += _wikidata_page(entry)
         else:
-            f.evidence["wikidata"] = {"error": wd_meta.get("error") or f"HTTP {wd_meta.get('status')}"}
+            f.evidence["wikidata"] = {"error": wd_meta.get("error") or f"HTTP {wd_meta.get('status')}", "search_url": wd_page}
             f.values["on_wikidata"] = None
 
-        if wp_data is not None:
+        if ident.get("wikipedia_title"):
+            # The confirmed entity's own Wikipedia link: the article about this organisation.
+            article = ident["wikipedia_title"]
+            f.evidence["wikipedia"] = {"present": True, "article": article, "page_url": _wikipedia_page(article),
+                                       "matched_by": "Wikidata link of the confirmed entity",
+                                       "finding": f"Wikipedia article found: {article}"}
+            f.values["on_wikipedia"] = True
+            f.source_urls.append(_wikipedia_page(article))
+            f.checked = _wikipedia_page(article)
+        elif wp_data is not None:
             hits = ((wp_data.get("query") or {}).get("search") or [])
             article = (tools.extract_entity(hits, ctx.company_name, field="title") or {}).get("title")
             f.evidence["wikipedia"] = {"present": article is not None, "article": article,
-                                       "results": [h.get("title") for h in hits[:5]]}
+                                       "results": [h.get("title") for h in hits[:5]],
+                                       ("page_url" if article else "search_url"): _wikipedia_page(article) if article else wp_page,
+                                       "finding": (f"Wikipedia article found: {article}" if article
+                                                   else "No Wikipedia article about the company")}
             f.values["on_wikipedia"] = article is not None
             if article:
                 f.source_urls.append(_wikipedia_page(article))
+                f.checked = _wikipedia_page(article)
         else:
-            f.evidence["wikipedia"] = {"error": wp_meta.get("error") or f"HTTP {wp_meta.get('status')}"}
+            f.evidence["wikipedia"] = {"error": wp_meta.get("error") or f"HTTP {wp_meta.get('status')}", "search_url": wp_page}
             f.values["on_wikipedia"] = None
 
         # Both are needed, so one confirmed absence settles it even if the other source is down.
@@ -157,27 +208,33 @@ class KnowledgeEntityAgent(Agent):
 
     async def research_off_02(self, ctx) -> Findings:
         data, meta = await tools.wikidata_search(ctx.company_name, ctx)
-        f = Findings("OFF-02", self.name, "Wikidata (Knowledge Panel proxy)", checked=meta["url"])
+        search_page = tools.wikidata_search_page(meta.get("name") or ctx.company_name)
+        f = Findings("OFF-02", self.name, "Wikidata (Knowledge Panel proxy)", checked=search_page)
         if data is None:
             f.status, f.error = UNABLE_TO_VERIFY, meta.get("error") or "Wikidata unavailable"
             f.evidence = {"provider": "Wikidata (Knowledge Panel proxy)", **meta}
             return f
         hits = data.get("search") or []
-        brand = primary_brand(ctx)
-        match = tools.extract_entity(hits, ctx.company_name)
+        ident = _identity(ctx)
+        match = ({"id": ident["wikidata_id"], "label": ident.get("name"), "description": ident.get("wikidata_description")}
+                 if ident.get("wikidata_id") else tools.extract_entity(hits, ctx.company_name))
         f.values["entity_found"] = match is not None
         if not match:
             # Wikidata answered and has no entity for the company: that is a finding, not a gap.
             f.status = VERIFIED
             f.values.update(has_description=False, brand_in_label=False)
             f.evidence = {"provider": "Wikidata (Knowledge Panel proxy)", "entity": None, "hits": hits[:3],
+                          "search_url": search_page, "finding": "No Wikidata item for the company",
                           "note": "No Wikidata entity matches the company, so there is no record for a Knowledge Panel to be built from."}
             return f
-        brand_in_label = brand in (match.get("label") or "").lower()
+        brand_in_label = _names_brand(match.get("label") or "", ctx)
         f.values.update(has_description=bool(match.get("description")), brand_in_label=brand_in_label)
-        f.evidence = {"provider": "Wikidata (Knowledge Panel proxy)", "entity": match, "brand_in_label": brand_in_label,
-                      "note": "Approximated via Wikidata; the live Google Knowledge Panel is not read directly."}
         f.source_urls = _wikidata_page(match)
+        f.checked = f.source_urls[0] if f.source_urls else f.checked
+        f.evidence = {"provider": "Wikidata (Knowledge Panel proxy)", "entity": _entity_summary(match),
+                      "brand_in_label": brand_in_label, "page_url": f.checked,
+                      "finding": f"Wikidata item found: {match.get('label')}",
+                      "note": "Approximated via Wikidata; the live Google Knowledge Panel is not read directly."}
         return f
 
 
@@ -359,10 +416,15 @@ class IndustryVisibilityAgent(Agent):
     tools = ("web_search", "extract_dates_and_rankings", "compare_entities")
 
     async def research_off_08(self, ctx) -> Findings:
+        # What the organisation is: Wikidata's short description of the confirmed entity ("orthopedic
+        # organization") when there is one, else the category the site's own pages give.
+        described = (_identity(ctx).get("wikidata_description") or "").strip().lower()
         categories = derive_site_categories(ctx, limit=1)
-        topic = categories[0] if categories else "companies"
+        topic = described if described and len(described.split()) <= 4 else (categories[0] if categories else "companies")
         brand = primary_brand(ctx)
-        generic = await tools.web_search(f"best {topic} companies")
+        noun = re.search(r"(?:company|companies|organi[sz]ation|association|society|institute|university|college|"
+                         r"hospital|firm|manufacturer|brand|bank|agency|school)s?$", topic)
+        generic = await tools.web_search(f"best {topic}" + ("" if noun else " companies"))
         if not generic.ok:
             return _search_failed("OFF-08", self.name, "Best/top list pages", generic)
         in_generic = [i["url"] for i in generic.items if brand and tools.compare_entities(f"{i['title']} {i['snippet']} {i['url']}", [brand])]

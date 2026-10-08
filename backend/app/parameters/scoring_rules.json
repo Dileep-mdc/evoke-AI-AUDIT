@@ -131,6 +131,11 @@
       "needs_improvement_worst": 50,
       "poor": 25
     },
+    "small_sample_items": {
+      "_what": "TECH-19. Below this many items, a result is still reported but flagged as resting on very little evidence, with lower confidence.",
+      "_why": "One valid JSON-LD block scored 100 and read as 'the site's markup is clean' when the site had almost no markup at all.",
+      "value": 3
+    },
     "platforms_for_full_marks": {
       "_what": "OFF-03, OFF-05. Sites the company must be found on for full presence points (70). Presence = min(found, N) / N x 70, where N is this value or the number of sites checked, whichever is smaller.",
       "_why": "The site lists are configurable (offpage_platforms.json) and an industry or region adds sites to them. Dividing by the whole list would make a scan that checks more sites score lower for the same presence; dividing by a fixed N keeps the default four-site result unchanged and lets any of the checked sites count.",
@@ -145,6 +150,41 @@
       "_what": "OFF-06. A review-platform result dated within this many days (but not the recent window) earns half the recency points (20).",
       "_why": "Two-year-old reviews still show the company is reviewed, but no longer that it is currently active.",
       "value": 730
+    },
+    "section_weights": {
+      "_what": "Overall score. Share of the 100 points each section carries; must sum to 1.",
+      "technical": 0.35,
+      "on_page": 0.4,
+      "off_page": 0.25
+    },
+    "redirect_chain_penalty": {
+      "_what": "TECH-06. Points taken off per long redirect chain, and the most the chains can take off in total.",
+      "per_chain": 5,
+      "max": 20
+    },
+    "proxy_latency_ms": {
+      "_what": "TECH-07 fallback when Core Web Vitals cannot be measured. Average response time in ms: at or under each limit scores its points; slower than every limit scores `floor`.",
+      "bands": [[800, 100], [1800, 70], [3000, 40]],
+      "floor": 20
+    },
+    "proxy_page_bytes": {
+      "_what": "TECH-07 fallback. Average page weight in bytes: at or under each limit scores its points; heavier than every limit scores `floor`.",
+      "bands": [[300000, 100], [800000, 70], [1500000, 40]],
+      "floor": 20
+    },
+    "proxy_mix": {
+      "_what": "TECH-07 fallback. How the latency and page-weight scores are blended.",
+      "latency": 0.6,
+      "size": 0.4
+    },
+    "impact_shares": {
+      "_what": "Priority list. A finding is High Impact when the points it costs reach `high` x the mean parameter coefficient, Medium at `medium` x; fractions rather than fixed points so they follow the registry's weights.",
+      "high": 0.8,
+      "medium": 0.4
+    },
+    "working_tolerance": {
+      "_what": "Score pop-up. The step-by-step working is shown only when its recomputed score is within this many points of the reported one.",
+      "value": 0.15
     }
   }
 }

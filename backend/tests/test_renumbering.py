@@ -47,7 +47,7 @@ def test_only_fixable_unscored_checks_are_retried():
     assert _worth_retrying({"status": "UNKNOWN", "evidence": {}, "error": "model call timed out"})
     assert _worth_retrying({"status": "FAIL", "evidence": {}, "error": "rate limited"})
     assert not _worth_retrying({"status": "PASS", "evidence": {}})
-    assert not _worth_retrying({"status": "UNKNOWN", "evidence": {"not_applicable": True}})
+    assert not _worth_retrying({"status": "UNKNOWN", "evidence": {"retry_pointless": True}})
     assert not _worth_retrying({"status": "UNKNOWN", "evidence": {}, "error": "Web search is not configured: set ..."})
 
 
@@ -61,3 +61,14 @@ def test_a_scan_from_an_older_parameter_set_is_left_as_it_was():
     _renumber_parameters(conn)
     got = sorted(conn.execute("SELECT scan_id, parameter_id FROM parameter_results").fetchall())
     assert got == [("new", "OFF-08"), ("old", "OFF-08"), ("old", "OFF-09"), ("old", "OFF-15")]
+
+
+def test_saved_scans_read_tech_01_and_02_under_their_new_names():
+    from app.storage.repository import _loaded, _renamed
+
+    row = {"name": "AI crawler permissions",
+           "evidence": '{"summary": "AI crawler permissions passed."}'}
+    item = _loaded(row)
+    assert item["name"] == "AI Crawlers Permitted in Robots.txt"
+    assert item["evidence"]["summary"] == "AI Crawlers Permitted in Robots.txt passed."
+    assert _renamed('{"title": "No CDN/firewall blocking AI crawlers"}') == '{"title": "AI Crawlers Not Blocked by any CDN"}'

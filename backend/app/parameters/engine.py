@@ -31,7 +31,7 @@ from ..config import JUDGEMENT_TIMEOUT, PARAMETER_CONCURRENCY, PARAMETER_TIMEOUT
 from ..errors import humanize_error
 from ..llm.scoring import curate, score_parameter
 from .citations import build_citations
-from .common import excluded_page_counts, status_from_score
+from .common import excluded_page_counts, result, scorable_pages, status_from_score
 from .offpage import HANDLERS as OFF
 from .onpage import HANDLERS as ON
 from .spec import spec_for
@@ -44,10 +44,29 @@ def load_registry() -> list[dict]:
     return json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
 
 
+# Checks that read no crawled page: robots.txt, the CDN probe, llms.txt and the sitemap. Every
+# other on-site check needs at least one page the crawl could read; off-page checks search the web.
+_PAGE_INDEPENDENT = {"TECH-01", "TECH-02", "TECH-03", "TECH-05"}
+
+
+def _skip(spec: dict, ctx) -> dict | None:
+    """The row for a check that should not run on this site, or None to run it."""
+    pid = spec["parameter_id"]
+    if spec["section"] != "off_page" and pid not in _PAGE_INDEPENDENT and not scorable_pages(ctx):
+        # A crawl that read nothing measured nothing: unscored, never a 0 or a floor score.
+        return result(spec, score=None, unknown=True, evidence={"no_readable_pages": True}, checked=ctx.origin,
+                      recommendation="Make sure the site's pages can be fetched, then run the audit again.",
+                      error="No page of the site could be read, so there was no page content to evaluate.")
+    return None
+
+
 async def evaluate(spec: dict, ctx) -> dict:
     """The rules-based pass: run the handler and return its row, whatever happens to it."""
     handler = HANDLERS.get(spec["parameter_id"])
     now = datetime.now(timezone.utc).isoformat()
+    skipped = _skip(spec, ctx)
+    if skipped is not None:
+        return {**skipped, "evaluated_at": now}
     if handler is None:
         return {
             **{k: spec.get(k) for k in ("parameter_id", "section", "name", "weight", "max_score")},

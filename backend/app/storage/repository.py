@@ -11,12 +11,22 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _renamed(text: str) -> str:
+    """Saved text with every since-renamed parameter name read as its new name. The names are
+    distinctive phrases, so they are replaced wherever a saved scan quoted them -- the row, its
+    evidence summaries, and the stored report and issue list built from them."""
+    for old, new in RENAMED.items():
+        if old in text:
+            text = text.replace(old, new)
+    return text
+
+
 def _loaded(row) -> dict:
     item = dict(row)
     # A row keeps the name it was scanned under; a parameter renamed since reads as its new name.
     item["name"] = RENAMED.get(item["name"], item["name"])
     try:
-        item["evidence"] = json.loads(item["evidence"] or "{}")
+        item["evidence"] = json.loads(_renamed(item["evidence"] or "{}"))
     except Exception:
         item["evidence"] = {"raw": item["evidence"]}
     return item
@@ -43,15 +53,33 @@ class ScanRepository:
             )
         return self.get(scan_id)
 
+    @staticmethod
+    def _summary_columns(conn) -> str:
+        """Every column of a scan except the saved report itself. The report is 6-14 MB of JSON; reading
+        it for every row of the Reports list, and on every progress poll of a finished audit, took the
+        list 15-22 seconds and froze the server while it did."""
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(scans)") if r[1] != "report_json"]
+        return ", ".join(cols)
+
     def get(self, scan_id: str) -> dict | None:
         with get_db() as conn:
-            row = conn.execute("SELECT * FROM scans WHERE id=?", (scan_id,)).fetchone()
+            row = conn.execute(f"SELECT {self._summary_columns(conn)} FROM scans WHERE id=?", (scan_id,)).fetchone()
             return dict(row) if row else None
 
     def list_scans(self, limit: int = 20) -> list[dict]:
         with get_db() as conn:
-            rows = conn.execute("SELECT * FROM scans ORDER BY started_at DESC LIMIT ?", (limit,)).fetchall()
+            rows = conn.execute(f"SELECT {self._summary_columns(conn)} FROM scans ORDER BY started_at DESC LIMIT ?",
+                                (limit,)).fetchall()
             return [dict(r) for r in rows]
+
+    def ai_usage_history(self, limit: int = 10) -> list[dict]:
+        """The AI-usage record of recent completed scans, read inside SQLite so no report is parsed."""
+        with get_db() as conn:
+            rows = conn.execute(
+                """SELECT json_extract(report_json, '$.ai_usage') FROM scans
+                   WHERE status='completed' AND json_extract(report_json, '$.ai_usage') IS NOT NULL
+                   ORDER BY started_at DESC LIMIT ?""", (limit,)).fetchall()
+            return [json.loads(r[0]) for r in rows if r[0]]
 
     def update(self, scan_id: str, **fields) -> None:
         if not fields:
@@ -144,9 +172,8 @@ class ScanRepository:
             )
 
     def report(self, scan_id: str) -> dict | None:
-        scan = self.get(scan_id)
-        if not scan:
-            return None
-        if scan.get("report_json"):
-            return json.loads(scan["report_json"])
+        with get_db() as conn:
+            row = conn.execute("SELECT report_json FROM scans WHERE id=?", (scan_id,)).fetchone()
+        if row and row[0]:
+            return json.loads(_renamed(row[0]))
         return None

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
+import weakref
 from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urljoin, urlparse
@@ -18,6 +19,7 @@ from ..config import (
     MAX_REDIRECTS,
     REQUEST_TIMEOUT,
     RETRIES,
+    RETRY_BACKOFF_SECONDS,
 )
 from ..errors import humanize_error
 from . import snapshot
@@ -25,7 +27,6 @@ from . import snapshot
 # Transient responses worth a short retry instead of an immediate FAIL: the origin/CDN
 # (502/503/504) or a shared API quota (429) is momentarily unavailable, not permanently broken.
 TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
-RETRY_BACKOFF_SECONDS = 0.4
 
 
 @dataclass
@@ -219,13 +220,30 @@ async def fetch(
     return res
 
 
+# At most CONCURRENCY requests in flight in this process, whichever check sends them. TECH-06
+# once started a link check for every uncrawled link of a 2,470-page site at the same moment:
+# thousands of requests queued inside httpx's connection pool, which re-scans its whole queue on
+# every state change, so the event loop spent all its time on pool bookkeeping. No check finished
+# for ten minutes and the dashboard could not get an answer. Waiting here keeps the pool's queue
+# short. One semaphore per event loop: tests and the render thread run their own loops.
+_inflight: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = weakref.WeakKeyDictionary()
+
+
+def _slot() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    sem = _inflight.get(loop)
+    if sem is None:
+        sem = _inflight[loop] = asyncio.Semaphore(max(1, CONCURRENCY))
+    return sem
+
+
 async def _fetch_once(url: str, *, user_agent: str, follow: bool, method: str) -> FetchResult:
     last_error = None
     for attempt in range(RETRIES + 1):
         started = time.perf_counter()
         try:
             c = client(user_agent=user_agent, follow=follow)
-            async with c.stream(method, url) as resp:
+            async with _slot(), c.stream(method, url) as resp:
                 if resp.status_code in TRANSIENT_STATUS_CODES and attempt < RETRIES:
                     last_error = f"HTTP {resp.status_code}"
                     await asyncio.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))

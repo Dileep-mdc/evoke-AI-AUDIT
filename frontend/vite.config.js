@@ -15,9 +15,13 @@ const devConfig = JSON.parse(
 const backendHost = process.env.BACKEND_HOST || devConfig.backendHost;
 const backendPort = Number(process.env.BACKEND_PORT || devConfig.backendPort);
 const frontendPort = Number(process.env.FRONTEND_PORT || devConfig.frontendPort);
+const faviconService = process.env.FAVICON_SERVICE ?? devConfig.faviconService ?? "";
 
 export default defineConfig({
   plugins: [react()],
+  define: {
+    __FAVICON_SERVICE__: JSON.stringify(faviconService),
+  },
   server: {
     port: frontendPort,
     proxy: {

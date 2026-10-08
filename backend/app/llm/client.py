@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -13,23 +14,28 @@ from ..config import (
     ENABLE_LLM_SCORING,
     LLM_CONCURRENCY,
     LLM_MODEL,
+    LLM_RATE_LIMIT_BASE_SECONDS,
+    LLM_RATE_LIMIT_MAX_SLEEP,
+    LLM_RATE_LIMIT_RETRIES,
     LLM_RETRIES,
+    LLM_RETRY_BACKOFF_SECONDS,
+    LLM_RPM_LIMIT,
     LLM_SCORING_CONCURRENCY,
     LLM_TIMEOUT,
     OPENAI_API_KEY,
 )
 from . import usage
 
-RETRY_BACKOFF_SECONDS = 0.6
+RETRY_BACKOFF_SECONDS = LLM_RETRY_BACKOFF_SECONDS
 # Rate limits get their own, longer schedule. Every parameter of a scan is model-scored now,
 # so a run fires sixty-odd requests in a burst and 429s are an expected part of a healthy
 # scan rather than a sign something is wrong. On the old linear 0.6s/1.2s retries a
 # measured run lost 11 of 59 parameters to rate limiting -- each one silently demoted to
 # its rules-based score -- because the retries landed inside the same rate-limit window
 # that rejected the first attempt.
-RATE_LIMIT_RETRIES = 5
-RATE_LIMIT_BASE_SECONDS = 2.0
-RATE_LIMIT_MAX_SLEEP = 30.0
+RATE_LIMIT_RETRIES = LLM_RATE_LIMIT_RETRIES
+RATE_LIMIT_BASE_SECONDS = LLM_RATE_LIMIT_BASE_SECONDS
+RATE_LIMIT_MAX_SLEEP = LLM_RATE_LIMIT_MAX_SLEEP
 
 
 def _rate_limit_delay(attempt: int, exc: Exception) -> float:
@@ -58,6 +64,58 @@ _scoring_semaphore = asyncio.Semaphore(LLM_SCORING_CONCURRENCY)
 
 def _lane_semaphore(lane: str) -> asyncio.Semaphore:
     return _scoring_semaphore if lane == "score" else _semaphore
+
+
+# Requests-per-minute pacing. OpenAI caps each project's requests per minute, and a project can
+# be capped far below its organisation (10 RPM was measured against an org allowing 30,000).
+# Firing LLM_CONCURRENCY calls at once into a 10-RPM cap got most of them refused; each then
+# backed off and collided again, until whole checks hit PARAMETER_TIMEOUT -- the bulk of a
+# 70-80 minute audit. Once the limit is known, calls are spaced evenly to it instead, so every
+# call waits its turn once rather than being refused and retried.
+_RPM_IN_ERROR = re.compile(r"requests per min \(RPM\): Limit (\d+)", re.I)
+_rpm_limit: Optional[int] = LLM_RPM_LIMIT or None
+# Generic cell rate algorithm: the theoretical time the next request is due. OpenAI's limiter is a
+# bucket that holds `limit` requests and refills one every 60/limit seconds, so this admits the same
+# burst and then the same steady rate -- no faster (which would be refused), and no slower.
+_tat = 0.0
+
+
+def rpm_limit() -> Optional[int]:
+    return _rpm_limit
+
+
+def _learn_rpm(exc: Exception) -> bool:
+    """Adopt the RPM limit a refusal names. True when it set (or lowered) the pace."""
+    global _rpm_limit, _tat
+    m = _RPM_IN_ERROR.search(str(exc))
+    if not m:
+        return False
+    limit = max(1, int(m.group(1)))
+    if _rpm_limit is None or limit < _rpm_limit:
+        _rpm_limit = limit
+        # Refused, so the server's bucket is empty: start from empty rather than from a full burst.
+        _tat = time.monotonic() + (limit - 1) * 60.0 / limit
+        return True
+    return False
+
+
+async def pace(requests: int = 1) -> None:
+    """Wait until `requests` more requests fit under the RPM limit, and claim them.
+
+    Lock-free: the schedule is read and advanced with no await in between, which is atomic on
+    the event loop, so concurrent callers are admitted in order instead of all at once.
+    """
+    global _tat
+    if not _rpm_limit:
+        return
+    interval = 60.0 / _rpm_limit
+    burst = (_rpm_limit - 1) * interval
+    now = time.monotonic()
+    due = max(_tat, now)
+    start = max(now, due - burst)
+    _tat = due + requests * interval
+    if start > now:
+        await asyncio.sleep(start - now)
 
 
 _client: Optional[AsyncOpenAI] = None
@@ -125,6 +183,7 @@ async def judge(prompt: str, *, system: str = "", json_mode: bool = True, lane: 
         while True:
             try:
                 client = _get_client()
+                await pace()
                 kwargs = {"model": LLM_MODEL, "messages": messages, "temperature": 0}
                 if json_mode:
                     kwargs["response_format"] = {"type": "json_object"}
@@ -149,7 +208,10 @@ async def judge(prompt: str, *, system: str = "", json_mode: bool = True, lane: 
             except RateLimitError as exc:
                 last_error = f"rate limited: {exc}"
                 if rate_limited < RATE_LIMIT_RETRIES:
-                    await asyncio.sleep(_rate_limit_delay(rate_limited, exc))
+                    # A refusal that names the RPM limit sets the pace; pace() then supplies the
+                    # wait, so a backoff on top would only add idle time.
+                    if not _learn_rpm(exc):
+                        await asyncio.sleep(_rate_limit_delay(rate_limited, exc))
                     rate_limited += 1
                     continue
                 return LLMResult(ok=False, error=last_error, elapsed_ms=int((time.perf_counter() - started) * 1000))

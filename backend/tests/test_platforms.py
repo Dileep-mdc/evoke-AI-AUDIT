@@ -1,8 +1,8 @@
-"""The off-page site lists are data (offpage_platforms.json), chosen per scan.
+"""The off-page site lists come from the scan's industry profile, plus its region's sites.
 
-Pins that the default set is unchanged, that an industry or region only ever adds sites, that a
-longer list does not lower the score for the same presence, and that the agents search the
-lists the scan chose rather than a constant.
+Pins that the general profile keeps the original lists, that an industry sets its own lists (a
+manufacturer is not looked for on G2), that a region only adds, that a longer list does not lower
+the score for the same presence, and that the agents search the lists the scan chose.
 """
 import asyncio
 from types import SimpleNamespace
@@ -14,28 +14,34 @@ from app.parameters import offpage_scoring, offpage_tools, platforms, working_of
 from app.parameters.offpage_agents import ORCHESTRATOR
 
 
-def test_the_default_set_is_the_original_four_review_and_four_profile_sites():
+def test_the_general_profile_keeps_the_original_four_review_and_four_profile_sites():
     d = platforms.resolve()
     assert d["review"] == ("g2.com", "clutch.co", "gartner.com", "trustradius.com")
     assert d["profile"] == ("linkedin.com", "crunchbase.com", "bloomberg.com", "zoominfo.com")
     assert d["community"] == ("reddit.com", "quora.com")
+    assert d["industry"] == "general"
 
 
-def test_an_industry_and_region_add_sites_without_removing_any():
-    d = platforms.resolve()
-    chosen = platforms.resolve("software", "india")
+def test_an_industry_sets_its_own_lists():
+    manufacturing = platforms.resolve("manufacturing")
+    assert manufacturing["review"] == ()                      # software review sites do not list manufacturers
+    assert "thomasnet.com" in manufacturing["profile"] and "g2.com" not in manufacturing["profile"]
+    software = platforms.resolve("software")
+    assert "capterra.com" in software["review"] and "g2.com" in software["review"]
+
+
+def test_a_region_adds_its_sites_after_the_industry_s():
+    plain = platforms.resolve("it_services")
+    regional = platforms.resolve("it_services", "india")
     for kind in platforms.KINDS:
-        assert chosen[kind][:len(d[kind])] == d[kind]
-    assert "capterra.com" in chosen["review"] and "ambitionbox.com" in chosen["review"]
-    assert "tracxn.com" in chosen["profile"]
-    assert chosen["label"] == "Global + Software & SaaS + India"
+        assert regional[kind][:len(plain[kind])] == plain[kind]
+    assert "ambitionbox.com" in regional["review"] and "tracxn.com" in regional["profile"]
+    assert regional["label"] == "IT services & consulting + India"
 
 
-def test_a_site_named_by_two_sets_is_checked_once():
-    chosen = platforms.resolve(None, "europe")
+def test_a_site_named_twice_is_checked_once():
     both = platforms.resolve("manufacturing", "europe")
     assert both["profile"].count("kompass.com") == 1
-    assert chosen["review"].count("trustpilot.com") == 1
 
 
 def test_an_unknown_choice_is_refused():
@@ -45,7 +51,7 @@ def test_an_unknown_choice_is_refused():
         platforms.resolve(None, "atlantis")
 
 
-def test_every_choice_listed_for_the_dropdowns_resolves():
+def test_every_listed_choice_resolves():
     c = platforms.choices()
     for o in c["industries"]:
         platforms.resolve(o["key"])
@@ -91,4 +97,4 @@ def test_the_agents_search_the_sites_the_scan_chose(monkeypatch):
     f = asyncio.run(ORCHESTRATOR.agents[3].research("OFF-05", ctx))
     assert "site:capterra.com" in queries[0]
     assert "capterra.com" in f.values["platforms_found"]
-    assert f.evidence["platform_set"] == "Global + Software & SaaS"
+    assert f.evidence["platform_set"] == "Software & SaaS"

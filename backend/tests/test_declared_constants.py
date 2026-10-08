@@ -23,7 +23,8 @@ from app import config
 from app.parameters import rules
 
 PARAMS = Path(__file__).resolve().parents[1] / "app" / "parameters"
-HANDLER_FILES = ("onpage.py", "technical.py", "offpage.py", "offpage_agents.py", "offpage_tools.py", "offpage_scoring.py")
+HANDLER_FILES = ("onpage.py", "technical.py", "offpage.py", "offpage_agents.py", "offpage_tools.py", "offpage_scoring.py",
+                 "working_technical.py")
 
 
 def _code_lines(name: str):
@@ -118,3 +119,15 @@ def test_the_rules_file_can_be_replaced_wholesale(tmp_path, monkeypatch):
     finally:
         monkeypatch.delenv("SCORING_RULES_PATH", raising=False)
         importlib.reload(rules)
+
+
+def test_section_weights_come_from_the_rules_file_and_sum_to_one():
+    assert config.WEIGHTS == {k: v for k, v in rules.all_rules()["thresholds"]["section_weights"].items()
+                              if not k.startswith("_")}
+    assert round(sum(config.WEIGHTS.values()), 9) == 1
+
+
+def test_no_organisation_is_baked_into_the_defaults():
+    """Who runs the audit is deployment configuration (AUDIT_CONTACT_URL), not a code default."""
+    source = (Path(config.__file__)).read_text(encoding="utf-8").lower()
+    assert "evoketechnologies.com" not in source

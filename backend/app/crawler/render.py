@@ -32,7 +32,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from ..config import BROWSER_UA, RENDER_CONCURRENCY, RENDER_TIMEOUT
+from ..config import BROWSER_UA, RENDER_CONCURRENCY, RENDER_NETWORK_IDLE_MS, RENDER_TIMEOUT
 from . import snapshot
 
 log = logging.getLogger("crawler.render")
@@ -50,7 +50,7 @@ _BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
 # much shorter budget than RENDER_TIMEOUT because it is optional: analytics beacons, chat
 # widgets and polling keep a real marketing site's network busy indefinitely, so this wait
 # is expected to time out routinely and its expiry is not an error.
-_NETWORK_IDLE_MS = 2500
+_NETWORK_IDLE_MS = RENDER_NETWORK_IDLE_MS
 
 
 @dataclass

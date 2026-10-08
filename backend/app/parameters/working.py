@@ -9,13 +9,14 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
+from . import rules
 from .working_offpage import WORKING as _OFF
 from .working_onpage import WORKING as _ON
 from .working_technical import WORKING as _TECH
 
 WORKING: dict[str, Callable[[dict], Optional[tuple[str, float]]]] = {**_TECH, **_ON, **_OFF}
 
-TOLERANCE = 0.15
+TOLERANCE = rules.threshold("working_tolerance")
 
 
 def working_for(parameter_id: str, evidence: dict | None, score: float | None) -> Optional[str]:

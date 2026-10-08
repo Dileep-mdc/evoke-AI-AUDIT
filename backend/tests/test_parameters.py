@@ -165,11 +165,10 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def test_tech21_absent_hreflang_is_unknown_not_a_free_hundred():
-    """Not applicable must be excluded, not passed. Scoring 100 lifted the Technical pillar
-    for every single-market site -- the opposite of 'this check does not apply'."""
+def test_tech21_absent_hreflang_fails_not_a_free_hundred():
+    """No hreflang: a failure at 0 with the fix, never a free 100."""
     out = _run(tech_21(SPECS["TECH-21"], _ctx([_page()])))
-    assert out["status"] == "UNKNOWN" and out["score"] is None
+    assert out["status"] == "FAIL" and out["score"] == 0 and "hreflang" in out["recommendation"]
 
 
 def test_tech21_scores_when_hreflang_is_actually_present():

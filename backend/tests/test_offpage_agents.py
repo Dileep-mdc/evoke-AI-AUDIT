@@ -185,7 +185,8 @@ def test_wikidata_finds_the_company_under_its_short_name(monkeypatch):
     one = _run(offpage.off_01(_spec("OFF-01"), ctx))
     two = _run(offpage.off_02(_spec("OFF-02"), ctx))
     assert one["score"] == 100 and two["score"] == 100
-    assert "search=nVent+Electric&" in two["checked_url_or_source"]
+    # Found under the short name, so the source cited is the item itself, not a search page.
+    assert two["checked_url_or_source"].endswith("/wiki/Q1")
 
 
 @pytest.mark.parametrize("candidate, company, same", [
@@ -214,3 +215,49 @@ def test_off01_does_not_take_a_same_first_word_company_for_this_one(monkeypatch)
     two = _run(offpage.off_02(_spec("OFF-02"), ctx))
     assert one["evidence"]["wikidata"]["present"] is False and one["evidence"]["wikipedia"]["present"] is False
     assert one["score"] == 0 and two["score"] == 0
+
+
+def test_wikidata_and_wikipedia_are_cited_as_pages_a_reader_can_open(monkeypatch):
+    """The API URLs return raw JSON; the citation is the site's own search page, with the finding."""
+    from app.parameters.citations import build_citations
+
+    async def nothing_found(url, **kwargs):
+        body = {"search": []} if "wikidata" in url else {"query": {"search": []}}
+        return SimpleNamespace(status_code=200, ok=True, text=__import__("json").dumps(body), error=None)
+    monkeypatch.setattr(offpage_tools, "fetch", nothing_found)
+    one = _run(offpage.off_01(_spec("OFF-01"), _ctx()))
+    two = _run(offpage.off_02(_spec("OFF-02"), _ctx()))
+    for row in (one, two):
+        cites = build_citations(row)
+        assert cites and all("api.php" not in c["source"] and "Special:Search" in c["source"] for c in cites)
+    assert {c["detail"] for c in build_citations(one)} == {"No Wikipedia article about the company",
+                                                         "No Wikidata item for the company"}
+    assert one["score"] == 0 and two["score"] == 0
+
+
+@pytest.mark.parametrize("declared, plain", [
+    ("American Academy of Orthopaedic Surgeons AAOS", "American Academy of Orthopaedic Surgeons"),
+    ("AAOS | American Academy of Orthopaedic Surgeons", "American Academy of Orthopaedic Surgeons"),
+    ("American Academy of Orthopaedic Surgeons (AAOS)", "American Academy of Orthopaedic Surgeons"),
+    ("Procter & Gamble P&G", "Procter & Gamble"),
+    ("Evoke Technologies", "Evoke Technologies"),           # ends in a capitalised word, not an acronym
+    ("Bank of America BAC", "Bank of America BAC"),         # BAC is not the initials of the name
+    ("IBM", "IBM"),
+])
+def test_a_declared_name_loses_only_an_abbreviation_of_itself(declared, plain):
+    from app.parameters.common import drop_acronym
+    assert drop_acronym(declared) == plain
+
+
+def test_the_record_that_is_the_company_beats_one_that_contains_its_name():
+    """Wikidata lists the academy's journal first; the academy itself is the second hit."""
+    hits = [{"id": "Q15750541", "label": "Journal of the American Academy of Orthopaedic Surgeons", "description": "journal"},
+            {"id": "Q4742902", "label": "American Academy of Orthopaedic Surgeons", "description": "orthopedic organization"}]
+    assert offpage_tools.extract_entity(hits, "American Academy of Orthopaedic Surgeons AAOS")["id"] == "Q4742902"
+    assert offpage_tools.extract_entity(hits[:1], "American Academy of Orthopaedic Surgeons") is None
+
+
+def test_the_search_retries_without_the_abbreviation():
+    assert offpage_tools.name_variants("American Academy of Orthopaedic Surgeons AAOS") == [
+        "American Academy of Orthopaedic Surgeons AAOS", "American Academy of Orthopaedic Surgeons"]
+    assert offpage_tools.name_variants("Evoke Technologies") == ["Evoke Technologies"]

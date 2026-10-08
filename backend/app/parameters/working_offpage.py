@@ -138,13 +138,17 @@ def off_03(ev: dict) -> Result:
     if found is None:
         return None
     name = _num(ev.get("name_consistent_share")) or 0.0
-    loc = _num(ev.get("location_consistent_share")) or 0.0
+    loc = _num(ev.get("location_consistent_share"))
     need = presence_target(len(sites))
     presence = min(len(found), need) / need * 70
-    score = presence + name * 15 + loc * 15
+    score = presence + name * 30 if loc is None else presence + name * 15 + loc * 15
     if not found:
         return f"None of the {len(sites)} business profiles checked ({_and(list(sites))}) were found, {_so(score)}", score
     of = f"of the {len(sites)} business profiles checked" + (f" (any {need} earn full marks)" if need < len(sites) else "")
+    if loc is None:
+        return (f"{len(found)} {of} were found ({_and(found)}) for {fmt(presence)} of 70 points."
+                f" The site states no office location to compare, so the company name match carries the 30 consistency"
+                f" points: it matches on {fmt(name * 100)}% of them ({fmt(name * 30)} of 30 points), {_so(score)}"), score
     return (f"{len(found)} {of} were found ({_and(found)}) for {fmt(presence)} of 70 points."
             f" The company name matches the website on {fmt(name * 100)}% of them ({fmt(name * 15)} of 15 points) and"
             f" the location on {fmt(loc * 100)}% ({fmt(loc * 15)} of 15 points), {_so(score)}"), score
@@ -168,6 +172,11 @@ def off_05(ev: dict) -> Result:
     if found is None or "category_match" not in ev:
         return None
     need = presence_target(len(sites))
+    if ev["category_match"] is None:
+        share = min(len(found), need) / need
+        score = share * 100
+        return (f"{len(found)} of the {len(sites)} review sites checked list the company. No category could be derived"
+                f" from the site to compare listings against, so presence carries the whole score, {_so(score)}"), score
     presence = min(len(found), need) / need * 70
     cat = 30 if ev["category_match"] else 0
     how = "checked by the AI" if ev.get("category_method") == "llm" else "checked by keywords"
@@ -196,6 +205,10 @@ def off_06(ev: dict) -> Result:
     else:
         recency, why = 0, f"the newest review is {int(age):,} days old, older than two years"
     score = volume + recency
+    if count and age is None:
+        score = volume / 60 * 100
+        return (f"{int(count)} review results were found, worth {volume} of 60 points (12 each). None shows a date, so"
+                f" recency cannot be measured and the review count carries the score, {_so(score)}"), score
     return (f"{int(count)} review results were found, worth {volume} of 60 points (12 each), and {why}"
             f" ({recency} of 40 points), {_so(score)}"), score
 

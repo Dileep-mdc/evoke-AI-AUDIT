@@ -11,13 +11,15 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from ..config import ENGINE_VERSION, LLM_SCAN_BUDGET_USD, SCAN_RETRY_DELAY
-from ..crawler import snapshot
+from ..crawler import restore, snapshot
 from ..crawler.discover import crawl_site
 from ..crawler.http import normalize_url
 from ..db import discard_scan_pages, vacuum
 from ..llm import usage
 from ..parameters.engine import load_registry, run_all_parameters
+from ..parameters.common import upgrade_na_row
 from ..parameters.formula_simple import logic_for
+from ..parameters import crosschecks, identity, industry
 from ..parameters.platforms import resolve as resolve_platforms
 from ..parameters.working import working_for
 from ..parameters.scoring import SCORING_METHOD, build_report, final_from_rules, prioritize
@@ -35,6 +37,8 @@ _running: set[asyncio.Task] = set()
 _meters: dict[str, usage.Meter] = {}
 _estimates: dict[str, dict] = {}
 _history_cache: list[dict] | None = None
+# Re-checks in progress or just finished, by scan id: {state, total, done, message, parameters}.
+_rechecks: dict[str, dict] = {}
 
 
 
@@ -44,9 +48,13 @@ def _worth_retrying(row: dict | None) -> bool:
     site, or whose source is not configured, gives the same answer every time."""
     if row is None:
         return True
-    if (row.get("evidence") or {}).get("not_applicable"):
+    if (row.get("evidence") or {}).get("retry_pointless"):
         return False
     if "not configured" in str(row.get("error") or ""):
+        return False
+    # A check that ran out its whole PARAMETER_TIMEOUT is slow, not unlucky: re-running it
+    # spends that budget a second time (17 minutes of one audit) for the same result.
+    if str(row.get("error") or "").startswith("Timed out after"):
         return False
     return row["status"] == "UNKNOWN" or bool(row.get("error"))
 
@@ -58,7 +66,8 @@ for _spec in registry:
 
 class ScanRequest(BaseModel):
     url: str = Field(..., min_length=1)
-    # Optional off-page site sets to add to the default lists (parameters/offpage_platforms.json).
+    # Optional: the industry profile to audit against (parameters/industry_profiles.json; detected
+    # from the site when omitted) and a region whose sites the off-page checks add.
     industry: str | None = None
     region: str | None = None
 
@@ -72,10 +81,7 @@ def usage_history(limit: int = 10) -> list[dict]:
     global _history_cache
     if _history_cache is None:
         out = []
-        for scan in repo.list_scans(limit=30):
-            if scan.get("status") != "completed":
-                continue
-            spent = (repo.report(scan["id"]) or {}).get("ai_usage") or {}
+        for spent in repo.ai_usage_history(limit=limit * 3):
             if spent.get("calls") and spent.get("pages"):
                 entry = {"pages": spent["pages"], "calls": spent["calls"] + spent.get("search_calls", 0),
                          "cost_usd": spent.get("cost_usd") or 0.0}
@@ -116,7 +122,7 @@ def _live_usage(scan_id: str) -> dict | None:
     return {**meter.as_dict(), "estimate": _estimates.get(scan_id)}
 
 
-async def execute_scan(scan_id: str, url: str, folder: str | None = None, platforms: dict | None = None) -> None:
+async def execute_scan(scan_id: str, url: str, folder: str | None = None, choice: dict | None = None) -> None:
     global _history_cache
     log.info("Scan %s starting %s%s", scan_id, url, f" from saved folder {folder}" if folder else "")
     repo.update(scan_id, status="crawling", progress_percent=2)
@@ -133,12 +139,26 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None, platfo
             # parameters -- now reads the folder; see crawler/snapshot.py.
             snapshot.activate(snapshot.open_folder(folder))
         ctx = await crawl_site(url, on_progress=bump)
-        ctx.platforms = platforms or resolve_platforms()
+        # Company Identity Agent: who owns the site, before any off-page research searches for it.
+        ctx.identity = await identity.resolve(ctx)
+        ctx.company_name = ctx.identity["name"]
+        ctx.brand_terms = list(dict.fromkeys(
+            [t.lower() for t in (ctx.identity["brand"], ctx.identity.get("acronym"), ctx.identity["short_name"], ctx.identity["name"]) if t]
+            + list(ctx.brand_terms)))
+        log.info("Scan %s organisation: %s (%s, confidence %s)", scan_id, ctx.company_name,
+                 ctx.identity["source"], ctx.identity["confidence"])
+        # The industry profile: named in the request, or read from the site's own pages.
+        choice = choice or {}
+        ctx.industry = industry.chosen(choice["industry"]) if choice.get("industry") else industry.detect(ctx)
+        ctx.platforms = resolve_platforms(ctx.industry["key"], choice.get("region"))
+        log.info("Scan %s audited as %s (%s)", scan_id, ctx.industry["label"],
+                 "detected" if ctx.industry["detected"] else "chosen")
         # The crawl's size is now known, so the AI spend can be estimated before scoring starts.
         estimate = usage.estimate(len(ctx.pages), usage_history())
         if estimate:
             _estimates[scan_id] = estimate
-        repo.save_pages(scan_id, ctx.pages)
+        # Thousands of page rows: written on a worker thread so the server keeps answering.
+        await asyncio.to_thread(repo.save_pages, scan_id, ctx.pages)
         # Both crawl artifacts are written before scoring starts, so the scraped content and
         # the failed-link list survive even if the model calls or the workbook later fail.
         crawl_path = await asyncio.to_thread(save_crawl_output, scan_id, ctx)
@@ -189,7 +209,13 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None, platfo
                 by_id[row["parameter_id"]] = row
             results = [by_id[s["parameter_id"]] for s in registry if s["parameter_id"] in by_id]
             repo.update(scan_id, errors_count=sum(1 for r in results if r.get("error")))
-        issues = prioritize(results)
+        # Read the checks together: explain results that look contradictory, and lift a gating
+        # issue (AI crawlers blocked) above everything else. Annotated rows are saved again.
+        findings = crosschecks.reconcile(results, ctx)
+        for row in results:
+            if "cross_check" in (row.get("evidence") or {}):
+                repo.save_parameter(scan_id, row)
+        issues = crosschecks.gating_first(prioritize(results), findings["gating"])
         repo.save_issues(scan_id, issues)
         completed = datetime.now(timezone.utc).isoformat()
         repo.update(scan_id, completed_at=completed, progress_percent=100)
@@ -198,7 +224,13 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None, platfo
         # Which copy of the site was audited: the saved folder or the live web. The dashboard
         # shows it, since scores from a snapshot describe the site as of the day it was saved.
         report["snapshot"] = getattr(ctx, "snapshot", None) or {}
+        report["audited_at"] = report["generated_at"]
         report["platforms"] = ctx.platforms
+        report["industry"] = ctx.industry
+        report["identity"] = ctx.identity
+        report["gating"] = findings["gating"]
+        report["cross_checks"] = findings["cross_checks"]
+        report["content_analysis"] = crosschecks.content_analysis(ctx)
         report["ai_usage"] = {**meter.as_dict(), "pages": len(ctx.pages), "estimate": _estimates.get(scan_id)}
         repo.save_report(scan_id, report)
         _history_cache = None
@@ -249,7 +281,8 @@ async def create_scan(payload: ScanRequest):
         else:
             url = normalize_url(payload.url)
             folder = None
-        platforms = resolve_platforms(payload.industry, payload.region)
+        resolve_platforms(payload.industry, payload.region)   # refuses an unknown industry or region now
+        choice = {"industry": payload.industry, "region": payload.region}
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     domain = urlparse(url).netloc.lower()
@@ -260,18 +293,99 @@ async def create_scan(payload: ScanRequest):
         onpage_total=SECTION_TOTALS["on_page"],
         offpage_total=SECTION_TOTALS["off_page"],
     )
-    task = asyncio.create_task(_run(scan_id, url, folder, platforms), name=f"scan-{scan_id}")
+    task = asyncio.create_task(_run(scan_id, url, folder, choice), name=f"scan-{scan_id}")
     _running.add(task)
     task.add_done_callback(_running.discard)
     return _progress_payload(scan)
 
 
-async def _run(scan_id: str, url: str, folder: str | None = None, platforms: dict | None = None) -> None:
+async def _run(scan_id: str, url: str, folder: str | None = None, choice: dict | None = None) -> None:
     try:
-        await execute_scan(scan_id, url, folder, platforms)
+        await execute_scan(scan_id, url, folder, choice)
     except Exception:
         log.exception("Scan %s crashed", scan_id)
         repo.update(scan_id, status="error")
+
+
+def unmeasured(rows: list[dict]) -> list[str]:
+    """The checks a re-check re-runs: every one that came back unscored."""
+    return [r["parameter_id"] for r in rows if r["status"] == "UNKNOWN"]
+
+
+def _carried(report: dict) -> dict:
+    """What a finished audit established about the site, kept when its report is rebuilt."""
+    out = {"snapshot": report.get("snapshot") or {}}
+    # Recalculating a saved report is not a new report: it keeps the time it was generated.
+    for key in ("platforms", "ai_usage", "industry", "identity", "gating", "cross_checks", "content_analysis",
+                "generated_at", "audited_at"):
+        if key in report:
+            out[key] = report[key]
+    return out
+
+
+async def execute_recheck(scan_id: str, ids: list[str]) -> None:
+    """Re-run only the given checks of a finished audit, against the pages it saved.
+
+    No re-crawl: the pages come back from disk (crawler/restore.py) and only robots.txt, the
+    sitemap and llms.txt are fetched again. The other checks keep their results; the report,
+    the cross-checks and the top issues are then rebuilt over all of them.
+    """
+    state = _rechecks[scan_id]
+    try:
+        scan = repo.get(scan_id)
+        old = repo.report(scan_id) or {}
+        state["message"] = "Reading the saved website data"
+        ctx = await restore.restore(scan_id, scan["domain"], old)
+        meter = usage.start(LLM_SCAN_BUDGET_USD)
+        specs = [spec for spec in registry if spec["parameter_id"] in ids]
+        state["message"] = f"Re-checking {len(specs)} parameter(s)"
+
+        async def on_each(row: dict) -> None:
+            repo.save_parameter(scan_id, row)
+            state["done"] += 1
+
+        await run_all_parameters(ctx, specs, on_each)
+        state["message"] = "Rebuilding the report"
+        results = repo.parameters(scan_id)
+        # Notes from the first pass are cleared, so none survives about a result that changed.
+        noted = set()
+        for row in results:
+            if "cross_check" in (row.get("evidence") or {}):
+                noted.add(row["parameter_id"])
+                row["evidence"] = {k: v for k, v in row["evidence"].items() if k != "cross_check"}
+        findings = crosschecks.reconcile(results, ctx)
+        for row in results:
+            if row["parameter_id"] in noted or "cross_check" in (row.get("evidence") or {}):
+                repo.save_parameter(scan_id, row)
+        issues = crosschecks.gating_first(prioritize(results), findings["gating"])
+        repo.save_issues(scan_id, issues)
+        report = build_report(repo.get(scan_id), results, issues)
+        report.update(_carried(old))
+        # A re-check produces a new version of the report: it is stamped now, and keeps the time
+        # the website itself was read, which the re-check did not repeat.
+        report["audited_at"] = old.get("audited_at") or old.get("generated_at")
+        report["generated_at"] = datetime.now(timezone.utc).isoformat()
+        report["gating"] = findings["gating"]
+        report["cross_checks"] = findings["cross_checks"]
+        # The re-check's AI spend is kept apart from the audit's, which estimates the next audit.
+        report["rechecked"] = {"at": datetime.now(timezone.utc).isoformat(), "parameters": ids, "ai_usage": meter.as_dict()}
+        repo.save_report(scan_id, report)
+        repo.update(scan_id, errors_count=sum(1 for r in results if r.get("error")))
+        try:
+            excel_path = await asyncio.to_thread(save_excel_output, report, registry)
+            repo.update(scan_id, excel_output_path=str(excel_path))
+        except Exception:
+            log.exception("Re-check of %s finished but its workbook could not be written", scan_id)
+        still = [pid for pid in unmeasured(results) if pid in ids]
+        state.update(state="done", message=(f"{len(ids) - len(still)} of {len(ids)} now measured"
+                                            + (f"; still unmeasured: {', '.join(still)}" if still else "")),
+                     still_unmeasured=still)
+        log.info("Re-check of %s done: %s", scan_id, state["message"])
+    except restore.NotRestorable as exc:
+        state.update(state="error", message=str(exc))
+    except Exception as exc:
+        log.exception("Re-check of %s failed", scan_id)
+        state.update(state="error", message=f"The re-check failed: {exc}")
 
 
 def _current_report(scan_id: str) -> dict | None:
@@ -289,12 +403,15 @@ def _current_report(scan_id: str) -> dict | None:
     results = repo.parameters(scan_id)
     if not scan or not results:
         return report
-    issues = prioritize(results)
+    # Rows saved as N/A before it was retired are scored as what they are now: a no-data FAIL.
+    for row in results:
+        if upgrade_na_row(row):
+            repo.save_parameter(scan_id, row)
+    issues = crosschecks.gating_first(prioritize(results), report.get("gating"))
     fresh = build_report(scan, results, issues)
-    fresh["snapshot"] = report.get("snapshot") or {}
-    for key in ("platforms", "ai_usage"):
-        if key in report:
-            fresh[key] = report[key]
+    fresh.update(_carried(report))
+    if "rechecked" in report:
+        fresh["rechecked"] = report["rechecked"]
     repo.save_issues(scan_id, issues)
     repo.save_report(scan_id, fresh)
     return fresh
@@ -319,6 +436,35 @@ def upgrade_saved_reports() -> int:
 @router.get("/scans")
 async def list_scans():
     return [_progress_payload(s) for s in repo.list_scans()]
+
+
+@router.post("/scans/{scan_id}/recheck")
+async def start_recheck(scan_id: str):
+    """Re-run only this audit's unmeasured checks, against the pages it already read."""
+    scan = repo.get(scan_id)
+    if not scan:
+        raise HTTPException(404, "Scan not found")
+    if scan["status"] != "completed":
+        raise HTTPException(409, "Only a finished audit can be re-checked")
+    if (_rechecks.get(scan_id) or {}).get("state") == "running":
+        return _rechecks[scan_id]
+    ids = unmeasured(repo.parameters(scan_id))
+    if not ids:
+        raise HTTPException(409, "Every check in this audit was measured; there is nothing to re-check")
+    _rechecks[scan_id] = {"state": "running", "total": len(ids), "done": 0, "parameters": ids,
+                          "message": "Starting"}
+    task = asyncio.create_task(execute_recheck(scan_id, ids), name=f"recheck-{scan_id}")
+    _running.add(task)
+    task.add_done_callback(_running.discard)
+    return _rechecks[scan_id]
+
+
+@router.get("/scans/{scan_id}/recheck")
+async def recheck_status(scan_id: str):
+    state = _rechecks.get(scan_id)
+    if state is None:
+        raise HTTPException(404, "No re-check has run for this audit since the server started")
+    return state
 
 
 @router.get("/scans/{scan_id}/progress")

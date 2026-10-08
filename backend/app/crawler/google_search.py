@@ -25,6 +25,7 @@ from ..config import (
     GOOGLE_CSE_ID,
     GOOGLE_SEARCH_ENDPOINT,
     GOOGLE_SEARCH_RESULTS,
+    SEARCH_DISPLAY_URL,
 )
 from .http import fetch
 
@@ -43,7 +44,7 @@ class SearchResult:
 
     @property
     def display_url(self) -> str:
-        return f"https://www.google.com/search?q={quote_plus(self.query)}"
+        return f"{SEARCH_DISPLAY_URL}{quote_plus(self.query)}"
 
     @property
     def urls(self) -> list[str]:

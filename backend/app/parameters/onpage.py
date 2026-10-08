@@ -6,7 +6,6 @@ from collections import defaultdict
 
 from ..llm.batch import judge_all, judge_one
 from ..llm.prompts import (
-    SERVICE_PAGE_RUBRIC,
     on01_prompt,
     on03_prompt,
     on04_prompt,
@@ -22,8 +21,10 @@ from ..llm.prompts import (
     on20_prompt,
 )
 from . import rules
+from . import industry
 from .common import (
     band,
+    no_data,
     derive_site_categories,
     derive_site_geographies,
     excluded_page_counts,
@@ -97,16 +98,6 @@ JOURNEY = {
     "decision": ("contact", "get in touch", "get started", "book", "schedule", "buy", "order", "sign up"),
 }
 
-SUBTOPICS = {
-    "problem/need": ("problem", "need", "challenge", "pain point"),
-    "approach/process": ("approach", "process", "how it works", "how we", "methodology"),
-    "features": ("feature", "capabilit", "what you get", "includes"),
-    "outcomes/benefits": ("outcome", "result", "benefit"),
-    "audience/market": ("industry", "audience", "market", "who we serve", "for you"),
-    "pricing/plans": ("pricing", "price", "cost", "plan", "package"),
-    "proof/trust": ("review", "testimonial", "case stud", "client", "rated"),
-    "contact/next step": ("contact", "get started", "book", "schedule", "sign up"),
-}
 
 
 def _service_pages(ctx):
@@ -162,16 +153,11 @@ async def on_01(spec, ctx):
                 continue  # short nav-style labels aren't real buyer-facing headings
             rows.append({"url": page.result.final_url, "heading": text, "question": is_question(text)})
     if not rows:
-        return result(
-            spec,
-            score=30,
-            evidence={"note": "No eligible H1-H3 headings found on service/solution pages.",
-                      "eligible_headings": 0, "pages_assessed": len(_service_pages(ctx) or scorable_pages(ctx)),
+        return no_data(
+            spec, reason="no H1-H3 content headings were found on the key pages",
+            evidence={"eligible_headings": 0, "pages_assessed": len(_service_pages(ctx) or scorable_pages(ctx)),
                       "pages_crawled": len(ctx.pages)},
-            recommendation="Phrase key H2s on service pages as the questions buyers actually ask.",
-            checked=ctx.origin,
-            duration_ms=ms_since(t),
-        )
+            checked=ctx.origin, duration_ms=ms_since(t))
     hits = sum(1 for r in rows if r["question"])
     share = hits / len(rows)
     score = band(share, _QUESTION_HEADING_BANDS, _QUESTION_HEADING_FLOOR)
@@ -207,7 +193,8 @@ async def on_01(spec, ctx):
         weighed = [(occurrences[key], judged[key]) for key in occurrences if key in judged]
         total_weight = sum(count for count, _ in weighed)
         buyer = sum(count for count, is_buyer in weighed if is_buyer)
-        share = buyer / total_weight if total_weight else 0.0
+        # Verdicts that match none of the headings sent judged nothing; 0/0 is not a 0% share.
+        share = buyer / total_weight if total_weight else share
         score = band(share, _QUESTION_HEADING_BANDS, _QUESTION_HEADING_FLOOR)
         confidence = 0.85 if coverage.complete else 0.75
         evidence["method"] = "llm"
@@ -241,11 +228,10 @@ async def on_02(spec, ctx):
                 f"{len(headings)} heading(s) were found, but none were phrased as questions "
                 "(How / What / Why / When / Where, or ending with ?). This check only scores answers under question headings."
             )
-        return result(
+        return no_data(
             spec,
-            score=25,
+            reason=why,
             evidence={
-                "summary": why,
                 "pages_checked": len(pages),
                 "pages_with_html": len(html_pages),
                 "headings_found": len(headings),
@@ -253,7 +239,6 @@ async def on_02(spec, ctx):
                 "heading_samples": headings,
                 "answers": [],
             },
-            recommendation="Phrase key H2s as buyer questions and place a self-contained 40–60 word answer directly under each one.",
             checked=ctx.origin,
             duration_ms=ms_since(t),
         )
@@ -331,8 +316,12 @@ async def on_03(spec, ctx):
             "mentions": len(windows),
         })
     present = defined
+    if not present:
+        return no_data(spec, reason="none of the site's core concepts is explained anywhere in its page text",
+                              evidence={"concepts_derived": len(concepts), "concepts_found_on_site": 0},
+                              checked=ctx.origin, duration_ms=ms_since(t))
     hits = sum(1 for d in defined if d["defined"])
-    score = (hits / max(1, len(present))) * 100 if present else 30
+    score = (hits / max(1, len(present))) * 100
     confidence = 0.65
     evidence = {
         "concepts": defined,
@@ -373,7 +362,13 @@ async def on_04(spec, ctx):
         specific = any(k in opening.lower() for k in site_terms)
         score = 85 if specific and not generic else (55 if specific else 35)
         rows.append({"url": page.result.final_url, "opening": opening, "generic": generic, "score": score})
-    avg = sum(r["score"] for r in rows) / len(rows) if rows else 40
+    with_opening = [r for r in rows if r["opening"]]
+    if not with_opening:
+        return no_data(spec, reason="no page opens with a substantial paragraph",
+                              evidence={"pages_assessed": len(rows), "pages_with_an_opening": 0},
+                              checked=ctx.origin, duration_ms=ms_since(t))
+    # A page with no opening has nothing to lead with; it is left out rather than scored 35.
+    avg = sum(r["score"] for r in with_opening) / len(with_opening)
     confidence = 0.6
     evidence = {"pages": rows, "pages_assessed": len(rows), "method": "heuristic"}
 
@@ -398,7 +393,11 @@ async def on_04(spec, ctx):
 
 async def on_05(spec, ctx):
     t = timed()
-    services = [p for p in scorable_pages(ctx) if p.page_type in {"service", "home"} or re.search(r"service|solution", p.result.final_url, re.I)]
+    services = [p for p in scorable_pages(ctx) if p.page_type == "service" or re.search(r"service|solution", p.result.final_url, re.I)]
+    # The homepage counted as a "service page" alongside real ones, so a homepage FAQ alone could
+    # carry the score. It stands in only for a site whose services live on the homepage.
+    if not services:
+        services = [p for p in scorable_pages(ctx) if p.page_type == "home"]
     if not services:
         # The parameter is "FAQ on every service and solution page". With no such page to
         # inspect there is nothing to score; grading every crawled page instead (the old
@@ -441,14 +440,11 @@ async def on_06(spec, ctx):
         valid = bool(faqs)
         rows.append({"url": page.result.final_url, "schema": valid, "visible": visible})
     if not rows:
-        # "No FAQ detected" on its own does not say how hard anyone looked. The page count
-        # is what turns it from an assertion into a finding.
-        return result(
+        # No FAQ on any page: a failure. The page count says how hard it looked.
+        return no_data(
             spec,
-            score=20,
-            evidence={"note": "No FAQ schema or visible FAQ detected",
-                      "faq_pages_total": 0, "pages_assessed": len(scorable_pages(ctx)), **excluded_page_counts(ctx)},
-            recommendation="Add valid FAQPage JSON-LD that matches visible Q&A.",
+            reason="no page has a visible FAQ or FAQ structured data",
+            evidence={"faq_pages_total": 0, "pages_assessed": len(scorable_pages(ctx)), **excluded_page_counts(ctx)},
             checked=ctx.origin,
             duration_ms=ms_since(t),
         )
@@ -486,15 +482,9 @@ async def on_07(spec, ctx):
         if intent or page.page_type == "service":
             eligible.append({"url": page.result.final_url, "intent": intent, "tables": tables})
     if not eligible:
-        return result(
-            spec,
-            score=40,
-            evidence={"note": "No pages showed buyer-evaluation intent.",
-                      "eligible_pages_total": 0, "pages_crawled": len(ctx.pages)},
-            recommendation="Add comparison/specification tables on evaluation pages.",
-            checked=ctx.origin,
-            duration_ms=ms_since(t),
-        )
+        return no_data(spec, reason="no page lets buyers compare or evaluate options, so the site has no comparison tables",
+                              evidence={"eligible_pages_total": 0, "pages_crawled": len(ctx.pages)},
+                              checked=ctx.origin, duration_ms=ms_since(t))
     score = sum(1 for e in eligible if e["tables"] > 0) / len(eligible) * 100
     confidence = 0.65
     evidence = {"pages": eligible, "eligible_pages_total": len(eligible),
@@ -517,6 +507,11 @@ async def on_07(spec, ctx):
             evidence["method"] = "llm"
             evidence["llm"] = {"evaluation_pages": len(judged), "with_tables": with_tables,
                                **coverage.as_evidence()}
+        elif verdicts:
+            # The model read every page and found none where buyers evaluate options.
+            return no_data(spec, reason="no page lets buyers compare or evaluate options, so the site has no comparison tables",
+                                  evidence={"eligible_pages_total": 0, "pages_judged": len(verdicts), "method": "llm"},
+                                  checked=ctx.origin, duration_ms=ms_since(t))
         elif coverage.error:
             evidence["llm_unavailable"] = coverage.error
 
@@ -618,16 +613,21 @@ async def on_09(spec, ctx):
 async def on_10(spec, ctx):
     t = timed()
     pages = _service_pages(ctx) or scorable_pages(ctx)
+    # What a complete key page covers depends on the industry: a manufacturer's product page needs
+    # specifications and datasheets, a service firm's its engagement model (industry.py).
+    rubric = industry.content_rubric(ctx)
+    points = tuple(r["point"] for r in rubric)
     rows = []
     for page in pages:
         text = (page.text or "").lower()
-        covered = [name for name, kws in SUBTOPICS.items() if any(k in text for k in kws)]
-        rows.append({"url": page.result.final_url, "covered": covered, "missing": [name for name in SUBTOPICS if name not in covered], "words": page.word_count})
-    rubric_points = len(SERVICE_PAGE_RUBRIC)
-    score = sum(len(r["covered"]) / len(SUBTOPICS) * 100 for r in rows) / max(1, len(rows))
+        covered = [r["point"] for r in rubric if any(k in text for k in r.get("keywords", ()))]
+        rows.append({"url": page.result.final_url, "covered": covered, "missing": [pt for pt in points if pt not in covered], "words": page.word_count})
+    rubric_points = len(points)
+    score = sum(len(r["covered"]) / rubric_points * 100 for r in rows) / max(1, len(rows))
     confidence = 0.6
     evidence = {"pages": rows, "pages_assessed": len(rows), "used_service_pages": bool(_service_pages(ctx)),
-                "method": "heuristic", "rubric_points": rubric_points}
+                "method": "heuristic", "rubric_points": rubric_points,
+                "industry_profile": industry.for_ctx(ctx)["label"], "checklist": list(points)}
 
     # Whether a page really covers "outcomes" or "proof" is a reading-comprehension call, so
     # the model counts the rubric points it actually meets. Every candidate page is read,
@@ -635,7 +635,7 @@ async def on_10(spec, ctx):
     excerpts = [{"url": p.result.final_url, "excerpt": (p.text or "")}
                 for p in pages if p.text]
     if excerpts:
-        verdicts, coverage = await judge_all(excerpts, on11_prompt)
+        verdicts, coverage = await judge_all(excerpts, lambda batch: on11_prompt(batch, points))
         if verdicts:
             covered_counts = [min(rubric_points, max(0, int(v.get("covered") or 0))) for v in verdicts]
             score = sum(c / rubric_points * 100 for c in covered_counts) / len(covered_counts)
@@ -646,7 +646,7 @@ async def on_10(spec, ctx):
         elif coverage.error:
             evidence["llm_unavailable"] = coverage.error
 
-    rec = "Fill missing subtopics on service pages: outcomes, industries, engagement model and proof." if score < 90 else None
+    rec = f"Cover the full checklist on key pages: {'; '.join(points)}." if score < 90 else None
     return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
 
 
@@ -835,7 +835,10 @@ async def on_14(spec, ctx):
                         samples.append({"sentence": sent[:220], "sourced": True})
                 elif len(samples) < 8:
                     samples.append({"sentence": sent[:220], "sourced": False})
-    score = sourced / claims * 100 if claims else 35
+    if not claims:
+        return no_data(spec, reason="the site makes no statistical or factual claims backed by a source",
+                              evidence={"claims": 0}, checked=ctx.origin, duration_ms=ms_since(t))
+    score = sourced / claims * 100
     confidence = 0.55
     evidence = {"claims": claims, "claims_total": claims, "sourced": sourced,
                 "sourced_by_pattern": sourced, "samples": samples, "method": "heuristic"}
@@ -986,6 +989,9 @@ async def on_18(spec, ctx):
     titles = [(p.result.final_url, (p.title or "").lower().strip()) for p in scorable_pages(ctx) if p.title]
     if not titles:
         return result(spec, score=None, unknown=True, evidence={}, recommendation="No page titles were available to compare.", checked=ctx.origin, error="no page titles", duration_ms=ms_since(t))
+    if len(titles) < 2:
+        return no_data(spec, reason="only one page title was available to compare",
+                              evidence={"pages_compared": len(titles)}, checked=ctx.origin, duration_ms=ms_since(t))
     by_url = dict(titles)
     pairs = [p for p in near_duplicate_pairs(titles, _COMPETING_TITLE_SIMILARITY) if by_url.get(p["a"]) != by_url.get(p["b"])]
     for p in pairs:
@@ -1070,6 +1076,11 @@ async def on_20(spec, ctx):
     t = timed()
     geos = tuple(derive_site_geographies(ctx)) + _GENERIC_REACH_TERMS
     cats = tuple(derive_site_categories(ctx))
+    if not cats or not ctx.brand_terms:
+        return no_data(spec, reason="the site's categories and brand name could not be found together in its pages",
+                              evidence={"categories_derived": list(cats), "brand_terms": list(ctx.brand_terms),
+                                        "pages_assessed": len(scorable_pages(ctx))},
+                              checked=ctx.origin, duration_ms=ms_since(t))
     rows = []
     for page in scorable_pages(ctx):
         # Title and URL count as the page naming the brand, not just body text. Reading

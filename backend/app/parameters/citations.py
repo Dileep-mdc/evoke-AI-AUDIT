@@ -24,7 +24,13 @@ _DETAIL_MAX = 160
 
 
 def _detail(item: dict, skip: set[str]) -> str:
-    """The facts recorded beside a URL, compacted: "status: 404; hops: 2"."""
+    """The facts recorded beside a URL, compacted: "status: 404; hops: 2".
+
+    A plain-English `finding` recorded beside the URL is the whole description when present:
+    it already says what the source showed, which the raw fields only imply."""
+    finding = item.get("finding")
+    if isinstance(finding, str) and finding.strip():
+        return finding.strip()[:_DETAIL_MAX]
     parts = []
     for key, value in item.items():
         if key in skip or key in _URL_KEYS or key in _PROSE_KEYS:
@@ -64,11 +70,15 @@ def _walk(value: Any, context: str, out: dict[str, str]) -> None:
 
 def build_citations(row: dict) -> list[dict]:
     """[{"source": url-or-source-name, "detail": what was found there}, ...], never empty."""
+    from_evidence: dict[str, str] = {}
+    _walk(row.get("evidence") or {}, "evidence", from_evidence)
     found: dict[str, str] = {}
     checked = (row.get("checked_url_or_source") or "").strip()
     if checked and _URL_RE.match(checked):
-        found[checked] = "source checked"
-    _walk(row.get("evidence") or {}, "evidence", found)
+        # Listed first, described by what the evidence recorded there when it says more.
+        found[checked] = from_evidence.get(checked, "source checked")
+    for url, detail in from_evidence.items():
+        found.setdefault(url, detail)
     citations = [{"source": url, "detail": detail} for url, detail in found.items()]
     if not citations:
         citations = [{"source": checked or "not recorded", "detail": "source checked"}]

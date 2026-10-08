@@ -413,12 +413,19 @@ def test_on08_does_not_count_a_list_of_empty_items():
 def test_on20_sees_the_brand_in_the_title_not_only_the_body():
     """The audited company's own homepage came back `brand: false` because the extractor had
     dropped the header -- and the parameter scored 0 on that."""
-    pages = [_page("https://x/", title="Acme — data analytics in the United States", text="body copy with nothing in it")]
+    pages = [_page("https://x/", title="Acme — data analytics in the United States", text="body copy with nothing in it"),
+             _page("https://x/data-analytics", title="Data Analytics", page_type="service", text="analytics services")]
     ctx = _ctx(pages)
 
     out = _run(on_20(SPECS["ON-20"], ctx))
 
     assert out["evidence"]["pages_naming_brand"] == 1, "the brand is in the title"
+
+
+def test_on20_fails_when_no_category_can_be_derived():
+    """No category to find alongside the brand: a failure at 0, with the fix."""
+    out = _run(on_20(SPECS["ON-20"], _ctx([_page("https://x/", title="Acme", text="body copy")])))
+    assert out["status"] == "FAIL" and out["score"] == 0 and out["evidence"]["no_data"] and out["recommendation"]
 
 
 # --- the engine no longer lets the model narrate a check that never ran ------------------

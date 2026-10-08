@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Callable, Optional
 
+from . import rules
 from .common import VITAL_NAMES, VITALS, vital_rating, vital_score
 
 Result = Optional[tuple[str, float]]
@@ -58,7 +59,7 @@ def _and(items: list[str]) -> str:
 def _unknown(ev: dict) -> bool:
     if not isinstance(ev, dict):
         return True
-    if ev.get("not_applicable"):
+    if ev.get("no_data") or ev.get("not_applicable"):
         return True
     return "rules_based_score" in ev and ev.get("rules_based_score") is None
 
@@ -227,7 +228,7 @@ def tech_06(ev: dict) -> Result:
     else:
         return None
     share = (n - broken) / n * 100
-    penalty = min(20, chains * 5)
+    penalty = min(_CHAIN_PENALTY_MAX, chains * _CHAIN_PENALTY)
     score = max(0, share - penalty)
     text = f"{_int(n - broken)} of {_int(n)} internal links {_v(n - broken, 'works', 'work')}"
     if broken:
@@ -235,7 +236,7 @@ def tech_06(ev: dict) -> Result:
     if chains:
         text += (f", which gives {_num(share)}. {_plural(chains, 'long redirect chain')} then"
                  f" {'takes' if chains == 1 else 'take'} off {_num(penalty)} points")
-        if chains * 5 > 20:
+        if chains * _CHAIN_PENALTY > _CHAIN_PENALTY_MAX:
             text += " (the most it can lose)"
     else:
         text += ", and there are no long redirect chains"
@@ -243,10 +244,17 @@ def tech_06(ev: dict) -> Result:
     return f"{text}{floor}, {_so(score)}", _score(score)
 
 
-_LATENCY = ((800, 100), (1800, 70), (3000, 40))
-_WEIGHT = ((300_000, 100), (800_000, 70), (1_500_000, 40))
-_RATING = {100: "good", 70: "fair", 40: "slow", 20: "very slow"}
-_SIZE_RATING = {100: "light", 70: "fair", 40: "heavy", 20: "very heavy"}
+_CHAIN_PENALTY = rules.threshold("redirect_chain_penalty", "per_chain")
+_CHAIN_PENALTY_MAX = rules.threshold("redirect_chain_penalty", "max")
+_LATENCY = tuple(tuple(b) for b in rules.threshold("proxy_latency_ms", "bands"))
+_LATENCY_FLOOR = rules.threshold("proxy_latency_ms", "floor")
+_WEIGHT = tuple(tuple(b) for b in rules.threshold("proxy_page_bytes", "bands"))
+_WEIGHT_FLOOR = rules.threshold("proxy_page_bytes", "floor")
+_MIX_LATENCY = rules.threshold("proxy_mix", "latency")
+_MIX_SIZE = rules.threshold("proxy_mix", "size")
+# Labels follow the bands best-first, so they stay right if scoring_rules.json retunes the points.
+_RATING = dict(zip([p for _, p in _LATENCY] + [_LATENCY_FLOOR], ("good", "fair", "slow", "very slow")))
+_SIZE_RATING = dict(zip([p for _, p in _WEIGHT] + [_WEIGHT_FLOOR], ("light", "fair", "heavy", "very heavy")))
 
 
 def _vital_value(metric: str, value: float) -> str:
@@ -278,12 +286,12 @@ def tech_07(ev: dict) -> Result:
     size = ev.get("avg_page_bytes")
     if latency is None or size is None:
         return None
-    ls = _band(float(latency), _LATENCY, 20)
-    ws = _band(float(size), _WEIGHT, 20)
-    score = ls * 0.6 + ws * 0.4
+    ls = _band(float(latency), _LATENCY, _LATENCY_FLOOR)
+    ws = _band(float(size), _WEIGHT, _WEIGHT_FLOOR)
+    score = ls * _MIX_LATENCY + ws * _MIX_SIZE
     return (f"Pages respond in {_int(latency)} ms on average ({_RATING[ls]}, {_num(ls)} points) and weigh"
-            f" {_int(float(size) / 1000)} KB ({_SIZE_RATING[ws]}, {_num(ws)} points). Speed counts for 60% and size"
-            f" for 40%, {_so(score)}"), _score(score)
+            f" {_int(float(size) / 1000)} KB ({_SIZE_RATING[ws]}, {_num(ws)} points). Speed counts for {_num(_MIX_LATENCY * 100, 0)}% and size"
+            f" for {_num(_MIX_SIZE * 100, 0)}%, {_so(score)}"), _score(score)
 
 
 @_safe
@@ -398,6 +406,11 @@ def tech_13(ev: dict) -> Result:
         return "There were no pages to measure, so it scores 0.", 0.0
     n = len(rows)
     ratio = sum(float(r["text_to_code_score"]) for r in rows) / n
+    if "combined" not in rows[0]:
+        # Current rule: text-to-code only (content depth is ON-10's measure).
+        return (f"Across {_plural(n, 'page')}, the share of readable text against code averages"
+                f" {_num(ratio, 0)} out of 100, {_so(ratio)}"), _score(ratio)
+    # Rows saved before content depth moved to ON-10 were scored on both.
     depth = sum(min(100.0, float(r["words"]) / 400 * 100) for r in rows) / n
     score = min(100, sum(float(r["combined"]) for r in rows) / n)
     return (f"Across {_plural(n, 'page')}, the text-to-code balance averages {_num(ratio, 0)} out of 100 and page"
@@ -411,13 +424,25 @@ def tech_14(ev: dict) -> Result:
         return None
     images = int(ev.get("images") or 0)
     videos = int(ev.get("videos") or 0)
-    if images == 0:
-        return "The site has no images, so it gets a set score of 80.", 80.0
+    stored = ev.get("rules_based_score")
+    if images == 0 and videos == 0:
+        return "The site has no images, so it gets a set score of 80.", 80.0   # rows saved before N/A existed
     usable = int(ev.get("usable_alt") or 0)
     transcripts = int(ev.get("transcript_signals") or 0)
-    img = usable / images * 100
-    vid = 100.0 if videos == 0 else min(100.0, transcripts / videos * 100)
-    score = img * 0.7 + vid * 0.3
+    img = usable / images * 100 if images else None
+    vid = min(100.0, transcripts / videos * 100) if videos else None
+    if img is None:
+        return (f"The site has no images; {_int(transcripts)} of {_plural(videos, 'video')} {'has' if videos == 1 else 'have'}"
+                f" a transcript, {_so(vid)}"), _score(vid)
+    if vid is None:
+        old = img * 0.7 + 30   # rows saved before: no video counted as full marks
+        if stored is not None and abs(float(stored) - old) < 0.11 and abs(float(stored) - img) >= 0.11:
+            vid, score = 100.0, old
+        else:
+            return (f"{_int(usable)} of {_plural(images, 'image')} {'has' if images == 1 else 'have'} useful alt text."
+                    f" The site has no videos, so images carry the whole score, {_so(img)}"), _score(img)
+    else:
+        score = img * 0.7 + vid * 0.3
     vid_text = ("there are no videos (counted as full marks)" if videos == 0
                 else f"{_int(transcripts)} of {_plural(videos, 'video')} {'has' if videos == 1 else 'have'} a transcript ({_num(vid, 0)}%)")
     return (f"{_int(usable)} of {_plural(images, 'image')} {'has' if images == 1 else 'have'} useful alt text"
@@ -469,7 +494,7 @@ def tech_17(ev: dict) -> Result:
     applicable = [r for r in rows if "match" in r and r.get("applicable", True)]
     excluded = len(rows) - len(applicable)
     if not applicable:
-        return "No page is of a type that needs structured data, so it gets a set score of 50.", 50.0
+        return "No page is of a type that needs structured data, so it gets a set score of 50.", 50.0   # rows saved before N/A
     matched = sum(1 for r in applicable if r.get("match"))
     score = matched / len(applicable) * 100
     ex = f" ({_plural(excluded, 'other page')} did not need it)" if excluded else ""

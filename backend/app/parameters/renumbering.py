@@ -43,4 +43,8 @@ def ids_before(current_ids) -> frozenset:
 
 # Parameters renamed without a change of id: saved rows keep the name they were scanned under,
 # so the old name is read as the new one.
-RENAMED = {"Wikidata/Wikipedia entry present and accurate": "Wikidata/Wikipedia entry present"}
+RENAMED = {
+    "Wikidata/Wikipedia entry present and accurate": "Wikidata/Wikipedia entry present",
+    "AI crawler permissions": "AI Crawlers Permitted in Robots.txt",                    # TECH-01
+    "No CDN/firewall blocking AI crawlers": "AI Crawlers Not Blocked by any CDN",         # TECH-02
+}

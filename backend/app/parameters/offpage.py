@@ -86,11 +86,14 @@ async def off_03(spec, ctx):
     found, profiles = f.values["platforms_found"], f.values["profiles"]
     name_share = sum(1 for v in profiles.values() if v["name_matches"]) / len(found) if found else 0.0
     loc_share = sum(1 for v in profiles.values() if v["location_matches"]) / len(found) if found else 0.0
+    if not f.evidence.get("site_locations"):
+        loc_share = None   # the site states no office location, so there is nothing to match
     checked = f.values["platforms_checked"]
     inputs = {"platforms_found": len(found), "platforms_total": scoring.presence_target(len(checked)),
               "name_share": name_share, "location_share": loc_share}
     score = scoring.off_03(**inputs)
-    evidence = {**f.evidence, "name_consistent_share": round(name_share, 3), "location_consistent_share": round(loc_share, 3)}
+    evidence = {**f.evidence, "name_consistent_share": round(name_share, 3),
+                "location_consistent_share": None if loc_share is None else round(loc_share, 3)}
     missing = [d for d in checked if d not in found]
     rec = None if score >= 90 else ("Create or claim company profiles on: " + ", ".join(missing) + ". " if missing else "") + "Use the same company name and office locations on every profile as on the website."
     return _row(spec, t, f, score, evidence, inputs, rec, confidence=0.5)
@@ -120,6 +123,8 @@ async def off_05(spec, ctx):
     found = f.values["platforms_found"]
     llm_match = f.values["llm_category_match"]
     category_match = f.values["rules_category_match"] if llm_match is None else llm_match
+    if not f.evidence.get("site_categories"):
+        category_match = None   # no category could be derived from the site, so none to compare
     checked = f.values["platforms_checked"]
     inputs = {"platforms_found": len(found), "platforms_total": scoring.presence_target(len(checked)),
               "category_match": category_match}
@@ -128,7 +133,7 @@ async def off_05(spec, ctx):
     missing = [d for d in checked if d not in found]
     rec = None if score >= 90 else " ".join(filter(None, [
         f"Claim and complete a profile on: {', '.join(missing)}." if missing else "",
-        "" if category_match else "List the company under the category it uses on its own site.",
+        "" if category_match or category_match is None else "List the company under the category it uses on its own site.",
     ]))
     return _row(spec, t, f, score, evidence, inputs, rec, confidence=0.5)
 
@@ -145,8 +150,14 @@ async def off_06(spec, ctx):
     volume = scoring.off_06_volume(inputs["review_results"])
     recency = scoring.off_06_recency(inputs["newest_review_age_days"])
     score = volume + recency
+    if inputs["review_results"] and inputs["newest_review_age_days"] is None:
+        # Reviews were found but none shows a date: recency cannot be measured, so volume
+        # carries the score instead of the review count being docked 40 for missing dates.
+        recency = None
+        score = volume / 60 * 100
     evidence = {**f.evidence, "volume_points": volume, "recency_points": recency}
-    rec = None if score >= 90 else "Ask customers for fresh reviews on G2, Clutch, Gartner Peer Insights and TrustRadius, and keep them coming steadily."
+    sites = ", ".join(f.evidence.get("platforms_checked") or [])
+    rec = None if score >= 90 else f"Ask customers for fresh reviews on the review sites ({sites}), and keep them coming steadily."
     return _row(spec, t, f, score, evidence, inputs, rec, confidence=0.4)
 
 

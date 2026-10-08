@@ -17,8 +17,8 @@ export function getStatus() {
   return fetch("/api/status").then(read);
 }
 
-export function getProgress(id) {
-  return fetch(`/api/scans/${id}/progress`).then(read);
+export function getProgress(id, signal) {
+  return fetch(`/api/scans/${id}/progress`, { signal }).then(read);
 }
 
 export function getReport(id) {
@@ -35,4 +35,13 @@ export function downloadUrl(id) {
 
 export function listScans() {
   return fetch("/api/scans").then(read);
+}
+
+// Re-run only a finished audit's unmeasured checks, against the pages it already read.
+export function startRecheck(id) {
+  return fetch(`/api/scans/${id}/recheck`, { method: "POST" }).then(read);
+}
+
+export function getRecheck(id) {
+  return fetch(`/api/scans/${id}/recheck`).then(read);
 }

@@ -23,7 +23,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Sequence
 
-from ..config import LLM_BATCH_CHARS, LLM_BATCH_SIZE, LLM_FULL_COVERAGE, LLM_MAX_ITEMS
+from ..config import LLM_BATCH_CHARS, LLM_BATCH_SIZE, LLM_FULL_COVERAGE, LLM_MAX_ITEMS, LLM_SAMPLE_BELOW_RPM
+from . import client
 from .client import judge
 from .prompts import SYSTEM
 
@@ -43,6 +44,7 @@ class Coverage:
     batches: int = 0
     batches_failed: int = 0
     capped: bool = False
+    sampled_for_rate: Optional[int] = None    # the requests-per-minute limit that forced a sample
     error: Optional[str] = None
     _errors: list[str] = field(default_factory=list, repr=False)
 
@@ -63,6 +65,9 @@ class Coverage:
         }
         if self.capped:
             out["capped_at"] = self.submitted
+        if self.sampled_for_rate:
+            out["sampled"] = (f"an evenly spread sample of {self.submitted} of {self.population} was judged, because the "
+                              f"AI is limited to {self.sampled_for_rate} requests per minute")
         if self.batches_failed:
             out["batches_failed"] = self.batches_failed
         if self.error:
@@ -95,6 +100,30 @@ def _chunk(items: Sequence[Any], size: int) -> list[list[Any]]:
     if current:
         batches.append(current)
     return batches
+
+
+def _fit_rate(submitted: list, batches: list[list], batch_size: int, coverage: Coverage) -> tuple[list, list[list]]:
+    """Under a low AI rate limit, keep about half a minute of calls: an evenly spread sample of the items.
+
+    Several checks share the limit, so each keeps rpm/2 batches (at least 3): at 10 per minute a
+    check judges 5 batches -- about 200 pages -- and ten such checks finish in about five minutes.
+
+    Spread across the whole population (every k-th item), not its first N, so the sample covers
+    the site rather than whichever pages the crawl reached first.
+    """
+    rpm = client.rpm_limit()
+    if not rpm or rpm >= LLM_SAMPLE_BELOW_RPM:
+        return submitted, batches
+    allowed = max(3, rpm // 2)
+    if len(batches) <= allowed:
+        return submitted, batches
+    keep = min(len(submitted), allowed * batch_size)
+    step = len(submitted) / keep
+    sample = [submitted[int(i * step)] for i in range(keep)]
+    coverage.capped = True
+    coverage.sampled_for_rate = rpm
+    coverage.submitted = len(sample)
+    return sample, _chunk(sample, batch_size)
 
 
 async def judge_all(
@@ -137,6 +166,7 @@ async def judge_all(
     coverage.submitted = len(submitted)
 
     batches = _chunk(submitted, batch_size)
+    submitted, batches = _fit_rate(submitted, batches, batch_size, coverage)
     coverage.batches = len(batches)
 
     async def run(batch: list) -> list[dict]:
@@ -194,6 +224,7 @@ async def judge_one(
     coverage.submitted = len(submitted)
 
     batches = _chunk(submitted, LLM_BATCH_SIZE)
+    submitted, batches = _fit_rate(submitted, batches, LLM_BATCH_SIZE, coverage)
     coverage.batches = len(batches)
 
     async def run(batch: list) -> dict:

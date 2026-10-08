@@ -25,10 +25,13 @@ from ..config import (
     GOOGLE_SEARCH_RESULTS,
     OPENAI_API_KEY,
     OPENAI_SEARCH_CONCURRENCY,
+    OPENAI_SEARCH_MAX_WAIT,
     OPENAI_SEARCH_MODEL,
+    OPENAI_SEARCH_RATE_LIMIT_WAITS,
     OPENAI_SEARCH_RETRIES,
     OPENAI_SEARCH_TIMEOUT,
 )
+from ..llm import client as llm_client
 from ..llm import usage
 from .google_search import SearchResult
 
@@ -37,8 +40,8 @@ _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # Each query is a full agent run with a web search, and the results it reads count against the
 # account's tokens-per-minute limit; a scan's off-page checks fire together, so few run at once.
 _semaphore = asyncio.Semaphore(max(1, OPENAI_SEARCH_CONCURRENCY))
-_RATE_LIMIT_WAITS = (10.0, 20.0, 40.0)   # seconds, when OpenAI does not say how long to wait
-_MAX_WAIT = 60.0
+_RATE_LIMIT_WAITS = OPENAI_SEARCH_RATE_LIMIT_WAITS or (10.0,)   # seconds, when OpenAI does not say how long to wait
+_MAX_WAIT = OPENAI_SEARCH_MAX_WAIT
 
 INSTRUCTIONS = (
     "You are a web search engine. Run a web search for the query you are given and return the "
@@ -155,6 +158,8 @@ async def _run(query: str, num: int):
     for attempt in range(OPENAI_SEARCH_RETRIES + 1):
         try:
             async with _semaphore:
+                # One search run is a model request to search plus one to answer.
+                await llm_client.pace(2)
                 return await asyncio.wait_for(
                     Runner.run(_search_agent(), f"Query: {query}\nReturn up to {num} results.",
                                run_config=RunConfig(tracing_disabled=True)),

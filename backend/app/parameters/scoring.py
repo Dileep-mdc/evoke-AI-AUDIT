@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from ..config import WEIGHTS
+from . import rules
 from .formula_simple import logic_for
 from .working import working_for
 
 # Stamped on every report so a report saved under an older method can be recognised and
 # recalculated (see api/scans.py::_current_report).
-SCORING_METHOD = "rules_fixed_points_v8"  # v8: ids renumbered 1..N; v7: OFF-01 yes/no; v6: OFF-08 retired
+SCORING_METHOD = "rules_weighted_pillars_v11"  # v10/11: no N/A, missing data fails at 0; v9: pillar weights hold
 
 
 def scored_rows(results: list[dict]) -> list[dict]:
@@ -48,15 +49,10 @@ def status_from_score(score: float, pass_at: float = 90, partial_at: float = 60)
     return "FAIL"
 
 
-def coefficients(results: list[dict]) -> dict[str, float]:
-    """Each parameter's fixed share, in points, of the 100 available points.
-
-    A section's weight is split over every parameter in it, measured or not (Technical
-    35 / 22, On-Page 40 / 20, Off-Page 25 / 10 with the shipped registry), so a parameter
-    is worth the same on every scan and two sites are always compared on one scale. An
-    UNKNOWN parameter keeps its share here; it is simply left out of the points that
-    could be measured (see measurable_points()), so it neither earns nor costs anything.
-    """
+def nominal_coefficients(results: list[dict]) -> dict[str, float]:
+    """Each parameter's share of 100 points if every check were measured: a pillar's weight split
+    over all its parameters (Technical 35 / 22, On-Page 40 / 20, Off-Page 25 / 9). Used where a
+    yardstick must not move with what a scan could measure -- the severity bands."""
     section_weight: dict[str, float] = {}
     for r in results:
         section_weight[r["section"]] = section_weight.get(r["section"], 0.0) + float(r.get("weight") or 1)
@@ -65,6 +61,48 @@ def coefficients(results: list[dict]) -> dict[str, float]:
         for r in results
         if r["section"] in WEIGHTS
     }
+
+
+def effective_weights(results: list[dict]) -> dict[str, float]:
+    """The pillar weights this scan's overall score uses: the stated ones (35 / 40 / 25), rescaled
+    over the pillars that have at least one measured check. A pillar with none drops out and the
+    others keep their proportions; otherwise these are exactly the stated weights."""
+    measured = {r["section"] for r in scored_rows(results)}
+    total = sum(w for s, w in WEIGHTS.items() if s in measured)
+    return {s: (w / total if s in measured and total else 0.0) for s, w in WEIGHTS.items()}
+
+
+def coefficients(results: list[dict]) -> dict[str, float]:
+    """Each parameter's share, in points, of the 100 available points on this scan.
+
+    A pillar's weight is split over the checks in it that were MEASURED. Splitting it over every
+    check, measured or not, and then dropping the unmeasured ones from the total silently shifted
+    the pillar weights: a scan with 7 unmeasured On-Page checks weighted the pillars about
+    44 / 24 / 33 instead of the 35 / 40 / 25 the report states, so the overall score and the
+    footer formula disagreed and the per-check score impacts did not add up to the points lost.
+    Now overall = 0.35 x Technical + 0.40 x On-Page + 0.25 x Off-Page exactly, and every check's
+    points lost are on that scale and add up to 100 - overall.
+
+    An unmeasured check earns and costs nothing; its entry here is its nominal share, shown only
+    so a reader can see what it would have been worth.
+    """
+    eff = effective_weights(results)
+    scored = scored_rows(results)
+    measured_ids = {r["parameter_id"] for r in scored}
+    measured_weight: dict[str, float] = {}
+    for r in scored:
+        measured_weight[r["section"]] = measured_weight.get(r["section"], 0.0) + float(r.get("weight") or 1)
+    nominal = nominal_coefficients(results)
+    out = {}
+    for r in results:
+        if r["section"] not in WEIGHTS:
+            continue
+        pid = r["parameter_id"]
+        if pid in measured_ids:
+            out[pid] = float(r.get("weight") or 1) / measured_weight[r["section"]] * eff[r["section"]] * 100
+        else:
+            out[pid] = nominal[pid]
+    return out
 
 
 def contributions(results: list[dict]) -> list[dict]:
@@ -151,6 +189,11 @@ def overall_score(results: list[dict]) -> float | None:
     return round(earned / measurable * 100, 1)
 
 
+def display_status(row: dict) -> str:
+    """The verdict a reader sees."""
+    return (row.get("status") or "UNKNOWN").upper()
+
+
 def status_counts(results: list[dict]) -> dict:
     counts = {"pass": 0, "partial": 0, "fail": 0, "unknown": 0}
     for r in results:
@@ -176,8 +219,8 @@ def label_for_score(score: float | None) -> str:
 
 # Severity bands are fractions of the mean parameter coefficient rather than fixed point
 # values, so the bands follow the registry's section sizes and weights if those change.
-HIGH_IMPACT_SHARE = 0.8
-MEDIUM_IMPACT_SHARE = 0.4
+HIGH_IMPACT_SHARE = rules.threshold("impact_shares", "high")
+MEDIUM_IMPACT_SHARE = rules.threshold("impact_shares", "medium")
 
 
 def prioritize(results: list[dict]) -> list[dict]:
@@ -187,9 +230,9 @@ def prioritize(results: list[dict]) -> list[dict]:
     if not scored:
         return []
     points_lost = {c["parameter_id"]: c["points_lost"] for c in scored}
-    # Banded on every parameter's fixed share, not just the measured ones, so a check's
-    # severity does not move when unrelated checks happen to be unmeasurable on this scan.
-    fixed = coefficients(results)
+    # Banded on every parameter's nominal share, so the bands themselves do not move when
+    # unrelated checks happen to be unmeasurable on this scan.
+    fixed = nominal_coefficients(results)
     mean_coefficient = sum(fixed.values()) / len(fixed)
     high = mean_coefficient * HIGH_IMPACT_SHARE
     medium = mean_coefficient * MEDIUM_IMPACT_SHARE
@@ -271,6 +314,9 @@ def build_report(scan: dict, results: list[dict], issues: list[dict]) -> dict:
             "off_page": label_for_score(offpage),
         },
         "weights": WEIGHTS,
+        # The weights the overall score actually used: the stated ones unless a whole pillar
+        # could not be measured, in which case the others are rescaled in proportion.
+        "effective_weights": {s: round(w, 4) for s, w in effective_weights(results).items()},
         # Points earned per pillar, out of that pillar's fixed share of 100.
         "category_contributions": {
             section: round(earned_by_section.get(section, 0.0), 3) for section in WEIGHTS

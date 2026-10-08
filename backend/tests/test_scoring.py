@@ -104,28 +104,32 @@ def test_earned_plus_lost_equals_the_ceiling():
         assert round(c["points_earned"] + c["points_lost"], 9) == round(c["coefficient"], 9)
 
 
-def test_unknown_rows_keep_their_fixed_share_and_are_left_out_of_what_was_measured():
-    """An UNKNOWN is excluded, not scored zero -- and its points are NOT handed to its
-    siblings: every parameter is worth the same fixed share on every scan, so two sites
-    are always compared on one scale."""
-    half_off_page_missing = {f"OFF-{i:02d}" for i in range(1, 6)}
-    rows = _rows(unknown=half_off_page_missing)
-    coeffs = coefficients(rows)
-
-    assert len(coeffs) == 51
-    assert round(sum(coeffs.values()), 9) == 100.0
-    assert round(coeffs["OFF-08"], 4) == round(WEIGHTS["off_page"] / 9 * 100, 4)
-    assert round(coeffs["TECH-01"], 4) == round(WEIGHTS["technical"] / 22 * 100, 4)
-    assert round(measurable_points(rows), 9) == round(100 - 5 * WEIGHTS["off_page"] / 9 * 100, 9)
-    earned = sum(c["points_earned"] for c in contributions(rows))
-    assert abs(_reported(rows) - earned / measurable_points(rows) * 100) <= 0.05
+def test_unmeasured_checks_do_not_shift_the_pillar_weights():
+    """The reviewer's case: with unmeasured checks the overall score must still be the stated
+    35 / 40 / 25 blend of the pillar scores, not a re-weighting by how many checks ran."""
+    rows = _rows({f"TECH-{i:02d}": 60.0 for i in range(1, 23)} | {f"ON-{i:02d}": 30.0 for i in range(1, 21)}
+                 | {f"OFF-{i:02d}": 45.0 for i in range(1, 10)},
+                 unknown={f"ON-{i:02d}" for i in range(1, 8)} | {"TECH-01", "TECH-06", "OFF-08"})
+    tech, onpage, offpage = (category_score(rows, s) for s in ("technical", "on_page", "off_page"))
+    blend = 0.35 * tech + 0.40 * onpage + 0.25 * offpage
+    assert abs(_reported(rows) - blend) <= 0.05
+    for section in ("technical", "on_page", "off_page"):
+        assert round(measurable_points(rows, section), 9) == round(WEIGHTS[section] * 100, 9)
 
 
-def test_a_silent_section_is_left_out_of_the_measurable_points():
+def test_points_lost_add_up_to_what_the_overall_score_is_missing():
+    rows = _rows({"ON-05": 0.0, "OFF-07": 10.0, "TECH-04": 80.0}, unknown={f"ON-{i:02d}" for i in range(10, 16)})
+    lost = sum(c["points_lost"] for c in contributions(rows))
+    assert abs((100 - _reported(rows)) - lost) <= 0.05
+
+
+def test_a_silent_section_drops_out_and_the_others_keep_their_proportions():
     rows = _rows(unknown={f"OFF-{i:02d}" for i in range(1, 10)})
-    assert round(measurable_points(rows), 9) == 75.0
+    assert round(measurable_points(rows), 9) == 100.0
     assert not any(c["section"] == "off_page" for c in contributions(rows))
-    assert round(coefficients(rows)["TECH-01"], 4) == round(35 / 22, 4)
+    assert round(coefficients(rows)["TECH-01"], 6) == round(35 / 75 * 100 / 22, 6)
+    tech, onpage = category_score(rows, "technical"), category_score(rows, "on_page")
+    assert abs(_reported(rows) - (35 * tech + 40 * onpage) / 75) <= 0.05
 
 
 def test_the_rules_based_score_is_the_final_score_for_old_saved_rows():
@@ -166,16 +170,15 @@ def test_prioritize_ranks_by_points_and_bands_severity():
 BANDS = ["Low Impact", "Medium Impact", "High Impact"]
 
 
-def test_an_unmeasured_sibling_does_not_change_what_a_failure_costs():
-    """Fixed points: a check's cost depends on its own score, not on how many of its
-    siblings happened to be measurable on this scan."""
+def test_a_check_s_cost_is_on_the_same_scale_as_the_overall_score():
+    """With siblings unmeasured, a measured check carries more of its pillar, so it costs more --
+    exactly as much as it moves the overall score. The severity yardstick stays put."""
     intact = prioritize(_rows({"OFF-08": 70.0}))
     degraded = prioritize(_rows({"OFF-08": 70.0}, unknown={f"OFF-{i:02d}" for i in range(1, 6)}))
-
     before = next(i for i in intact if i["parameter_id"] == "OFF-08")
     after = next(i for i in degraded if i["parameter_id"] == "OFF-08")
-    assert after["score_impact"] == before["score_impact"]
-    assert after["severity"] == before["severity"]
+    assert before["score_impact"] == -0.833 and after["score_impact"] == -1.875   # 25/9 vs 25/4 of the pillar, x 0.30
+    assert before["severity"] in BANDS and after["severity"] in BANDS
 
 
 def test_severity_discriminates_across_all_three_bands():

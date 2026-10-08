@@ -67,10 +67,11 @@ DB_PATH = DATA_DIR / "scans.db"
 REGISTRY_PATH = Path(__file__).resolve().parent / "parameters" / "registry.json"
 
 ENGINE_VERSION = "1.0.0"
-CRAWLER_UA = "AIVisibilityAuditBot/1.0 (compatible; automated site audit tool)"
-BROWSER_UA = (
+CRAWLER_UA = os.getenv("CRAWLER_UA", "AIVisibilityAuditBot/1.0 (compatible; automated site audit tool)")
+BROWSER_UA = os.getenv(
+    "BROWSER_UA",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
 )
 # High ceilings, not typical-case limits: the crawler is meant to cover every page of the
 # audited site. These only kick in as a safety net for pathological cases (e.g. a site with
@@ -87,9 +88,11 @@ CONCURRENCY = int(os.getenv("CONCURRENCY", "24"))
 # fail for different reasons: a slow page is worth waiting for, an unroutable host is not.
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "20"))
 CONNECT_TIMEOUT = float(os.getenv("CONNECT_TIMEOUT", "8"))
-RETRIES = 2
-MAX_REDIRECTS = 8
-MAX_BODY_BYTES = 2_000_000
+RETRIES = int(os.getenv("RETRIES", "2"))
+MAX_REDIRECTS = int(os.getenv("MAX_REDIRECTS", "8"))
+MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", "2000000"))
+# Base pause before retrying a transient HTTP failure; the Nth retry waits N times this.
+RETRY_BACKOFF_SECONDS = float(os.getenv("RETRY_BACKOFF_SECONDS", "0.4"))
 # How many extra "keep following newly-discovered same-host links" rounds
 # crawl_site() runs after the first pass (crawler/discover.py). Each round is a
 # further batch of fetches, so this bounds that cost on a large site; a round
@@ -156,11 +159,14 @@ RENDER_DELTA_THRESHOLD = float(os.getenv("RENDER_DELTA_THRESHOLD", "0.25"))
 # rendering ahead of fuller pages. A real content page under this many words is rare; a
 # mounted-by-framework <div id="root"> is reliably beneath it.
 RENDER_SHELL_WORDS = int(os.getenv("RENDER_SHELL_WORDS", "120"))
+# After the DOM is parsed, how long to keep waiting for the network to go quiet (crawler/render.py).
+# Expected to expire routinely on sites with analytics beacons or chat widgets; expiry is not an error.
+RENDER_NETWORK_IDLE_MS = int(os.getenv("RENDER_NETWORK_IDLE_MS", "2500"))
 
 # Parameter-evaluation concurrency/timeout (separate from crawl CONCURRENCY above).
 # The timeout covers the rules-based handler only -- the model judgement that follows it
 # has its own budget below, so a slow grader cannot eat the crawl's time and vice versa.
-PARAMETER_CONCURRENCY = 6
+PARAMETER_CONCURRENCY = int(os.getenv("PARAMETER_CONCURRENCY", "6"))
 # Sized for full-coverage classification (see LLM_FULL_COVERAGE): a handler that puts every
 # heading or every list on a 750-page site in front of the model runs tens of batched calls
 # inside this one budget. At the old 60s, ON-12 timed out on a mid-size site and the whole
@@ -186,13 +192,32 @@ JUDGEMENT_TIMEOUT = float(os.getenv("JUDGEMENT_TIMEOUT", "240"))
 ENABLE_LLM_SCORING = os.getenv("ENABLE_LLM_SCORING", "false").strip().lower() in {"1", "true", "yes"}
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
-LLM_TIMEOUT = 20.0
-LLM_RETRIES = 2
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "20"))
+LLM_RETRIES = int(os.getenv("LLM_RETRIES", "2"))
+# Pause before retrying a failed model call; the Nth retry waits N times this.
+LLM_RETRY_BACKOFF_SECONDS = float(os.getenv("LLM_RETRY_BACKOFF_SECONDS", "0.6"))
+# Rate-limit (HTTP 429) refusals get their own, longer, exponential schedule (llm/client.py):
+# this many retries, starting near the base and never sleeping longer than the max.
+LLM_RATE_LIMIT_RETRIES = int(os.getenv("LLM_RATE_LIMIT_RETRIES", "5"))
+LLM_RATE_LIMIT_BASE_SECONDS = float(os.getenv("LLM_RATE_LIMIT_BASE_SECONDS", "2"))
+LLM_RATE_LIMIT_MAX_SLEEP = float(os.getenv("LLM_RATE_LIMIT_MAX_SLEEP", "30"))
 # Now the binding constraint, and no longer tied to PARAMETER_CONCURRENCY. Under
 # LLM_FULL_COVERAGE a single handler fans out into many batched classification calls at once,
 # so the in-flight ceiling has to be higher than the number of parameters running. Rate-limit
 # responses are absorbed by client.py's separate RATE_LIMIT_RETRIES budget with backoff.
 LLM_CONCURRENCY = int(os.getenv("LLM_CONCURRENCY", "12"))
+# Requests per minute the OpenAI project allows. 0 (the default) learns it from OpenAI's first
+# rate-limit refusal, which names the limit; set it to pace from the very first call.
+LLM_RPM_LIMIT = int(os.getenv("LLM_RPM_LIMIT", "0"))
+# Below this many requests per minute, a check judges an evenly spread SAMPLE of its items --
+# about half a minute of calls -- instead of every item. Full coverage of a 2,000-page site is ~550
+# calls; at 10 per minute that is an hour, and the checks hit PARAMETER_TIMEOUT and came back
+# unscored. The evidence states the sample ("judged 400 of 2,313") and the reason.
+LLM_SAMPLE_BELOW_RPM = int(os.getenv("LLM_SAMPLE_BELOW_RPM", "120"))
+# TECH-06 re-requests the internal links the crawl never fetched (beyond MAX_PAGES, or failed
+# discovery), up to this many. A large site can have tens of thousands; the crawl already answered
+# for every page it fetched, so the rest are sampled and the evidence says how many were left.
+LINK_RECHECK_LIMIT = int(os.getenv("LINK_RECHECK_LIMIT", "300"))
 # A separate budget for the one call per parameter that produces the reported score, so it
 # never waits behind a handler's classification fan-out. Sized to PARAMETER_CONCURRENCY:
 # at most that many parameters are in flight, so at most that many scoring calls exist, and
@@ -248,13 +273,21 @@ OPENAI_SEARCH_TIMEOUT = float(os.getenv("OPENAI_SEARCH_TIMEOUT", "90"))
 # OpenAI asks, or 10, 20 then 40 seconds. Four at once tripped the limit and blanked OFF-07.
 OPENAI_SEARCH_CONCURRENCY = int(os.getenv("OPENAI_SEARCH_CONCURRENCY", "2"))
 OPENAI_SEARCH_RETRIES = int(os.getenv("OPENAI_SEARCH_RETRIES", "3"))
+# Seconds to wait before each rate-limit retry when OpenAI does not say how long (comma-separated;
+# the last value repeats), and the ceiling on any wait OpenAI does ask for.
+OPENAI_SEARCH_RATE_LIMIT_WAITS = tuple(
+    float(w) for w in os.getenv("OPENAI_SEARCH_RATE_LIMIT_WAITS", "10,20,40").split(",") if w.strip())
+OPENAI_SEARCH_MAX_WAIT = float(os.getenv("OPENAI_SEARCH_MAX_WAIT", "60"))
 WIKIDATA_API = os.getenv("WIKIDATA_API", "https://www.wikidata.org/w/api.php")
 WIKIPEDIA_API = os.getenv("WIKIPEDIA_API", "https://en.wikipedia.org/w/api.php")
 # Wikimedia's API policy asks clients to name themselves. Requests sent as a generic browser were
 # throttled to HTTP 429 from the second search on, so a Wikidata retry by the company's short
 # name came back "unavailable" -- and OFF-01/OFF-02 UNKNOWN -- for a company that is listed.
+# AUDIT_CONTACT_URL is the operator's contact (a website or mailto:) the policy asks to be included.
+AUDIT_CONTACT_URL = os.getenv("AUDIT_CONTACT_URL", "").strip()
 WIKIMEDIA_USER_AGENT = os.getenv(
-    "WIKIMEDIA_USER_AGENT", "AIVisibilityAudit/1.0 (https://www.evoketechnologies.com; website audit tool)")
+    "WIKIMEDIA_USER_AGENT",
+    f"AIVisibilityAudit/1.0 ({AUDIT_CONTACT_URL + '; ' if AUDIT_CONTACT_URL else ''}website audit tool)")
 # Language edition for the Wikipedia/Wikidata lookups. Was implicit in the "en." hostname and
 # the hardcoded "language=en" query argument, so auditing a non-English company meant editing
 # two unrelated string literals.
@@ -266,6 +299,14 @@ ENTITY_SEARCH_LIMIT = int(os.getenv("ENTITY_SEARCH_LIMIT", "5"))
 # Verification is recorded as evidence and never changes a score.
 OFFPAGE_VERIFY_SOURCES = int(os.getenv("OFFPAGE_VERIFY_SOURCES", "3"))
 OFFPAGE_VERIFY_TIMEOUT = float(os.getenv("OFFPAGE_VERIFY_TIMEOUT", "15"))
+# Characters of a verified source page's text kept for the agents to read.
+OFFPAGE_SOURCE_TEXT_CHARS = int(os.getenv("OFFPAGE_SOURCE_TEXT_CHARS", "20000"))
+# The "view this search" link shown beside a search-based check; the query is appended URL-encoded.
+SEARCH_DISPLAY_URL = os.getenv("SEARCH_DISPLAY_URL", "https://www.google.com/search?q=")
+
+# AI crawlers whose access TECH-01/TECH-02 check in robots.txt and with a live request (comma-separated).
+AI_BOTS = [b.strip() for b in os.getenv(
+    "AI_BOTS", "GPTBot,ChatGPT-User,ClaudeBot,Google-Extended,Googlebot").split(",") if b.strip()]
 
 # Core Web Vitals for TECH-07 (crawler/vitals.py). Field data first: Google's Chrome UX Report
 # API, the real-user LCP/INP/CLS Google itself uses. It takes a Google Cloud API key with the
@@ -296,6 +337,14 @@ OPENAI_SEARCH_PRICE_PER_CALL = float(os.getenv("OPENAI_SEARCH_PRICE_PER_CALL", "
 # how much of the site was judged) and the remaining checks keep their rules-based scores.
 LLM_SCAN_BUDGET_USD = float(os.getenv("LLM_SCAN_BUDGET_USD", "0"))
 
-WEIGHTS = {"technical": 0.35, "on_page": 0.40, "off_page": 0.25}
+# Stored scan output (scan_output.py): gzip level for the saved pages, and threads writing them.
+OUTPUT_GZIP_LEVEL = int(os.getenv("OUTPUT_GZIP_LEVEL", "6"))
+OUTPUT_WRITE_WORKERS = int(os.getenv("OUTPUT_WRITE_WORKERS", "8"))
+
+# Section weights are scoring methodology, so they live with the other scoring rules in
+# parameters/scoring_rules.json (overridable via SCORING_RULES_PATH).
+from .parameters import rules as _rules  # noqa: E402  (needs the .env loaded above)
+
+WEIGHTS = {k: v for k, v in _rules.all_rules()["thresholds"]["section_weights"].items() if not k.startswith("_")}
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)

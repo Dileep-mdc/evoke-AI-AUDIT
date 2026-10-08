@@ -5,10 +5,9 @@ from urllib.parse import urljoin
 
 from protego import Protego
 
+from ..config import AI_BOTS
 from .http import FetchResult, fetch
 
-
-AI_BOTS = ["GPTBot", "ChatGPT-User", "ClaudeBot", "Google-Extended", "PerplexityBot"]
 
 
 @dataclass

@@ -32,6 +32,7 @@ from urllib.parse import quote_plus, urlparse
 from ..config import (
     BROWSER_UA,
     ENTITY_SEARCH_LIMIT,
+    OFFPAGE_SOURCE_TEXT_CHARS,
     OFFPAGE_VERIFY_TIMEOUT,
     REFERENCE_LANGUAGE,
     SEARCH_PROVIDER,
@@ -45,9 +46,10 @@ from ..crawler.openai_search import configured as openai_configured
 from ..crawler.openai_search import openai_search
 from ..crawler.http import fetch
 from ..crawler.parse import make_soup
+from .common import drop_acronym
 
 _LIST_TITLE = re.compile(r"\b(best|top|leading)\b", re.I)
-_TEXT_LIMIT = 20_000
+_TEXT_LIMIT = OFFPAGE_SOURCE_TEXT_CHARS
 
 
 # ---------------------------------------------------------------------------------------------
@@ -89,9 +91,13 @@ def short_name(company_name: str) -> str:
 
 
 def name_variants(company_name: str) -> list[str]:
-    """The names to search, in order: the full name, then the short name when it differs."""
-    short = short_name(company_name)
-    return [company_name] if not short or short == company_name else [company_name, short]
+    """The names to search, in order: the full name, then without its legal form, then without
+    an abbreviation of itself ("... Surgeons AAOS"), each only when it differs."""
+    out = [company_name]
+    for variant in (short_name(company_name), short_name(drop_acronym(company_name))):
+        if variant and variant not in out:
+            out.append(variant)
+    return out
 
 
 def _cache(ctx, name: str) -> Optional[dict]:
@@ -173,11 +179,28 @@ def wikipedia_search_url(company_name: str) -> str:
     return f"{WIKIPEDIA_API}?action=query&list=search&srsearch={quote_plus(company_name)}&utf8=1&format=json"
 
 
+def _search_page(api: str, name: str, extra: str) -> str:
+    """The site's own search page for `name`: what a reader opens to see the result for themselves.
+    The API URLs above are what the check reads, but they return raw JSON, so they make poor citations."""
+    u = urlparse(api)
+    return f"{u.scheme}://{u.netloc}/w/index.php?search={quote_plus(name)}&title=Special:Search&{extra}"
+
+
+def wikidata_search_page(name: str) -> str:
+    return _search_page(WIKIDATA_API, name, "ns0=1")
+
+
+def wikipedia_search_page(name: str) -> str:
+    # fulltext=1 lists the matching articles instead of jumping to a page whose title happens to match.
+    return _search_page(WIKIPEDIA_API, name, "fulltext=1")
+
+
 async def _by_name(company_name: str, ctx, url_for, hits_of) -> tuple[dict | None, dict]:
     """Search by the full name, then by the short name when the full one has no hits."""
     data, meta = None, {}
     for name in name_variants(company_name):
         data, meta = await _json(url_for(name), ctx)
+        meta = {**meta, "name": name}   # the name actually searched, for the citation
         if data is None or hits_of(data):
             break
     return data, meta
@@ -226,7 +249,26 @@ async def extract_content(page) -> dict:
 def extract_entity(hits: list[dict], company_name: str, field: str = "label") -> Optional[dict]:
     """The search hit that is this company: the first whose name (`field`: a Wikidata "label"
     or a Wikipedia "title") names the company, per names_company(). None when no hit does."""
-    return next((h for h in hits or [] if names_company(h.get(field) or "", company_name)), None)
+    hits = hits or []
+    wanted = _core_name(company_name)
+    # A hit whose name IS the company's beats one that merely contains it. "Journal of the American
+    # Academy of Orthopaedic Surgeons" contains the academy's name and came first in Wikidata's
+    # results, so taking the first containing hit credited the academy with its journal's entry.
+    exact = next((h for h in hits if wanted and _core_name(h.get(field) or "") == wanted), None)
+    if exact:
+        return exact
+    return next((h for h in hits if names_company(h.get(field) or "", company_name)
+                 and not _NOT_AN_ORGANISATION.search(h.get("description") or "")), None)
+
+
+# Wikidata descriptions of things that carry an organisation's name without being it.
+_NOT_AN_ORGANISATION = re.compile(
+    r"\b(scientific article|journal|periodical|book|film|album|song|video game|episode|painting|thesis)\b", re.I)
+
+
+def _core_name(name: str) -> str:
+    """A name reduced to what identifies it: no "(disambiguation)", legal form or abbreviation."""
+    return _plain(short_name(drop_acronym(re.sub(r"\s*\([^)]*\)", " ", name or ""))))
 
 
 def extract_company_details(items: list[dict], domains: tuple[str, ...], brand_terms: list[str], locations: list[str]) -> dict:
@@ -260,7 +302,7 @@ def names_company(candidate: str, company_name: str) -> bool:
     does not name "Evoke Technologies", although both start with "Evoke". Matching on the
     first word alone made every same-first-word company look like a match.
     """
-    wanted = _plain(short_name(company_name))
+    wanted = _plain(short_name(drop_acronym(company_name)))
     return bool(wanted) and f" {wanted} " in f" {_plain(candidate)} "
 
 
