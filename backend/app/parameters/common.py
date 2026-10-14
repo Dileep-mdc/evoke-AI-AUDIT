@@ -123,6 +123,27 @@ NO_DATA_ADVICE = {
 }
 
 
+NOT_APPLICABLE = "N/A"
+
+
+def not_applicable(spec: dict, *, reason: str, checked: str, evidence: Optional[dict] = None,
+                   duration_ms: int = 0) -> dict:
+    """A check that does not apply to this site: status N/A, no score, left out of the pillar score.
+
+    Different from no_data(), which fails a site for lacking something it should have. N/A is only
+    for a check whose question does not arise: hreflang on a site that serves one market, IT
+    certification tiers for a medical association. `reason` says why, and is shown in the report.
+    The evidence key is `does_not_apply`, not the retired `not_applicable`/`na_reason`, so
+    upgrade_na_row() leaves these rows as they are.
+    """
+    ev = {**(evidence or {}), "does_not_apply": reason, "retry_pointless": True,
+          "summary": f"Not applicable: {reason}."}
+    row = result(spec, score=None, unknown=True, evidence=ev, recommendation=None, checked=checked,
+                 duration_ms=duration_ms)
+    row.update(status=NOT_APPLICABLE, confidence=0.9)
+    return row
+
+
 def no_data(spec: dict, *, reason: str, checked: str, evidence: Optional[dict] = None,
             recommendation: Optional[str] = None, duration_ms: int = 0) -> dict:
     """A check that found none of what it looks for on the site: a FAIL at 0, with the fix.
@@ -267,6 +288,32 @@ def flatten_schema(blocks: list) -> list[dict]:
         if block.get("ok"):
             walk(block.get("data"))
     return items
+
+
+def _person(value) -> Optional[dict]:
+    """A named person from a structured-data author or Person node, or None (an Organization is not one)."""
+    if isinstance(value, list):
+        return next((p for p in (_person(v) for v in value) if p), None)
+    if isinstance(value, str):
+        return {"name": value.strip()} if value.strip() else None
+    if isinstance(value, dict) and "Organization" not in str(value.get("@type")):
+        name = str(value.get("name") or "").strip()
+        if name:
+            return {k: value.get(k) for k in ("name", "jobTitle", "url", "@type") if value.get(k)}
+    return None
+
+
+def structured_authors(schema_blocks: list) -> list[dict]:
+    """The people a page's structured data names as authors: Person nodes, and the people named in
+    `author` fields -- including an author nested inside an Article or BlogPosting, which is where
+    most sites put it. TECH-18 (is there author markup?) and ON-12 (does it name a real person with
+    a role?) both read this, so they cannot disagree about whether authors are marked up at all."""
+    people = []
+    for item in flatten_schema(schema_blocks):
+        person = _person(item) if "Person" in str(item.get("@type")) else _person(item.get("author"))
+        if person:
+            people.append(person)
+    return people
 
 
 def is_question(text: str) -> bool:

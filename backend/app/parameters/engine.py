@@ -161,8 +161,11 @@ async def apply_judgement(spec: dict, row: dict) -> dict:
         evidence["llm_skipped"] = "not sent for judgement: the rules-based pass could not evaluate this parameter"
         row["evidence"] = evidence
         row["score"] = None
-        row["status"] = "UNKNOWN"
-        row["confidence"] = 0.0
+        if row.get("status") != "N/A":
+            # A check that does not apply (common.not_applicable) keeps saying so; anything
+            # else unscored could not be measured.
+            row["status"] = "UNKNOWN"
+            row["confidence"] = 0.0
         return row
     # Recorded before the call, not after, so a judgement that times out or raises still
     # shows the reader what was going to be graded -- the one column this whole pass exists

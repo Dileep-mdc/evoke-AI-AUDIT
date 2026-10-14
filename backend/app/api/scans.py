@@ -209,13 +209,13 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None, choice
                 by_id[row["parameter_id"]] = row
             results = [by_id[s["parameter_id"]] for s in registry if s["parameter_id"] in by_id]
             repo.update(scan_id, errors_count=sum(1 for r in results if r.get("error")))
-        # Read the checks together: explain results that look contradictory, and lift a gating
-        # issue (AI crawlers blocked) above everything else. Annotated rows are saved again.
+        # Read the checks together and explain results that look contradictory. Annotated rows
+        # are saved again.
         findings = crosschecks.reconcile(results, ctx)
         for row in results:
             if "cross_check" in (row.get("evidence") or {}):
                 repo.save_parameter(scan_id, row)
-        issues = crosschecks.gating_first(prioritize(results), findings["gating"])
+        issues = prioritize(results)
         repo.save_issues(scan_id, issues)
         completed = datetime.now(timezone.utc).isoformat()
         repo.update(scan_id, completed_at=completed, progress_percent=100)
@@ -228,7 +228,6 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None, choice
         report["platforms"] = ctx.platforms
         report["industry"] = ctx.industry
         report["identity"] = ctx.identity
-        report["gating"] = findings["gating"]
         report["cross_checks"] = findings["cross_checks"]
         report["content_analysis"] = crosschecks.content_analysis(ctx)
         report["ai_usage"] = {**meter.as_dict(), "pages": len(ctx.pages), "estimate": _estimates.get(scan_id)}
@@ -316,7 +315,7 @@ def _carried(report: dict) -> dict:
     """What a finished audit established about the site, kept when its report is rebuilt."""
     out = {"snapshot": report.get("snapshot") or {}}
     # Recalculating a saved report is not a new report: it keeps the time it was generated.
-    for key in ("platforms", "ai_usage", "industry", "identity", "gating", "cross_checks", "content_analysis",
+    for key in ("platforms", "ai_usage", "industry", "identity", "cross_checks", "content_analysis",
                 "generated_at", "audited_at"):
         if key in report:
             out[key] = report[key]
@@ -357,7 +356,7 @@ async def execute_recheck(scan_id: str, ids: list[str]) -> None:
         for row in results:
             if row["parameter_id"] in noted or "cross_check" in (row.get("evidence") or {}):
                 repo.save_parameter(scan_id, row)
-        issues = crosschecks.gating_first(prioritize(results), findings["gating"])
+        issues = prioritize(results)
         repo.save_issues(scan_id, issues)
         report = build_report(repo.get(scan_id), results, issues)
         report.update(_carried(old))
@@ -365,7 +364,6 @@ async def execute_recheck(scan_id: str, ids: list[str]) -> None:
         # the website itself was read, which the re-check did not repeat.
         report["audited_at"] = old.get("audited_at") or old.get("generated_at")
         report["generated_at"] = datetime.now(timezone.utc).isoformat()
-        report["gating"] = findings["gating"]
         report["cross_checks"] = findings["cross_checks"]
         # The re-check's AI spend is kept apart from the audit's, which estimates the next audit.
         report["rechecked"] = {"at": datetime.now(timezone.utc).isoformat(), "parameters": ids, "ai_usage": meter.as_dict()}
@@ -407,7 +405,7 @@ def _current_report(scan_id: str) -> dict | None:
     for row in results:
         if upgrade_na_row(row):
             repo.save_parameter(scan_id, row)
-    issues = crosschecks.gating_first(prioritize(results), report.get("gating"))
+    issues = prioritize(results)
     fresh = build_report(scan, results, issues)
     fresh.update(_carried(report))
     if "rechecked" in report:

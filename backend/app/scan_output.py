@@ -475,6 +475,7 @@ STATUS_MEANING = {
     "PARTIAL": "Requirement is partially met - some, but not all, criteria were satisfied.",
     "FAIL": "Requirement is not met and needs attention.",
     "UNKNOWN": "Could not be determined automatically (e.g. blocked page, missing data, or manual check needed).",
+    "N/A": "Does not apply to this site (e.g. hreflang on a single-market site); left out of the score.",
 }
 SCORE_BANDS = [
     ("Excellent", "90-100"),
@@ -798,8 +799,6 @@ def build_excel(report: dict, registry: list[dict]) -> bytes:
         kv("Industry Profile", f"{ind.get('label')} ({'detected from the site' if ind.get('detected') else 'chosen for this scan'})")
     if report.get("content_analysis"):
         kv("Content Analysed From", report["content_analysis"].get("summary"))
-    if report.get("gating"):
-        kv("Gating Issue", report["gating"].get("detail"), bold_value=True)
     points = report.get("points") or {}
     if points:
         kv("Points Earned / Measurable", f"{points.get('earned', 0):.2f} / {points.get('measurable', 0):.2f}")

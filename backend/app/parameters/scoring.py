@@ -7,7 +7,7 @@ from .working import working_for
 
 # Stamped on every report so a report saved under an older method can be recognised and
 # recalculated (see api/scans.py::_current_report).
-SCORING_METHOD = "rules_weighted_pillars_v11"  # v10/11: no N/A, missing data fails at 0; v9: pillar weights hold
+SCORING_METHOD = "rules_weighted_pillars_v13"  # v13: N/A for checks that do not apply; v12: no gating banner; v10/11: no N/A, missing data fails at 0; v9: pillar weights hold
 
 
 def scored_rows(results: list[dict]) -> list[dict]:
@@ -239,7 +239,7 @@ def prioritize(results: list[dict]) -> list[dict]:
 
     issues = []
     for r in results:
-        if r["status"] in {"UNKNOWN", "PASS"}:
+        if r["status"] in {"UNKNOWN", "PASS", "N/A"}:
             continue
         impact = points_lost.get(r["parameter_id"])
         if impact is None:

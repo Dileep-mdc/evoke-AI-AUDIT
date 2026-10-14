@@ -85,6 +85,11 @@ def detect(ctx) -> dict:
             "signals": {k: v for k, v in sig.items() if v["score"]}}
 
 
+def not_applicable(ctx, parameter_id: str) -> Optional[str]:
+    """Why a check does not apply to this site's industry, or None when it does."""
+    return (profile((getattr(ctx, "industry", None) or {}).get("key")).get("not_applicable") or {}).get(parameter_id)
+
+
 def chosen(key: str) -> dict:
     return {"key": key, "label": profile(key)["label"], "detected": False, "signals": {}}
 

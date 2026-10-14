@@ -43,8 +43,12 @@ function prettyKey(key) {
 function issueText(p) {
   if (p.status === "PASS") return "—";
   if (p.status === "UNKNOWN") return "Source unavailable";
+  if (p.status === "N/A") return "Not applicable";
   return p.status;
 }
+
+// "N/A" is not a usable CSS class name, so its badge is styled as "NA".
+const badgeClass = (status) => (status === "N/A" ? "NA" : status);
 
 function parseEvidence(evidence) {
   if (evidence == null || evidence === "") return {};
@@ -210,6 +214,7 @@ function fixText(p) {
   if (p.recommendation) return p.recommendation;
   if (p.status === "PASS") return "No change required.";
   if (p.status === "UNKNOWN") return "Not measured, so no fix can be recommended yet.";
+  if (p.status === "N/A") return "Not applicable to this site, so there is nothing to fix.";
   return "Improve this parameter against its Score Logic; see the evidence for what fell short.";
 }
 
@@ -239,9 +244,16 @@ function ScoreCalculation({ p }) {
           Nothing this check looks for was found on the site{ev.no_data_reason ? ` (${ev.no_data_reason})` : ""}, so it scores 0.
         </p>
       )}
-      {!measured && (
+      {p.status === "N/A" && (
         <p className="calc-note">
-          <span className={`badge ${p.status}`}>{p.status}</span>{" "}
+          <span className="badge NA">N/A</span>{" "}
+          This check does not apply to this site{ev.does_not_apply ? `: ${ev.does_not_apply}` : ""}. It is left out of the
+          score rather than counted as 0{max != null && <>, so its {pts(max)} points neither help nor hurt the overall score</>}.
+        </p>
+      )}
+      {!measured && p.status !== "N/A" && (
+        <p className="calc-note">
+          <span className={`badge ${badgeClass(p.status)}`}>{p.status}</span>{" "}
           This check could not be measured, so it is skipped rather than counted as 0.
           {max != null && <> Its {pts(max)} points are left out, so it neither helps nor hurts the overall score.</>}
         </p>
@@ -819,7 +831,9 @@ function Dashboard() {
 
   // Weights and per-pillar contributions both come from the report. The backend owns every
   // calculation; this file only formats what it is given.
-  const weights = report?.weights || {};
+  // The weights the overall score actually used: the stated 35 / 40 / 25 unless a whole pillar
+  // could not be measured, in which case the others are rescaled and the dropped one is 0.
+  const weights = report?.effective_weights || report?.weights || {};
   const contributions = report?.category_contributions || {};
   const pillars = [
     { key: "technical", name: "Technical", color: "#2563eb" },
@@ -886,12 +900,7 @@ function Dashboard() {
           <div className="page-head">
             <div>
               <h1>{report.domain}</h1>
-              {report.generated_at && (
-                <p>
-                  Generated {new Date(report.generated_at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}
-                  {report.rechecked && " · re-checked"}
-                </p>
-              )}
+              {report.rechecked && <p>Re-checked</p>}
             </div>
             <div className="head-actions">
               {(rechecking || unmeasured.length > 0) && (
@@ -909,12 +918,6 @@ function Dashboard() {
             </div>
           </div>
 
-          {report.gating && (
-            <div className="gating-banner" role="alert">
-              <b>⚠ {report.gating.title}</b>
-              <p>{report.gating.detail}</p>
-            </div>
-          )}
 
           <div className="card visibility-card">
             <div className="card-head">
@@ -991,9 +994,9 @@ function Dashboard() {
               <button className="btn btn-ghost" onClick={() => setSelected(null)} aria-label="Close">Close</button>
             </div>
             <p className="drawer-meta">
-              <span className={`badge ${selected.status}`}>{selected.status}</span>
+              <span className={`badge ${badgeClass(selected.status)}`}>{selected.status}</span>
               <span className="drawer-score">Score <b>{selected.score != null ? `${fmt(selected.score)} / 100` : "—"}</b></span>
-              {selected.status === "UNKNOWN" && <span className="drawer-note">Excluded from the overall score</span>}
+              {(selected.status === "UNKNOWN" || selected.status === "N/A") && <span className="drawer-note">Excluded from the overall score</span>}
             </p>
             <div className="drawer-fact">
               <span className="drawer-fact-label">Source</span>

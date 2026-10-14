@@ -269,7 +269,13 @@ def _tech_07_vitals(ev: dict) -> Result:
     names = VITALS.get(source)
     if not names or any(m not in metrics for m in names):
         return None
-    points = {m: vital_score(m, float(metrics[m])) for m in names}
+    stored = ev.get("metric_points")
+    if isinstance(stored, dict) and all(isinstance(stored.get(m), (int, float)) for m in names):
+        # The points as the handler scored them, from the unrounded metrics.
+        points = {m: float(stored[m]) for m in names}
+    else:
+        # Older rows: re-derived from the rounded metrics, which can sit a tenth away.
+        points = {m: vital_score(m, float(metrics[m])) for m in names}
     score = sum(points.values()) / len(points)
     parts = [f"{VITAL_NAMES[m]} {_vital_value(m, float(metrics[m]))} ({vital_rating(m, float(metrics[m]))},"
              f" {_num(points[m])} points)" for m in names]
@@ -286,8 +292,12 @@ def tech_07(ev: dict) -> Result:
     size = ev.get("avg_page_bytes")
     if latency is None or size is None:
         return None
-    ls = _band(float(latency), _LATENCY, _LATENCY_FLOOR)
-    ws = _band(float(size), _WEIGHT, _WEIGHT_FLOOR)
+    # The band points the handler scored from the unrounded averages; older rows re-band the rounded ones.
+    ls = ev.get("latency_score")
+    ws = ev.get("weight_score")
+    if ls is None or ws is None:
+        ls = _band(float(latency), _LATENCY, _LATENCY_FLOOR)
+        ws = _band(float(size), _WEIGHT, _WEIGHT_FLOOR)
     score = ls * _MIX_LATENCY + ws * _MIX_SIZE
     return (f"Pages respond in {_int(latency)} ms on average ({_RATING[ls]}, {_num(ls)} points) and weigh"
             f" {_int(float(size) / 1000)} KB ({_SIZE_RATING[ws]}, {_num(ws)} points). Speed counts for {_num(_MIX_LATENCY * 100, 0)}% and size"
@@ -321,6 +331,15 @@ def tech_08(ev: dict) -> Result:
 def tech_09(ev: dict) -> Result:
     pages = ev.get("pages")
     compared = ev.get("compared_pages")
+    exact = ev.get("average_js_only_share")
+    if exact is not None and compared:
+        # Current rows: the unrounded average share, and a score that is not rounded to a whole number.
+        avg = float(exact) * 100
+        score = max(0.0, min(100.0, 100 - avg))
+        probe = " (including the homepage)" if ev.get("probe_url") else ""
+        return (f"On average {_num(avg)}% of the text on {_plural(int(compared), 'page')}{probe} only appears after"
+                f" JavaScript runs, {_so(score)}"), _score(score)
+    # Older rows averaged the rounded per-page shares and rounded the score to a whole number.
     shares = None
     if isinstance(pages, list) and pages and all("js_only_share_pct" in p for p in pages):
         shares = [float(p["js_only_share_pct"]) for p in pages]
@@ -355,8 +374,12 @@ def tech_10(ev: dict) -> Result:
     clean = sum(1 for s in scores if s >= 100)
     if clean == n:
         return f"All {_plural(n, 'page')} have a clean heading structure, {_so(score)}", _score(score)
+    # Pages with no headings at all are scored as pages with no H1 (60).
+    bare = sum(1 for r in rows if r.get("heading_count") == 0)
+    bare_text = (f" ({_int(bare)} of them {_v(bare, 'has', 'have')} no headings at all, which counts as a missing H1)"
+                 if bare else "")
     return (f"{_int(clean)} of {_plural(n, 'page')} {_v(clean, 'has', 'have')} a clean heading structure and the other {_int(n - clean)}"
-            f" {_v(n - clean, 'loses', 'lose')} some points for a missing or repeated H1 or skipped heading levels, so the average"
+            f" {_v(n - clean, 'loses', 'lose')} some points for a missing or repeated H1 or skipped heading levels{bare_text}, so the average"
             f" score is {_num(score)}."), _score(score)
 
 
@@ -510,7 +533,7 @@ def tech_18(ev: dict) -> Result:
     if not signals:
         return "No author information was found on any page, so it scores 25.", 25.0
     titled = sum(1 for a in signals if "jobTitle" in (a.get("item") or {}))
-    found = f"{_plural(len(signals), 'author signal')} {'was' if len(signals) == 1 else 'were'} found"
+    found = f"{_plural(len(signals), 'author marked up as a Person', 'authors marked up as a Person')} {'was' if len(signals) == 1 else 'were'} found"
     if titled:
         return (f"{found} and {_int(titled)} {'includes' if titled == 1 else 'include'} a job title"
                 f" (a job title earns the top score), so it scores 95."), 95.0
@@ -524,7 +547,11 @@ def tech_19(ev: dict) -> Result:
         return None
     valid = int(ev.get("valid") or 0)
     score = valid / int(blocks) * 100
-    return (f"{_int(valid)} of {_plural(int(blocks), 'structured-data (JSON-LD) block')} {_v(valid, 'is', 'are')} valid,"
+    types = ev.get("types_found")
+    what = f" (markup found: {_and(list(types))})" if isinstance(types, list) and types else ""
+    reasons = sorted({e.get("why") for e in ev.get("errors") or [] if isinstance(e, dict) and e.get("why")})
+    why = f"; the broken ones contain {_and(reasons)}" if reasons and valid < int(blocks) else ""
+    return (f"{_int(valid)} of {_plural(int(blocks), 'structured-data (JSON-LD) block')} {_v(valid, 'is', 'are')} valid{what}{why},"
             f" {_so(score)}"), _score(score)
 
 
@@ -557,20 +584,26 @@ def tech_22(ev: dict) -> Result:
     if not isinstance(rows, list):
         return None
     n = max(1, len(rows))
-    titles = [str(r.get("title") or "").strip().lower() for r in rows]
-    descs = [str(r.get("description") or "").strip().lower() for r in rows]
-    nt = [t for t in titles if t]
-    nd = [d for d in descs if d]
+    counts = ev.get("uniqueness_counts")
+    if isinstance(counts, dict) and isinstance(counts.get("titles"), dict) and isinstance(counts.get("descriptions"), dict):
+        # The handler's exact counts, from the full descriptions.
+        ut_n, nt_n = int(counts["titles"]["unique"]), int(counts["titles"]["nonempty"])
+        ud_n, nd_n = int(counts["descriptions"]["unique"]), int(counts["descriptions"]["nonempty"])
+    else:
+        # Older rows: recounted from the stored rows, whose descriptions stop at 180 characters.
+        nt = [t for t in (str(r.get("title") or "").strip().lower() for r in rows) if t]
+        nd = [d for d in (str(r.get("description") or "").strip().lower() for r in rows) if d]
+        ut_n, nt_n, ud_n, nd_n = len(set(nt)), len(nt), len(set(nd)), len(nd)
     present = sum(1 for r in rows if r.get("title") and r.get("desc_len"))
     length_ok = sum(1 for r in rows if r.get("title_ok") and r.get("desc_ok"))
     p = present / n * 50
-    ut = len(set(nt)) / max(1, len(nt)) * 15
-    ud = len(set(nd)) / max(1, len(nd)) * 10
+    ut = ut_n / max(1, nt_n) * 15
+    ud = ud_n / max(1, nd_n) * 10
     lq = length_ok / n * 25
     score = p + ut + ud + lq
     return (f"{_int(present)} of {_int(len(rows))} pages {_v(present, 'has', 'have')} both a title and a description ({_num(p)} of 50 points),"
-            f" {_int(len(set(nt)))} of {_int(len(nt))} titles {_v(len(set(nt)), 'is', 'are')} unique ({_num(ut)} of 15 points),"
-            f" {_int(len(set(nd)))} of {_int(len(nd))} descriptions {_v(len(set(nd)), 'is', 'are')} unique ({_num(ud)} of 10 points) and"
+            f" {_int(ut_n)} of {_int(nt_n)} titles {_v(ut_n, 'is', 'are')} unique ({_num(ut)} of 15 points),"
+            f" {_int(ud_n)} of {_int(nd_n)} descriptions {_v(ud_n, 'is', 'are')} unique ({_num(ud)} of 10 points) and"
             f" {_int(length_ok)} of {_int(len(rows))} pages {_v(length_ok, 'has', 'have')} both at a good length ({_num(lq)} of 25 points),"
             f" {_so(score)}"), _score(score)
 

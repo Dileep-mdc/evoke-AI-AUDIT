@@ -147,6 +147,12 @@ def _safe(fn: Callable[[dict], Result]) -> Callable[[dict], Result]:
                 return None
             if ev.get("llm_skipped"):
                 return None
+            if ev.get("no_data") and fn.__name__ != "on_06":
+                # A check that found nothing to evaluate fails at 0 (common.no_data). The branches
+                # below still carry the fixed scores such rows had before (30, 25, 40, 35), which
+                # contradicted the 0 and hid the working on exactly the rows that failed.
+                reason = str(ev.get("no_data_reason") or "nothing this check looks for was found")
+                return f"{_cap(reason)}, so it scores 0.", 0.0
             out = fn(ev)
             if out is None:
                 return None
@@ -242,8 +248,11 @@ def on_04(ev: dict) -> Result:
     pages = ev.get("pages")
     if not isinstance(pages, list):
         return None
+    # Only pages with an opening are averaged, as the handler does; a page without one is
+    # listed with a placeholder score but left out of the score.
+    pages = [p for p in pages if p.get("opening")] if any("opening" in p for p in pages) else pages
     if not pages:
-        return "There were no pages to check, so it gets a set score of 40.", 40.0
+        return None
     score = sum(float(p.get("score")) for p in pages) / len(pages)
     return (f"{_n(len(pages))} page openings were rated 85 if concrete, 55 if mixed and 35 if generic, so the"
             f" average score is {_s(score)}."), score
@@ -259,15 +268,28 @@ def on_05(ev: dict) -> Result:
 
 @_safe
 def on_06(ev: dict) -> Result:
+    if ev.get("no_data"):
+        reason = str(ev.get("no_data_reason") or "no page has FAQ structured data")
+        return f"{_cap(reason)}, so there is no FAQ markup to validate and it scores 0.", 0.0
     total = _num(ev, "faq_pages_total")
     if total == 0:
+        # Saved before missing data failed at 0, when no FAQ at all had a fixed score.
         return "No page has an FAQ, either visible or in structured data, so it gets a set score of 20.", 20.0
-    schema, visible = _num(ev, "with_valid_schema"), _num(ev, "with_visible_faq")
-    if not total or schema is None or visible is None:
+    if total and "with_consistent_answers" not in ev:
+        # Saved before the rule required markup: half for markup, half for a visible FAQ.
+        schema, visible = _num(ev, "with_valid_schema"), _num(ev, "with_visible_faq")
+        if schema is None or visible is None:
+            return None
+        score = (50 * schema + 50 * visible) / total
+        return (f"Of {_n(total)} pages with an FAQ, {_n(schema)} {_v(schema, 'has', 'have')} FAQ structured data and"
+                f" {_n(visible)} {_v(visible, 'shows', 'show')} the FAQ on the page. Each counts for half, {_so(score)}"), score
+    valid, consistent = _num(ev, "with_valid_schema"), _num(ev, "with_consistent_answers")
+    if not total or valid is None or consistent is None:
         return None
-    score = (50 * schema + 50 * visible) / total
-    return (f"Of {_n(total)} pages with an FAQ, {_n(schema)} {_v(schema, 'has', 'have')} FAQ structured data and {_n(visible)} {_v(visible, 'shows', 'show')} the FAQ"
-            f" on the page. Each counts for half, {_so(score)}"), score
+    score = (50 * valid + 50 * consistent) / total
+    return (f"Of {_n(total)} pages with an FAQ, {_n(valid)} {_v(valid, 'has', 'have')} valid FAQ markup (half marks each)"
+            f" and {_n(consistent)} {_v(consistent, 'marks', 'mark')} up the same questions the page shows (the other half);"
+            f" a visible FAQ without markup earns nothing here, {_so(score)}"), score
 
 
 @_safe

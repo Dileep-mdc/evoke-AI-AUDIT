@@ -122,7 +122,15 @@
           "service",
           "product",
           "offer",
-          "professionalservice"
+          "professionalservice",
+          "financialservice",
+          "legalservice",
+          "governmentservice",
+          "productmodel",
+          "productgroup",
+          "individualproduct",
+          "someproducts",
+          "aggregateoffer"
         ]
       }
     },
@@ -538,6 +546,9 @@
           "productgroup",
           "offer"
         ]
+      },
+      "not_applicable": {
+        "OFF-04": "CMMI, ISO and technology-partner tiers are IT-services credentials, and this site's industry is manufacturing & industrial products"
       }
     },
     "healthcare": {
@@ -678,6 +689,9 @@
           "physician",
           "service"
         ]
+      },
+      "not_applicable": {
+        "OFF-04": "CMMI, ISO and technology-partner tiers are IT-services credentials, and this site's industry is healthcare & medical"
       }
     },
     "retail": {
@@ -808,6 +822,9 @@
           "aggregateoffer",
           "productgroup"
         ]
+      },
+      "not_applicable": {
+        "OFF-04": "CMMI, ISO and technology-partner tiers are IT-services credentials, and this site's industry is retail & e-commerce"
       }
     },
     "finance": {
@@ -946,6 +963,9 @@
           "service",
           "product"
         ]
+      },
+      "not_applicable": {
+        "OFF-04": "CMMI, ISO and technology-partner tiers are IT-services credentials, and this site's industry is financial services"
       }
     }
   }

@@ -375,6 +375,7 @@ tr.clickable:hover { background: #f8fafc; }
 .badge.PARTIAL { background: #ffedd5; color: #c2410c; }
 .badge.FAIL { background: #fee2e2; color: #b91c1c; }
 .badge.UNKNOWN { background: #f3f4f6; color: #6b7280; }
+.badge.NA { background: #f3f4f6; color: #6b7280; }
 
 .toast {
   position: fixed; bottom: 20px; right: 20px; background: #111827; color: #fff;
@@ -405,10 +406,6 @@ tr.clickable:hover { background: #f8fafc; }
 
 .scan-busy { color: var(--muted); font-size: 13px; font-style: italic; margin: 4px 0 0; }
 
-/* Gating issue: AI crawlers cannot reach the site, which blocks every other improvement. */
-.gating-banner { border: 1px solid #fca5a5; background: #fef2f2; border-radius: 12px; padding: 12px 16px; margin: 0 0 16px; }
-.gating-banner b { color: #991b1b; font-size: 14px; }
-.gating-banner p { margin: 4px 0 0; color: #7f1d1d; font-size: 13.5px; line-height: 1.5; }
 .head-actions { flex-shrink: 0; }
 .head-actions .btn { white-space: nowrap; }
 .page-head > div:first-child { min-width: 0; }

@@ -18,8 +18,10 @@ an unavailable API says nothing about the company.
 from __future__ import annotations
 
 from . import offpage_scoring as scoring
-from .common import ms_since, result, timed
+from . import industry
+from .common import ms_since, not_applicable, result, timed
 from .offpage_agents import ORCHESTRATOR, Findings
+from .platforms import platforms_for
 
 RETRY_SEARCH = "Retry once web search is available."
 
@@ -32,6 +34,19 @@ def _contract(f: Findings, inputs: dict) -> dict:
 def _row(spec, t, f: Findings, score: float, evidence: dict, inputs: dict, rec, confidence: float):
     return result(spec, score=score, evidence={**evidence, **_contract(f, inputs)}, recommendation=rec,
                   checked=f.checked, duration_ms=ms_since(t), confidence=confidence)
+
+
+def _no_sites(spec, ctx, t, kind: str):
+    """N/A when this scan's industry profile lists no sites of this kind: an empty list means the
+    channel does not apply (industry_profiles.json). Searching an empty list ran the query
+    '"Name" ()', found nothing, and failed a manufacturer at 0 for review sites it has none of."""
+    lists = platforms_for(ctx)
+    if lists.get(kind):
+        return None
+    label = {"review": "review", "profile": "business-profile"}[kind]
+    return not_applicable(spec, reason=f"no {label} sites apply to this industry ({lists.get('label') or 'this profile'})",
+                          evidence={"platforms_checked": [], "platform_set": lists.get("label")},
+                          checked=ctx.origin, duration_ms=ms_since(t))
 
 
 def _unknown(spec, t, f: Findings, rec: str = RETRY_SEARCH):
@@ -80,6 +95,8 @@ async def off_02(spec, ctx):
 # ---------------------------------------------------------------------------------------------
 async def off_03(spec, ctx):
     t = timed()
+    if (na := _no_sites(spec, ctx, t, "profile")) is not None:
+        return na
     f = await ORCHESTRATOR.research("OFF-03", ctx)
     if not f.available:
         return _unknown(spec, t, f)
@@ -104,6 +121,12 @@ async def off_03(spec, ctx):
 # ---------------------------------------------------------------------------------------------
 async def off_04(spec, ctx):
     t = timed()
+    reason = industry.not_applicable(ctx, "OFF-04")
+    if reason:
+        # A medical association claiming "CMMI" (here, the CMS Innovation Center) or an accreditation
+        # is not making the IT-services credential claims this check measures.
+        return not_applicable(spec, reason=reason, evidence={"industry": (getattr(ctx, "industry", None) or {}).get("key")},
+                              checked=ctx.origin, duration_ms=ms_since(t))
     f = await ORCHESTRATOR.research("OFF-04", ctx)
     inputs = {"claim_kinds_found": len(f.values["claims"])}
     score = scoring.off_04(**inputs)
@@ -117,6 +140,8 @@ async def off_04(spec, ctx):
 # ---------------------------------------------------------------------------------------------
 async def off_05(spec, ctx):
     t = timed()
+    if (na := _no_sites(spec, ctx, t, "review")) is not None:
+        return na
     f = await ORCHESTRATOR.research("OFF-05", ctx)
     if not f.available:
         return _unknown(spec, t, f)
@@ -143,6 +168,8 @@ async def off_05(spec, ctx):
 # ---------------------------------------------------------------------------------------------
 async def off_06(spec, ctx):
     t = timed()
+    if (na := _no_sites(spec, ctx, t, "review")) is not None:
+        return na
     f = await ORCHESTRATOR.research("OFF-06", ctx)
     if not f.available:
         return _unknown(spec, t, f)

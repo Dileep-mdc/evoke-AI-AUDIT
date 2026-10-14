@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections import defaultdict
+from urllib.parse import urlparse
 
 from ..llm.batch import judge_all, judge_one
 from ..llm.prompts import (
@@ -33,6 +34,7 @@ from .common import (
     is_question,
     ms_since,
     near_duplicate_pairs,
+    structured_authors,
     primary_brand,
     result,
     scorable_pages,
@@ -100,8 +102,36 @@ JOURNEY = {
 
 
 
+def _path(page) -> str:
+    """The page's URL path as words ("/services/cloud-migration" -> " services cloud migration").
+
+    Keyword tests read the path, never the full URL: the host is the same on every page, so on
+    acmesolutions.com a test for "solution" in the URL made every page -- careers, contact --
+    a service page, and ON-16 credited a buying stage to the domain name alone.
+    """
+    path = urlparse(getattr(page.result, "final_url", None) or page.url or "").path.lower()
+    return " " + re.sub(r"[/\-_.]+", " ", path).strip()
+
+
+def _names(blob: str, term: str) -> bool:
+    """Whether the text names the term as whole words: "usa" is not in "thousand", nor "uk" in "duke"."""
+    return bool(term) and re.search(rf"(?<!\w){re.escape(term.lower())}(?!\w)", blob) is not None
+
+
+def _heading_key(text: str) -> str:
+    """A heading reduced to its words, so a verdict that echoes it with a dropped "?" or changed
+    case or spacing still finds it. An exact-text match silently dropped those headings."""
+    return " ".join(re.sub(r"[^\w]+", " ", str(text or "").lower()).split())
+
+
+def _url_key(url: str) -> str:
+    """A URL without scheme, "www." or trailing slash, for matching a verdict back to its page."""
+    u = re.sub(r"^https?://(www\.)?", "", str(url or "").strip().lower())
+    return u.rstrip("/")
+
+
 def _service_pages(ctx):
-    return [p for p in scorable_pages(ctx) if p.page_type in {"service", "home", "case_study"} or "service" in (p.result.final_url or "").lower()]
+    return [p for p in scorable_pages(ctx) if p.page_type in {"service", "home", "case_study"} or "service" in _path(p)]
 
 
 def _question_blocks(ctx):
@@ -177,24 +207,29 @@ async def on_01(spec, ctx):
     # two thousand data points in the share. Occurrences are still counted -- they are what
     # the share is computed over -- but each distinct heading is judged once.
     occurrences: dict[str, int] = defaultdict(int)
-    first_url: dict[str, str] = {}
+    first: dict[str, dict] = {}
     for row in rows:
-        key = row["heading"].strip().lower()
+        key = _heading_key(row["heading"])
         occurrences[key] += 1
-        first_url.setdefault(key, row["url"])
-    distinct = [{"url": first_url[key], "heading": key} for key in occurrences]
+        first.setdefault(key, row)
+    # The model sees each heading as written (its "?" included); verdicts are matched back by key.
+    distinct = [{"url": first[key]["url"], "heading": first[key]["heading"]} for key in occurrences]
     evidence["distinct_headings"] = len(distinct)
 
     verdicts, coverage = await judge_all(distinct, on01_prompt)
-    if verdicts:
-        # Weighted back up by how often each heading actually appears, so the share still
-        # describes the site's headings rather than its heading vocabulary.
-        judged = {str(v.get("heading", "")).strip().lower(): bool(v.get("buyer_question")) for v in verdicts}
-        weighed = [(occurrences[key], judged[key]) for key in occurrences if key in judged]
-        total_weight = sum(count for count, _ in weighed)
+    # Weighted back up by how often each heading actually appears, so the share still
+    # describes the site's headings rather than its heading vocabulary.
+    judged = {_heading_key(v.get("heading", "")): bool(v.get("buyer_question")) for v in verdicts}
+    weighed = [(occurrences[key], judged[key]) for key in occurrences if key in judged]
+    total_weight = sum(count for count, _ in weighed)
+    if verdicts and not total_weight:
+        # Replies that match none of the headings sent judged nothing. The keyword reading
+        # stands, and says so -- it used to keep the keyword score under method "llm" with
+        # "0 question headings", a score and evidence that contradicted each other.
+        evidence["llm_unavailable"] = "the AI's replies did not match the headings sent"
+    elif total_weight:
         buyer = sum(count for count, is_buyer in weighed if is_buyer)
-        # Verdicts that match none of the headings sent judged nothing; 0/0 is not a 0% share.
-        share = buyer / total_weight if total_weight else share
+        share = buyer / total_weight
         score = band(share, _QUESTION_HEADING_BANDS, _QUESTION_HEADING_FLOOR)
         confidence = 0.85 if coverage.complete else 0.75
         evidence["method"] = "llm"
@@ -207,7 +242,9 @@ async def on_01(spec, ctx):
         evidence["llm"] = {"buyer_questions_by_occurrence": buyer,
                            "distinct_headings_judged_as_buyer_questions": sum(1 for v in judged.values() if v),
                            "heading_occurrences_counted": total_weight,
-                           **coverage.as_evidence()}
+                           **coverage.as_evidence(),
+                           # Headings the replies did not cover are not in the share.
+                           "complete": coverage.complete and total_weight == len(rows)}
     elif coverage.error:
         evidence["llm_unavailable"] = coverage.error
 
@@ -393,7 +430,7 @@ async def on_04(spec, ctx):
 
 async def on_05(spec, ctx):
     t = timed()
-    services = [p for p in scorable_pages(ctx) if p.page_type == "service" or re.search(r"service|solution", p.result.final_url, re.I)]
+    services = [p for p in scorable_pages(ctx) if p.page_type == "service" or re.search(r"service|solution", _path(p))]
     # The homepage counted as a "service page" alongside real ones, so a homepage FAQ alone could
     # carry the score. It stands in only for a site whose services live on the homepage.
     if not services:
@@ -429,16 +466,53 @@ async def on_05(spec, ctx):
     )
 
 
+def _faq_questions(item: dict) -> list[str]:
+    """The questions a FAQPage node marks up that carry an answer, i.e. its valid Question entries."""
+    entities = item.get("mainEntity")
+    entities = entities if isinstance(entities, list) else [entities] if isinstance(entities, dict) else []
+    out = []
+    for q in entities:
+        if not isinstance(q, dict) or "Question" not in str(q.get("@type")):
+            continue
+        answer = q.get("acceptedAnswer")
+        answer = answer[0] if isinstance(answer, list) and answer else answer
+        if str(q.get("name") or "").strip() and isinstance(answer, dict) and str(answer.get("text") or "").strip():
+            out.append(str(q["name"]).strip())
+    return out
+
+
 async def on_06(spec, ctx):
+    """FAQ schema validity and answer consistency.
+
+    A page with FAQPage markup earns 50 when the markup is valid (questions with answers) and 50
+    more when those questions also appear on the page. A visible FAQ with no markup earns nothing:
+    this check is about the schema, and ON-05 already credits the visible FAQ. A page counts as
+    showing an FAQ only with an FAQ heading -- the word "FAQ" in a footer link used to count, and a
+    site with no FAQ markup at all scored 50 on 26 such pages.
+    """
     t = timed()
     rows = []
     for page in scorable_pages(ctx):
-        faqs = [i for i in flatten_schema(page.schema_blocks) if "FAQPage" in str(i.get("@type")) or i.get("mainEntity")]
-        visible = bool(re.search(r"\bfaqs?\b", page.text, re.I))
-        if not faqs and not visible:
+        faq_items = [i for i in flatten_schema(page.schema_blocks) if "FAQPage" in str(i.get("@type"))]
+        visible = any(re.search(r"\bfaqs?\b|frequently asked", h["text"], re.I) for h in page.headings)
+        if not faq_items and not visible:
             continue
-        valid = bool(faqs)
-        rows.append({"url": page.result.final_url, "schema": valid, "visible": visible})
+        questions = [q for item in faq_items for q in _faq_questions(item)]
+        text = re.sub(r"\s+", " ", page.text or "").lower()
+        on_page = [q for q in questions if re.sub(r"\s+", " ", q).lower()[:80] in text]
+        rows.append({"url": page.result.final_url, "schema": bool(faq_items), "valid_schema": bool(questions),
+                     "visible": visible, "questions_marked_up": len(questions), "questions_on_page": len(on_page),
+                     "consistent": bool(questions) and len(on_page) == len(questions)})
+    if rows and not any(r["schema"] for r in rows):
+        return no_data(
+            spec,
+            reason=f"{len(rows)} page{'s show' if len(rows) != 1 else ' shows'} an FAQ, but no page marks it up with FAQPage structured data",
+            evidence={"pages": rows, "faq_pages_total": len(rows), "with_valid_schema": 0,
+                      "with_visible_faq": len(rows), "pages_crawled": len(ctx.pages)},
+            recommendation="Mark up the FAQ sections that already exist with FAQPage structured data, using the same questions and answers as the page.",
+            checked=ctx.origin,
+            duration_ms=ms_since(t),
+        )
     if not rows:
         # No FAQ on any page: a failure. The page count says how hard it looked.
         return no_data(
@@ -448,7 +522,7 @@ async def on_06(spec, ctx):
             checked=ctx.origin,
             duration_ms=ms_since(t),
         )
-    score = sum(50 * r["schema"] + 50 * r["visible"] for r in rows) / len(rows)
+    score = sum(50 * r["valid_schema"] + 50 * r["consistent"] for r in rows) / len(rows)
     rec = "Keep FAQ schema valid and consistent with on-page questions and answers." if score < 90 else None
     return result(
         spec,
@@ -456,7 +530,9 @@ async def on_06(spec, ctx):
         evidence={
             "pages": rows,
             "faq_pages_total": len(rows),
-            "with_valid_schema": sum(1 for r in rows if r["schema"]),
+            "with_schema": sum(1 for r in rows if r["schema"]),
+            "with_valid_schema": sum(1 for r in rows if r["valid_schema"]),
+            "with_consistent_answers": sum(1 for r in rows if r["consistent"]),
             "with_visible_faq": sum(1 for r in rows if r["visible"]),
             # The mismatch is the actual finding, so it is counted rather than left for the
             # reader to infer from a sixteen-row sample.
@@ -475,8 +551,9 @@ async def on_07(spec, ctx):
     tables_by_url = {}
     eligible = []
     for page in scorable_pages(ctx):
-        blob = f"{page.title} {page.text[:500]} {page.result.final_url}".lower()
-        intent = any(k in blob for k in ("vs", "compar", "alternative", "pricing", "feature", "capability"))
+        blob = f"{page.title} {page.text[:500]} {_path(page)}".lower()
+        # Word starts, not bare substrings: "vs" was found in "canvas" and "pricing" in "repricing".
+        intent = re.search(r"\b(?:vs|versus|compar|alternative|pricing|feature|capabilit)", blob) is not None
         tables = len(page.soup.find_all("table")) if page.soup else 0
         tables_by_url[page.result.final_url] = tables
         if intent or page.page_type == "service":
@@ -499,19 +576,26 @@ async def on_07(spec, ctx):
                   for p in scorable_pages(ctx) if p.text]
     if candidates:
         verdicts, coverage = await judge_all(candidates, on07_prompt)
-        judged = [v for v in verdicts if v.get("evaluation_intent") and v.get("url") in tables_by_url]
+        tables_by_key = {_url_key(u): n for u, n in tables_by_url.items()}
+        # Only replies that name a page that was sent count, matched without scheme or trailing
+        # slash: an exact match dropped "https://x.com/pricing/" for "https://x.com/pricing", and
+        # with every reply dropped the check read that as "no evaluation pages" and failed at 0.
+        matched = [v for v in verdicts if _url_key(v.get("url")) in tables_by_key]
+        judged = [v for v in matched if v.get("evaluation_intent")]
         if judged:
-            with_tables = sum(1 for v in judged if tables_by_url[v["url"]] > 0)
+            with_tables = sum(1 for v in judged if tables_by_key[_url_key(v["url"])] > 0)
             score = with_tables / len(judged) * 100
             confidence = 0.8 if coverage.complete else 0.7
             evidence["method"] = "llm"
             evidence["llm"] = {"evaluation_pages": len(judged), "with_tables": with_tables,
                                **coverage.as_evidence()}
-        elif verdicts:
-            # The model read every page and found none where buyers evaluate options.
+        elif matched:
+            # The model read the pages and found none where buyers evaluate options.
             return no_data(spec, reason="no page lets buyers compare or evaluate options, so the site has no comparison tables",
                                   evidence={"eligible_pages_total": 0, "pages_judged": len(verdicts), "method": "llm"},
                                   checked=ctx.origin, duration_ms=ms_since(t))
+        elif verdicts:
+            evidence["llm_unavailable"] = "the AI's replies did not match the pages sent"
         elif coverage.error:
             evidence["llm_unavailable"] = coverage.error
 
@@ -581,14 +665,18 @@ async def on_08(spec, ctx):
 async def on_09(spec, ctx):
     t = timed()
     rows = []
+    densities = []
     for page in scorable_pages(ctx):
-        dens, top = top_term_density(page.text)
+        dens, top = top_term_density(page.text, rules.threshold("min_content_words_for_density"))
         if dens is None:
             continue
+        densities.append(dens)
         rows.append({"url": page.result.final_url, "top": top, "max_density": round(dens, 4)})
     if not rows:
         return result(spec, score=None, unknown=True, evidence={}, recommendation="No page copy available to evaluate.", checked=ctx.origin, error="no page text", duration_ms=ms_since(t))
-    avg_d = sum(r["max_density"] for r in rows) / len(rows)
+    # Averaged unrounded: rounding each page first moved a site sitting on a band edge
+    # (3.4995% -> 3.5%) into the next band.
+    avg_d = sum(densities) / len(densities)
     score = density_score(avg_d)
     rec = "Reduce repeated phrases that look like keyword stuffing." if score < 90 else None
     # The skipped count matters to how this score should be read: pages under the content-word
@@ -602,12 +690,32 @@ async def on_09(spec, ctx):
             "pages_assessed": len(rows),
             "pages_crawled": len(ctx.pages),
             "pages_skipped_too_few_content_words": len(scorable_pages(ctx)) - len(rows),
-            "average_max_density": round(avg_d, 4),
+            "average_max_density": avg_d,
         },
         recommendation=rec,
         checked=ctx.origin,
         duration_ms=ms_since(t),
     )
+
+
+def _points_covered(value, rubric_points: int):
+    """A verdict's count of checklist points covered, clamped to the checklist; None if unreadable.
+
+    The model sometimes lists the points instead of counting them, or writes "5/8"; int() on
+    either raised, and one such reply turned the whole parameter UNKNOWN.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (list, tuple)):
+        count = len(value)
+    elif isinstance(value, (int, float)):
+        count = int(value)
+    else:
+        m = re.match(r"\s*(\d+)", str(value or ""))
+        if not m:
+            return None
+        count = int(m.group(1))
+    return min(rubric_points, max(0, count))
 
 
 async def on_10(spec, ctx):
@@ -636,13 +744,18 @@ async def on_10(spec, ctx):
                 for p in pages if p.text]
     if excerpts:
         verdicts, coverage = await judge_all(excerpts, lambda batch: on11_prompt(batch, points))
-        if verdicts:
-            covered_counts = [min(rubric_points, max(0, int(v.get("covered") or 0))) for v in verdicts]
+        covered_counts = [c for c in (_points_covered(v.get("covered"), rubric_points) for v in verdicts)
+                          if c is not None]
+        if covered_counts:
             score = sum(c / rubric_points * 100 for c in covered_counts) / len(covered_counts)
             confidence = 0.8 if coverage.complete else 0.7
             evidence["method"] = "llm"
             evidence["llm"] = {"mean_points_covered": round(sum(covered_counts) / len(covered_counts), 2),
                                "covered_per_page": covered_counts, **coverage.as_evidence()}
+            if len(covered_counts) < len(verdicts):
+                evidence["llm"]["unreadable_replies"] = len(verdicts) - len(covered_counts)
+        elif verdicts:
+            evidence["llm_unavailable"] = "the AI's replies gave no readable count of points covered"
         elif coverage.error:
             evidence["llm_unavailable"] = coverage.error
 
@@ -730,17 +843,32 @@ def _collect_thought_leadership_signals(pages) -> list[dict]:
     """
     signals = []
     for page in pages:
+        url = page.result.final_url
+        # One entry per person per page. A page with a visible byline AND author markup, or
+        # markup naming the author both on the Article and as a separate Person node, used to
+        # count the same person two or three times, outweighing pages with a single byline.
+        seen: set[str] = set()
+
+        def add(entry: dict) -> None:
+            name = str(entry.get("schema") or entry["byline"]).split(" - ")[0]
+            key = " ".join(re.sub(r"[^\w]+", " ", name.lower()).split())
+            if key and key not in seen:
+                seen.add(key)
+                signals.append(entry)
+
+        # The same author markup TECH-18 reads, nested authors included (common.structured_authors).
+        # Markup first: it carries the job title, so it is the entry kept when both name a person.
+        for person in structured_authors(page.schema_blocks):
+            named = " - ".join(str(person[k]) for k in ("name", "jobTitle") if person.get(k))
+            if named:
+                add({"url": url, "schema": person.get("name"), "byline": named[:160]})
         element = page.soup.select_one("[rel=author], .author, .byline") if page.soup else None
-        if element:
+        byline = element.get_text(" ", strip=True)[:160] if element else ""
+        if byline:
             # The byline TEXT, not just the fact a matching element exists: whether it names
             # a real person with a role is the question, and that cannot be asked of a bool.
-            signals.append({"url": page.result.final_url, "visible_author": True,
-                            "byline": element.get_text(" ", strip=True)[:160]})
-        for item in flatten_schema(page.schema_blocks):
-            if "Person" in str(item.get("@type")):
-                named = " - ".join(str(item[k]) for k in ("name", "jobTitle") if item.get(k))
-                signals.append({"url": page.result.final_url, "schema": item.get("name"),
-                                "byline": named[:160]})
+            # An empty element names nobody and is no author signal at all.
+            add({"url": url, "visible_author": True, "byline": byline})
     return signals
 
 
@@ -823,13 +951,25 @@ async def on_14(spec, ctx):
     sourced = 0
     samples = []
     candidates = []
+    seen: set[str] = set()
     for page in scorable_pages(ctx):
         for sent in re.split(r"(?<=[.!?])\s+", page.text or ""):
             if _statistics(sent) and len(sent.split()) > 6:
+                # Each distinct claim once, as ON-01 counts each distinct heading once: a footer
+                # line repeated on every page is one claim, not one per page, and counting it
+                # per page let a single boilerplate sentence outweigh every sourced claim.
+                key = " ".join(sent.lower().split())
+                if key in seen:
+                    continue
+                seen.add(key)
                 claims += 1
-                hrefs = [l for l in page.links if l["text"] and l["text"].lower()[:40] in sent.lower()]
+                # Link text counts only as whole words of 4+ characters: a link reading "IT"
+                # was found inside "digital" and marked the claim as sourced.
+                hrefs = [l for l in page.links if len((l["text"] or "").strip()) >= 4
+                         and re.search(rf"(?<!\w){re.escape(l['text'].strip().lower()[:40])}", sent.lower())]
                 candidates.append({"sentence": sent[:300], "nearby_links": [l["text"] for l in hrefs]})
-                if hrefs or re.search(r"source|according to|report", sent, re.I):
+                # Whole words: "outsourced" and "resources" are not a source.
+                if hrefs or re.search(r"\b(?:sources?|sourced|according to|reports?|reported)\b", sent, re.I):
                     sourced += 1
                     if len(samples) < 8:
                         samples.append({"sentence": sent[:220], "sourced": True})
@@ -902,10 +1042,12 @@ def _journey_stage_coverage(pages, journey: dict) -> dict:
     already real, non-blocking I/O.
     """
     covered = defaultdict(list)
-    corpus = [(p.result.final_url, f"{p.title} {p.text[:1000]}".lower()) for p in pages]
+    corpus = [(p.result.final_url, f"{p.title} {p.text[:1000]} {_path(p)}".lower()) for p in pages]
     for stage, keys in journey.items():
+        patterns = [re.compile(rf"(?<!\w){re.escape(k)}") for k in keys]
         for url, blob in corpus:
-            if any(k in blob or k in url.lower() for k in keys):
+            # Keywords must start a word: "book" was found in "facebook", "vs" in "canvas".
+            if any(pat.search(blob) for pat in patterns):
                 covered[stage].append(url)
     return covered
 
@@ -916,11 +1058,13 @@ async def on_16(spec, ctx):
     journey = {**JOURNEY, "comparison": JOURNEY["comparison"] + ((f"why {brand}",) if brand else ())}
     covered = await asyncio.to_thread(_journey_stage_coverage, scorable_pages(ctx), journey)
     stages = len(JOURNEY)
-    score = len([s for s in JOURNEY if covered[s]]) / stages * 100
+    score = len([s for s in JOURNEY if covered.get(s)]) / stages * 100
     confidence = 0.7
-    evidence = {"stages": {k: v for k, v in covered.items()},
-                "pages_per_stage": {k: len(v) for k, v in covered.items()},
-                "covered": list(covered), "pages_crawled": len(ctx.pages), "method": "heuristic"}
+    # covered.get(), not covered[...]: the coverage map is a defaultdict, and indexing it for
+    # the score created an empty entry for every missing stage, so "covered" listed all six.
+    evidence = {"stages": {k: v for k, v in covered.items() if v},
+                "pages_per_stage": {k: len(v) for k, v in covered.items() if v},
+                "covered": [s for s in JOURNEY if covered.get(s)], "pages_crawled": len(ctx.pages), "method": "heuristic"}
 
     # What stage a page serves is a judgment about purpose, not vocabulary -- a pricing page
     # aids comparison whether or not it contains the word "vs". Denominator stays the six
@@ -948,8 +1092,8 @@ async def on_17(spec, ctx):
     t = timed()
     patterns = []
     for page in scorable_pages(ctx):
-        blob = f"{page.result.final_url} {page.title}".lower()
-        if re.search(r"best .+(for)| vs |versus|alternative", blob):
+        blob = f"{_path(page)} {page.title}".lower()
+        if re.search(r"\bbest .+\bfor\b|\bvs\b|\bversus\b|\balternative", blob):
             patterns.append({"url": page.result.final_url, "title": page.title})
     score = 80 if len(patterns) >= _COMPARISON_PAGES_FOR_CREDIT else (45 if patterns else 15)
     confidence = 0.7
@@ -1083,14 +1227,17 @@ async def on_20(spec, ctx):
                               checked=ctx.origin, duration_ms=ms_since(t))
     rows = []
     for page in scorable_pages(ctx):
-        # Title and URL count as the page naming the brand, not just body text. Reading
+        # The title counts as the page naming the brand, not just body text. Reading
         # page.text alone reported `brand: false` for the audited company's own homepage --
         # whose <title> is the brand -- because the extractor had dropped the header, and the
         # parameter then scored 0 on an extraction artefact rather than on the site.
-        blob = " ".join(filter(None, (page.text, page.title, page.result.final_url))).lower()
-        brand = any(b in blob for b in ctx.brand_terms)
-        cat = any(c in blob for c in cats)
-        geo = any(g in blob for g in geos)
+        # The URL does not count: the brand terms include the site's own host, which every
+        # page's URL contains, so the brand test passed on every page whatever its copy said.
+        # Whole words throughout: "usa" is not in "thousand", "uk" not in "duke".
+        blob = " ".join(filter(None, (page.text, page.title))).lower()
+        brand = any(_names(blob, b) for b in ctx.brand_terms)
+        cat = any(_names(blob, c) for c in cats)
+        geo = any(_names(blob, g) for g in geos)
         rows.append({"url": page.result.final_url, "brand": brand, "category": cat, "geo": geo})
     complete = sum(1 for r in rows if r["brand"] and r["category"] and r["geo"])
     score = complete / max(1, len(rows)) * 100

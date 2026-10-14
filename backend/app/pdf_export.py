@@ -51,8 +51,6 @@ def build_pdf(report: dict) -> bytes:
         story.append(Paragraph(f"Industry profile: <b>{report['industry'].get('label')}</b>", small))
     if report.get("content_analysis"):
         story.append(Paragraph(f"Content analysed from: {report['content_analysis'].get('summary')}", small))
-    if report.get("gating"):
-        story.append(Paragraph(f"<b>{report['gating'].get('title')}.</b> {report['gating'].get('detail')}", body))
     story += [
         Paragraph("Scores", h),
     ]

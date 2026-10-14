@@ -118,14 +118,7 @@ def test_robots_allowing_while_the_firewall_blocks_is_explained_and_gates_the_re
     found = crosschecks.reconcile(rows, _ctx([]))
     assert "robots.txt allows these AI crawlers (GPTBot)" in rows[1]["evidence"]["cross_check"]
     assert rows[1]["recommendation"].startswith("robots.txt allows")
-    assert found["gating"]["blocked_bots"] == ["GPTBot"] and "fix this first" in found["gating"]["detail"]
-
-
-def test_gating_issues_lead_the_issue_list():
-    issues = [{"parameter_id": "ON-01"}, {"parameter_id": "TECH-02"}]
-    ordered = crosschecks.gating_first(issues, {"title": "x"})
-    assert ordered[0]["parameter_id"] == "TECH-02" and ordered[0]["gating"]
-    assert crosschecks.gating_first(issues, None) == issues
+    assert "gating" not in found
 
 
 def test_canonicals_are_not_read_as_duplicates_solved():
@@ -138,7 +131,7 @@ def test_no_note_when_nothing_disagrees():
     rows = [_row("TECH-01", 100, {"decisions": [{"name": "GPTBot", "decision": "ALLOWED"}]}, "PASS"),
             _row("TECH-02", 100, {"bots": [{"bot": "GPTBot", "blocked": False}]}, "PASS")]
     found = crosschecks.reconcile(rows, _ctx([]))
-    assert found["gating"] is None and all("cross_check" not in r["evidence"] for r in rows)
+    assert found == {"cross_checks": []} and all("cross_check" not in r["evidence"] for r in rows)
 
 
 # --- parts that cannot be measured give their weight to the parts that can -------------------
@@ -198,7 +191,11 @@ def test_every_profile_is_complete(key):
     prof = industry.PROFILES[key]
     assert prof["label"] and len(prof["content_rubric"]) >= 6
     assert set(prof["platforms"]) == {"review", "profile", "community"}
-    assert "not_applicable" not in prof
+    # Industries skip nothing, with one reviewed exception: OFF-04's CMMI/ISO/partner-tier credentials
+    # are IT-services claims, so a clearly non-IT industry marks it N/A, with a reason for the report.
+    assert set(prof.get("not_applicable") or {}) <= {"OFF-04"}
+    assert all(reason.strip() for reason in (prof.get("not_applicable") or {}).values())
+    assert key not in ("general", "it_services", "software") or not prof.get("not_applicable")
 
 
 def test_a_check_the_industry_skipped_becomes_unmeasured_not_failed():

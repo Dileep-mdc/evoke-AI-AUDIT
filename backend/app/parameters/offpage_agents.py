@@ -253,7 +253,9 @@ class CompanyProfileAgent(Agent):
             return _search_failed("OFF-03", self.name, "Business profiles", sr)
         hits = tools.domains_present(sr.urls, domains)
         found = [d for d, v in hits.items() if v]
-        locations = [g.lower() for g in derive_site_geographies(ctx)]
+        # Two-letter country and region codes ("US", "IN", "PA") are ordinary words in a snippet
+        # ("contact us", "based in"), so even as whole words they would match almost any listing.
+        locations = [g.lower() for g in derive_site_geographies(ctx) if len(g.strip()) >= 3]
         profiles = tools.extract_company_details(sr.items, tuple(found), [ctx.company_name.lower(), primary_brand(ctx)], locations)
         f = Findings("OFF-03", self.name, "Business profiles", checked=sr.display_url)
         f.values = {"platforms_found": found, "profiles": profiles, "platforms_checked": list(domains)}

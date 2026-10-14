@@ -165,10 +165,49 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def test_tech21_absent_hreflang_fails_not_a_free_hundred():
-    """No hreflang: a failure at 0 with the fix, never a free 100."""
+def test_tech21_is_not_applicable_on_a_single_market_site():
+    """One market, one language: no versions for hreflang to link, so N/A -- not a 0, not a free 100."""
     out = _run(tech_21(SPECS["TECH-21"], _ctx([_page()])))
+    assert out["status"] == "N/A" and out["score"] is None and out["recommendation"] is None
+    assert "one country in one language" in out["evidence"]["summary"]
+
+
+def test_tech21_is_not_applicable_on_a_single_country_site_even_with_hreflang_tags():
+    """A lone en-us tag plus x-default links the page to itself: still one market, still N/A."""
+    tags = [{"lang": "en-us", "href": "https://x/"}, {"lang": "x-default", "href": "https://x/"}]
+    out = _run(tech_21(SPECS["TECH-21"], _ctx([_page(hreflang=tags)])))
+    assert out["status"] == "N/A" and "(US)" in out["evidence"]["summary"]
+    assert "2 hreflang tags all point to that one market" in out["evidence"]["summary"]
+
+
+def test_tech21_tags_or_page_languages_for_two_countries_make_it_multi_country():
+    uk_us = [_page("https://x/a", html='<html lang="en-US"><body>x</body></html>'),
+             _page("https://x/b", html='<html lang="en-GB"><body>x</body></html>')]
+    out = _run(tech_21(SPECS["TECH-21"], _ctx(uk_us)))
+    assert out["status"] == "FAIL" and out["evidence"]["countries"] == ["gb", "us"]
+
+
+def test_tech21_fails_a_multi_market_site_without_hreflang():
+    """Locale-coded URLs (/en-us/, /de-de/) show several markets: missing hreflang is a real gap."""
+    pages = [_page(f"https://x/{loc}/{p}") for loc in ("en-us", "de-de") for p in ("a", "b", "c")]
+    out = _run(tech_21(SPECS["TECH-21"], _ctx(pages)))
     assert out["status"] == "FAIL" and out["score"] == 0 and "hreflang" in out["recommendation"]
+    assert out["evidence"]["locales"] == ["de-de", "en-us"]
+
+
+def test_tech21_translated_paths_under_language_prefixes_are_several_markets():
+    pages = [_page(f"https://x/{lang}/{p}") for lang in ("en", "fr") for p in ("about", "contact", "team")]
+    assert _run(tech_21(SPECS["TECH-21"], _ctx(pages)))["status"] == "FAIL"
+
+
+def test_tech21_two_letter_site_sections_are_not_markets():
+    """AAOS has /dc/, /go/, /id/ and /us/ sections; they are not language or country versions."""
+    sections = {"dc": ["advocacy", "office"], "go": ["annual-meeting", "join"], "id": ["login", "profile"],
+                "us": ["about", "staff"], "en-us": ["store", "cart"]}
+    pages = [_page(f"https://x/{s}/{p}", html='<html lang="en"><body>x</body></html>')
+             for s, paths in sections.items() for p in paths]
+    out = _run(tech_21(SPECS["TECH-21"], _ctx(pages)))
+    assert out["status"] == "N/A" and out["evidence"]["several_markets"] is False
 
 
 def test_tech21_scores_when_hreflang_is_actually_present():
@@ -187,9 +226,11 @@ def test_tech09_is_unknown_without_a_rendered_copy():
     assert out["score"] is None and out["status"] == "UNKNOWN"
 
 
-def test_tech09_scores_100_when_the_probe_shows_the_site_needs_no_rendering():
+def test_tech09_scores_the_probe_when_the_site_needs_no_rendering():
     """A server-rendered site is the PASS case, not an unmeasured one: the probe compared the
-    two copies, found them equivalent, and that single comparison is the finding."""
+    two copies and that single comparison is the finding. It is scored with the same formula as
+    every other page -- 10 of 410 words only after JavaScript is 97.6, not a flat 100 that
+    ignored a gain up to the 25% render threshold."""
     ctx = _ctx([_page("https://x/a", html="<p>hello</p>", words=100)])
     ctx.render = {
         "decision": "not_needed",
@@ -198,7 +239,7 @@ def test_tech09_scores_100_when_the_probe_shows_the_site_needs_no_rendering():
         "probe": {"raw_words": 400, "rendered_words": 410, "gained_words": 10, "gain_ratio": 0.025},
     }
     out = _run(tech_09(SPECS["TECH-09"], ctx))
-    assert out["score"] == 100
+    assert out["score"] == 97.6 and out["status"] == "PASS"
 
 
 def test_tech09_scores_the_share_of_text_that_only_exists_after_javascript():
@@ -236,10 +277,22 @@ def test_tech17_accepts_real_subtypes():
     assert out["score"] == 100
 
 
-def test_tech19_with_no_markup_is_unknown_not_forty():
-    """Nothing to validate is not '40% valid'. Absence is already scored by TECH-16/17."""
+def test_tech19_with_no_markup_is_not_applicable():
+    """Nothing to validate is not '40% valid', and not a third penalty: absence is TECH-16/17/18's."""
     out = _run(tech_19(SPECS["TECH-19"], _ctx([_page()])))
-    assert out["status"] == "UNKNOWN" and out["score"] is None
+    assert out["status"] == "N/A" and out["score"] is None and "nothing to validate" in out["evidence"]["summary"]
+
+
+def test_tech19_names_broken_blocks_and_why_they_fail():
+    """AAOS: four VideoObject embeds, three with a raw line break inside "@context"."""
+    page = _page("https://x/video", schema=[{"@type": "VideoObject", "name": "Intro"}])
+    for n in range(3):
+        page.schema_blocks.append({"ok": False, "error": "Invalid control character at: line 1 column 14 (char 13)",
+                                   "raw_preview": '{"@context":"\nhttps://schema.org","@type":"VideoObject","name":"x"}'})
+    out = _run(tech_19(SPECS["TECH-19"], _ctx([page])))
+    assert out["score"] == 25 and out["evidence"]["types_found"] == ["VideoObject"]
+    assert "3 broken VideoObject blocks" in out["recommendation"] and "line break" in out["recommendation"]
+    assert out["evidence"]["markup_validated"] == "4 JSON-LD blocks on 1 page: VideoObject. 1 valid, 3 broken."
 
 
 # --- event-loop-blocking per-page loops now run via asyncio.to_thread ------------------
@@ -256,8 +309,8 @@ def test_collect_author_signals_matches_the_original_loop_shape():
     plain_page = _page("https://x/c")
     signals = _collect_author_signals([schema_page, visible_page, plain_page])
     assert {"url": "https://x/a", "item": {"name": "Jane Roe", "jobTitle": "CTO", "@type": "Person"}} in signals
-    assert any(s.get("url") == "https://x/b" and s.get("visible") == "By John Doe" for s in signals)
-    assert len(signals) == 2, "the page with no author signal must not appear"
+    # A styled byline is not markup a machine can read as a person; ON-12 judges visible bylines.
+    assert len(signals) == 1, "only structured Person markup counts as author markup"
 
 
 def test_tech18_runs_the_extracted_helper_through_a_thread_and_scores_the_same():

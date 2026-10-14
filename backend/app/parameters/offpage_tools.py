@@ -307,9 +307,14 @@ def names_company(candidate: str, company_name: str) -> bool:
 
 
 def compare_entities(text: str, terms: list[str]) -> bool:
-    """True when the text names any of the terms (case-insensitive)."""
+    """True when the text names any of the terms as whole words (case-insensitive).
+
+    Whole words, not substrings: a substring test credited the brand "EY" in "survey firms",
+    the location "US" in "business" and "PA" in "company", inflating OFF-03 and handing OFF-08
+    its outright 100 for results that never named the company.
+    """
     text = (text or "").lower()
-    return any(t and t.lower() in text for t in terms)
+    return any(t and t.strip() and re.search(rf"(?<!\w){re.escape(t.strip().lower())}(?!\w)", text) for t in terms)
 
 
 async def verify_source(url: str, terms: list[str], ctx=None, require: list[str] | None = None) -> dict:
@@ -352,7 +357,18 @@ def extract_dates_and_rankings(items: list[dict], *, own_domain: str = "", today
     """Newest dated item and its age in days; and the best/top/leading list pages among the
     items (not on the company's own site) with their position in the results."""
     today = today or datetime.now(timezone.utc).date()
-    dates = sorted((i["date"] for i in items if i.get("date")), reverse=True)
+    # Only real, non-future dates count. The search provider checks a date's shape, not that it
+    # exists: "2025-02-30" raised here and turned the whole check UNKNOWN, and a future date
+    # ("2030-01-01") gave a negative age and earned the full recency points.
+    parsed = []
+    for i in items:
+        try:
+            d = date.fromisoformat(str(i.get("date") or "")[:10])
+        except ValueError:
+            continue
+        if d <= today:
+            parsed.append(d)
+    dates = [d.isoformat() for d in sorted(parsed, reverse=True)]
     newest = dates[0] if dates else None
     own = (own_domain or "").lower().removeprefix("www.")
     lists = [{"url": i["url"], "title": i.get("title", ""), "position": n}

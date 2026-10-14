@@ -13,8 +13,9 @@ from ..llm.client import judge
 from ..llm.prompts import SYSTEM, tech11_prompt
 from . import rules
 from . import industry
-from .common import (VITAL_NAMES, VITALS, band, flatten_schema, heading_blocks, ms_since, no_data, result,
-                     schema_types, timed, vital_rating, vital_score)
+from ..crawler.sitemap import locale_of
+from .common import (VITAL_NAMES, VITALS, band, flatten_schema, heading_blocks, ms_since, no_data, not_applicable,
+                     result, schema_types, scorable_pages, structured_authors, timed, vital_rating, vital_score)
 
 # Declared in scoring_rules.json rather than inline, for the same reason as onpage.py: these
 # are the methodology, and they belong where a reviewer can read them together.
@@ -81,6 +82,24 @@ _LLMS_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)\s]+)\)")
 _DATE_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2}|20\d{2}[/.]\d{1,2}[/.]\d{1,2}|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+20\d{2})\b", re.I)
 
 
+def _llms_link_target(link: str, origin: str) -> str | None:
+    """The URL to request for one llms.txt link, or None when it is not a web page.
+
+    mailto:, tel:, javascript: and #anchor links were prefixed with the origin (so a mailto:
+    link became <origin>/mailto:...) and then counted as broken pages.
+    """
+    if link.startswith("#"):
+        return None
+    if link.startswith("//"):
+        return "https:" + link
+    scheme = urlparse(link).scheme.lower()
+    if scheme in ("http", "https"):
+        return link
+    if scheme:
+        return None
+    return origin.rstrip("/") + "/" + link.lstrip("/")
+
+
 async def tech_03(spec, ctx):
     t = timed()
     llms = ctx.llms
@@ -88,16 +107,17 @@ async def tech_03(spec, ctx):
         return result(spec, score=0, evidence={"url": llms.url, "status": llms.status_code}, recommendation="Publish an /llms.txt file listing the site's most important pages for AI assistants.", checked=ctx.origin.rstrip("/") + "/llms.txt", duration_ms=ms_since(t))
     text = llms.text
     non_empty = len(text.strip()) > 40
-    links = _LLMS_LINK_RE.findall(text)
+    found = _LLMS_LINK_RE.findall(text)
+    links = [(link, url) for link in found if (url := _llms_link_target(link, ctx.origin))]
     resolved = []
     if links:
-        checks = await asyncio.gather(*(check(link if link.startswith("http") else ctx.origin.rstrip("/") + "/" + link.lstrip("/")) for link in links))
-        resolved = [{"url": links[i], "ok": c.ok} for i, c in enumerate(checks)]
+        checks = await asyncio.gather(*(check(url) for _, url in links))
+        resolved = [{"url": link, "ok": c.ok} for (link, _), c in zip(links, checks)]
     link_ratio = (sum(1 for r in resolved if r["ok"]) / len(resolved)) if resolved else 0.0
     fresh = bool(_DATE_RE.search(text))
     score = 40 + (20 if non_empty else 0) + (20 * link_ratio if links else 10) + (20 if fresh else 0)
     rec = "Keep llms.txt non-empty, link to pages that resolve, and include a freshness/date signal." if score < 90 else None
-    return result(spec, score=min(100, score), evidence={"non_empty": non_empty, "links_found": len(links), "sampled_links": resolved, "freshness_signal": fresh}, recommendation=rec, checked=llms.final_url, duration_ms=ms_since(t))
+    return result(spec, score=min(100, score), evidence={"non_empty": non_empty, "links_found": len(links), "non_web_links_skipped": len(found) - len(links), "sampled_links": resolved, "freshness_signal": fresh}, recommendation=rec, checked=llms.final_url, duration_ms=ms_since(t))
 
 
 _OVERLAY_MARKERS = ("cookie", "consent", "gdpr", "onetrust", "cookiebot", "trustarc", "cookieyes", "modal", "overlay", "paywall")
@@ -135,7 +155,8 @@ async def tech_05(spec, ctx):
     checks = await asyncio.gather(*(check(u) for u in sample))
     valid = sum(1 for c in checks if c.ok)
     validity = valid / len(sample) * 100
-    crawled = {p.result.final_url.rstrip("/") for p in ctx.pages}
+    # Pages the crawl actually retrieved: a 404 or a bot challenge is not a page the sitemap should list.
+    crawled = {p.result.final_url.rstrip("/") for p in scorable_pages(ctx)}
     sitemap_set = {u.rstrip("/") for u in urls}
     covered = sum(1 for u in crawled if u in sitemap_set)
     coverage = (covered / len(crawled) * 100) if crawled else 0
@@ -163,7 +184,12 @@ async def tech_06(spec, ctx):
     fresh = dict(zip(pending, await asyncio.gather(*(check(u) for u in pending))))
     # Links neither crawled nor in the re-check sample are left out, and counted below.
     links = [u for u in links if u in crawled or u in fresh]
-    checks = [crawled.get(u) or fresh[u] for u in links]
+    if not links:
+        # Every link went uncrawled and the re-check budget is zero, so nothing was checked.
+        return result(spec, score=None, unknown=True, evidence={"uncrawled_links": len(uncrawled), "not_checked": len(uncrawled)},
+                      recommendation="No internal link could be checked; raise LINK_RECHECK_LIMIT and re-scan.",
+                      checked=ctx.origin, error="no internal links checked", duration_ms=ms_since(t))
+    checks =[crawled.get(u) or fresh[u] for u in links]
     rows = []
     broken = chains = 0
     for u, c in zip(links, checks):
@@ -187,7 +213,9 @@ async def tech_07(spec, ctx):
     if source not in VITALS:
         return _tech_07_proxy(spec, ctx, t, vit.get("unavailable") or [])
     metrics = vit["metrics"]
-    points = {m: round(vital_score(m, metrics[m]), 1) for m in VITALS[source]}
+    # Averaged unrounded, and stored that way: rounding each metric's points first, or having the
+    # working re-derive them from the rounded metrics below, could land a tenth off the score.
+    points = {m: vital_score(m, metrics[m]) for m in VITALS[source]}
     score = sum(points.values()) / len(points)
     evidence = {
         "vitals_source": source,
@@ -225,7 +253,12 @@ def _tech_07_proxy(spec, ctx, t, unavailable: list[str]):
     weight_score = _at_most(avg_size, _PROXY_BYTES, _PROXY_BYTES_FLOOR)
     score = latency_score * _PROXY_MIX[0] + weight_score * _PROXY_MIX[1]
     rec = "Reduce server response time and page weight on representative pages; this proxy score is not a substitute for a real Lighthouse/CrUX audit." if score < 90 else None
-    return result(spec, score=score, evidence={"vitals_source": "proxy", "pages_measured": len(pages), "avg_latency_ms": round(avg_latency), "avg_page_bytes": round(avg_size), "vitals_unavailable": unavailable, "note": "Latency/weight proxy: real Core Web Vitals could not be measured for the reasons listed."}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.4)
+    # The band points are stored as scored, from the unrounded averages: re-banding the rounded
+    # averages in the working could cross a band edge the real averages did not.
+    evidence = {"vitals_source": "proxy", "pages_measured": len(pages), "avg_latency_ms": round(avg_latency), "avg_page_bytes": round(avg_size),
+                "latency_score": latency_score, "weight_score": weight_score, "vitals_unavailable": unavailable,
+                "note": "Latency/weight proxy: real Core Web Vitals could not be measured for the reasons listed."}
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.4)
 
 
 # A fixed layout width of 1000px or more declared as a CSS rule (`min-width: 1200px`), which
@@ -235,10 +268,37 @@ def _tech_07_proxy(spec, ctx, t, unavailable: list[str]):
 # theme, because `@media (min-width:922px)` and `max-width:1200px` satisfy it together.
 _FIXED_MIN_WIDTH = re.compile(r"(?<![\w-])min-width\s*:\s*(?:[1-9]\d{3,})px", re.I)
 _MEDIA_CONDITION = re.compile(r"\(\s*(?:min|max)-width\s*:[^)]*\)", re.I)
+# A rule inside `@media (min-width: 768px) { ... }` or wider only applies on a tablet or desktop,
+# so a `min-width: 1200px` there is the desktop layout of a responsive theme, not a width forced
+# on a phone. Such blocks are dropped before the test.
+_MEDIA_OPEN = re.compile(r"@media\b([^{;]*)\{", re.I)
+_MEDIA_MIN_WIDTH = re.compile(r"min-width\s*:\s*(\d+(?:\.\d+)?)px", re.I)
+_DESKTOP_BREAKPOINT_PX = 768
+_BRACE = re.compile(r"[{}]")
+
+
+def _without_desktop_media(css: str) -> str:
+    out, pos = [], 0
+    for match in _MEDIA_OPEN.finditer(css):
+        if match.start() < pos:
+            continue   # nested inside a block already dropped
+        widths = [float(w) for w in _MEDIA_MIN_WIDTH.findall(match.group(1))]
+        if not widths or max(widths) < _DESKTOP_BREAKPOINT_PX:
+            continue
+        depth, end = 1, len(css)
+        for brace in _BRACE.finditer(css, match.end()):
+            depth += 1 if brace.group() == "{" else -1
+            if not depth:
+                end = brace.end()
+                break
+        out.append(css[pos:match.start()])
+        pos = end
+    out.append(css[pos:])
+    return "".join(out)
 
 
 def has_fixed_width_layout(html: str) -> bool:
-    return bool(_FIXED_MIN_WIDTH.search(_MEDIA_CONDITION.sub("", html or "")))
+    return bool(_FIXED_MIN_WIDTH.search(_MEDIA_CONDITION.sub("", _without_desktop_media(html or ""))))
 
 
 async def tech_08(spec, ctx):
@@ -260,6 +320,25 @@ async def tech_08(spec, ctx):
     return result(spec, score=score, evidence={"final_url": home.result.final_url, "https": https, "viewport": viewport, "fixed_width_layout": overflow}, recommendation=rec, checked=home.result.final_url, duration_ms=ms_since(t))
 
 
+def _tech_09_row(url, info: dict):
+    """One compared page as (evidence row, unrounded JS-only share), or None with no rendered words."""
+    rendered_words = info.get("rendered_words") or 0
+    if rendered_words <= 0:
+        return None
+    gained = max(0, info.get("gained_words") or 0)
+    # Share of the page a JavaScript-blind crawler never sees.
+    hidden = gained / rendered_words
+    return {
+        "url": url,
+        "raw_words": info.get("raw_words"),
+        "rendered_words": rendered_words,
+        "gained_words": gained,
+        "js_only_share_pct": round(hidden * 100, 1),
+        "raw_headings": info.get("raw_headings"),
+        "rendered_headings": info.get("rendered_headings"),
+    }, hidden
+
+
 async def tech_09(spec, ctx):
     t = timed()
     # Content that only exists after JavaScript runs. The crawl fetches every page over plain
@@ -274,46 +353,40 @@ async def tech_09(spec, ctx):
     render = getattr(ctx, "render", None) or {}
     decision = render.get("decision")
 
+    probe_url = render.get("probe_url")
+    probe_row = _tech_09_row(probe_url, render.get("probe") or {}) if probe_url else None
+
     if decision == "not_needed":
         # The probe found the rendered homepage carried no materially more text than the raw
         # HTML, so the browser was not run on the rest of the site. That is not an absence of
         # evidence -- it is the finding: this site does not hide its content behind JavaScript.
-        probe = render.get("probe") or {}
-        return result(
-            spec,
-            score=100,
-            evidence={
-                "compared_pages": 1,
-                "probe_url": render.get("probe_url"),
-                "summary": render.get("reason"),
-                "pages": [{"url": render.get("probe_url"), **probe}],
-            },
-            recommendation=None,
-            checked=render.get("probe_url") or ctx.origin,
-            duration_ms=ms_since(t),
-            confidence=0.7,
-        )
-
-    rows = []
-    for page in ctx.pages:
-        info = getattr(page, "render", None) or {}
-        if not info.get("applied") or "rendered_words" not in info:
-            continue
-        rendered_words = info.get("rendered_words") or 0
-        gained = max(0, info.get("gained_words") or 0)
-        if rendered_words <= 0:
-            continue
-        # Share of the page a JavaScript-blind crawler never sees.
-        hidden = gained / rendered_words
-        rows.append({
-            "url": page.result.final_url,
-            "raw_words": info.get("raw_words"),
-            "rendered_words": rendered_words,
-            "gained_words": gained,
-            "js_only_share_pct": round(hidden * 100, 1),
-            "raw_headings": info.get("raw_headings"),
-            "rendered_headings": info.get("rendered_headings"),
-        })
+        # Scored by the same share as every other compared page, so the few words a homepage
+        # does gain in the browser still count rather than a flat 100.
+        if probe_row is None:
+            # The probe found no words in either copy: nothing to hide, and nothing to divide by.
+            return result(spec, score=100, evidence={"compared_pages": 1, "probe_url": probe_url, "summary": render.get("reason"),
+                                                     "pages": [{"url": probe_url, **(render.get("probe") or {})}]},
+                          recommendation=None, checked=probe_url or ctx.origin, duration_ms=ms_since(t), confidence=0.7)
+        rows, shares = [probe_row[0]], [probe_row[1]]
+        summary, confidence = render.get("reason"), 0.7
+    else:
+        rows, shares = [], []
+        for page in ctx.pages:
+            info = getattr(page, "render", None) or {}
+            if not info.get("applied"):
+                continue
+            row = _tech_09_row(page.result.final_url, info)
+            if row:
+                rows.append(row[0])
+                shares.append(row[1])
+        # The homepage probe is always one of the compared pages. When only pages that looked like
+        # empty shells were rendered, they alone would otherwise decide the score -- and they were
+        # picked precisely because they look worst.
+        compared = {r["url"].rstrip("/") for r in rows}
+        if rows and probe_row and probe_url.rstrip("/") not in compared:
+            rows.insert(0, probe_row[0])
+            shares.insert(0, probe_row[1])
+        summary, confidence = None, 0.8
 
     if not rows:
         # No rendered copy exists to compare against: rendering was switched off, Playwright
@@ -340,8 +413,10 @@ async def tech_09(spec, ctx):
             duration_ms=ms_since(t),
         )
 
-    average_hidden = sum(r["js_only_share_pct"] for r in rows) / len(rows) / 100
-    score = max(0, min(100, round((1 - average_hidden) * 100)))
+    # Averaged unrounded: result() rounds the score to a tenth, and rounding the per-page shares
+    # or the score to a whole number first could move it by up to half a point.
+    average_hidden = sum(shares) / len(shares)
+    score = max(0.0, min(100.0, (1 - average_hidden) * 100))
     worst = sorted(rows, key=lambda r: r["js_only_share_pct"], reverse=True)[:10]
     rec = None
     if score < 90:
@@ -349,34 +424,42 @@ async def tech_09(spec, ctx):
             "Server-render or pre-render the content these pages assemble in the browser: "
             "AI crawlers that do not execute JavaScript read only the shell."
         )
+    evidence = {
+        "compared_pages": len(rows),
+        "crawled_pages": len(ctx.pages),
+        "render_budget": render.get("budget"),
+        "average_js_only_share_pct": round(average_hidden * 100, 1),
+        # Unrounded, so the working rebuilds the exact score rather than one from rounded shares.
+        "average_js_only_share": average_hidden,
+        "summary": summary or (
+            "{0} of {1} crawled pages were fetched a second time in a browser; on average "
+            "{2}% of their text was absent from the server's own HTML."
+        ).format(len(rows), len(ctx.pages), round(average_hidden * 100, 1)),
+        "worst_pages": worst,
+        "pages": rows,
+    }
+    if probe_url:
+        evidence["probe_url"] = probe_url
     return result(
         spec,
         score=score,
-        evidence={
-            "compared_pages": len(rows),
-            "crawled_pages": len(ctx.pages),
-            "render_budget": render.get("budget"),
-            "average_js_only_share_pct": round(average_hidden * 100, 1),
-            "summary": (
-                "{0} of {1} crawled pages were fetched a second time in a browser; on average "
-                "{2}% of their text was absent from the server's own HTML."
-            ).format(len(rows), len(ctx.pages), round(average_hidden * 100, 1)),
-            "worst_pages": worst,
-            "pages": rows,
-        },
+        evidence=evidence,
         recommendation=rec,
-        checked=ctx.origin,
+        checked=(probe_url or ctx.origin) if decision == "not_needed" else ctx.origin,
         duration_ms=ms_since(t),
-        confidence=0.8,
+        confidence=confidence,
     )
 
 
 async def tech_10(spec, ctx):
     t = timed()
     rows = []
-    for page in ctx.pages:
-        if not page.headings:
-            continue
+    pages = scorable_pages(ctx)
+    if not any(page.headings for page in pages):
+        return result(spec, score=0, evidence={"note": "No headings extracted"}, recommendation="Add a single H1 and logical H2/H3 structure on every template.", checked=ctx.origin, duration_ms=ms_since(t))
+    for page in pages:
+        # A readable page with no headings at all is a page with no H1 and is scored as one;
+        # skipping it left only the pages that have headings to set the average.
         h1s = [h for h in page.headings if h["level"] == 1]
         levels = [h["level"] for h in page.headings]
         skips = sum(1 for a, b in zip(levels, levels[1:]) if b - a > 1)
@@ -385,17 +468,29 @@ async def tech_10(spec, ctx):
             score -= 40 if len(h1s) == 0 else 25
         score -= min(30, skips * 10)
         rows.append({"url": page.result.final_url, "h1_count": len(h1s), "heading_count": len(page.headings), "skipped_levels": skips, "score": max(0, score)})
-    if not rows:
-        return result(spec, score=0, evidence={"note": "No headings extracted"}, recommendation="Add a single H1 and logical H2/H3 structure on every template.", checked=ctx.origin, duration_ms=ms_since(t))
-    avg = sum(r["score"] for r in rows) / len(rows)
+    avg =sum(r["score"] for r in rows) / len(rows)
     rec = "Use exactly one H1 and avoid skipped heading levels." if avg < 90 else None
     return result(spec, score=avg, evidence={"pages": rows, "page_count": len(rows)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+
+
+def _as_count(value) -> int | None:
+    """A model-supplied count as a non-negative int, or None when it is not a whole number."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in (float("inf"), float("-inf")) or number != int(number):
+        return None
+    return max(0, int(number))
 
 
 async def tech_11(spec, ctx):
     t = timed()
     rows = []
-    for page in ctx.pages:
+    pages = scorable_pages(ctx)
+    for page in pages:
         if page.word_count < _MIN_CONTENT_WORDS:
             continue
         heads = [h for h in page.headings if h["level"] <= 3]
@@ -420,7 +515,7 @@ async def tech_11(spec, ctx):
     # page's URL as the "heading" and its mean words-per-heading as the "word count", so the
     # model was judging URLs against an average and its verdict overwrote the score.
     sections_payload = []
-    for page in ctx.pages:
+    for page in pages:
         if page.word_count < _MIN_CONTENT_WORDS:
             continue
         for block in heading_blocks(page):
@@ -433,15 +528,22 @@ async def tech_11(spec, ctx):
 
     if sections_payload:
         llm_res = await judge(tech11_prompt(sections_payload), system=SYSTEM)
-        if llm_res.ok and llm_res.parsed and llm_res.parsed.get("total"):
-            liftable = llm_res.parsed.get("liftable_count", 0)
-            total = llm_res.parsed["total"]
+        # The denominator is the number of sections actually sent, not the model's own "total":
+        # a model that answered 12 of 10 scored 120. A count that is missing or not a number
+        # leaves the heuristic score in place.
+        parsed = llm_res.parsed if llm_res.ok and isinstance(llm_res.parsed, dict) else {}
+        liftable = _as_count(parsed.get("liftable_count"))
+        if liftable is not None:
+            total = len(sections_payload)
+            liftable = min(liftable, total)
             avg = liftable / total * 100
             confidence = 0.8
             evidence["method"] = "llm"
-            evidence["llm"] = {"liftable_count": liftable, "total": total}
+            evidence["llm"] = {"liftable_count": liftable, "total": total, "model_total": parsed.get("total")}
         elif not llm_res.ok:
             evidence["llm_unavailable"] = llm_res.error
+        else:
+            evidence["llm_unusable"] = "the model's reply had no usable liftable_count"
 
     rec = "Break long sections with H2/H3 question-style headings so assistants can lift a passage." if avg < 90 else None
     return result(spec, score=avg, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
@@ -450,7 +552,8 @@ async def tech_11(spec, ctx):
 async def tech_12(spec, ctx):
     t = timed()
     tables = lists = 0
-    for page in ctx.pages:
+    pages = scorable_pages(ctx)
+    for page in pages:
         if not page.soup:
             continue
         # Menus, headers and footers are lists too, and they repeat on every page: counting them
@@ -459,7 +562,7 @@ async def tech_12(spec, ctx):
         lists += sum(1 for el in page.soup.find_all(["ul", "ol"]) if not _in_chrome(el))
     score = 100 if lists + tables >= 8 else (70 if lists + tables >= 3 else 40)
     rec = "Use semantic <ul>/<ol>/<table> markup instead of image-only comparisons." if score < 90 else None
-    return result(spec, score=score, evidence={"tables": tables, "lists": lists, "pages": len(ctx.pages)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    return result(spec, score=score, evidence={"tables": tables, "lists": lists, "pages": len(pages)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
 
 
 # A text-to-code ratio is a percentage of bytes, not a score: a genuinely content-rich
@@ -472,12 +575,17 @@ _TEXT_TO_CODE_BANDS, _TEXT_TO_CODE_FLOOR = rules.band("text_to_code")
 async def tech_13(spec, ctx):
     t = timed()
     rows = []
-    for page in ctx.pages:
-        html_len = max(1, len(page.result.text or ""))
+    for page in scorable_pages(ctx):
+        # The text is extracted from the rendered DOM when the page was rendered, so it is measured
+        # against that document. Against the raw shell it came to well over 100% on a JS site.
+        rendered = getattr(page, "rendered_html", "") or ""
+        html = rendered if rendered.strip() else (page.result.text or "")
+        html_len = max(1, len(html))
         text_len = len(page.text)
         ratio = text_len / html_len * 100
         ratio_score = band(ratio, _TEXT_TO_CODE_BANDS, _TEXT_TO_CODE_FLOOR)
-        rows.append({"url": page.result.final_url, "text_to_code": round(ratio, 2), "text_to_code_score": ratio_score, "words": page.word_count})
+        rows.append({"url": page.result.final_url, "text_to_code": round(ratio, 2), "text_to_code_score": ratio_score, "words": page.word_count,
+                     "html_source": "rendered" if rendered.strip() else "raw"})
     # Text-to-code ratio only: how much of what a crawler downloads is readable text. Content
     # depth is ON-10's measure; counting word totals here as well charged a thin page twice.
     avg = sum(r["text_to_code_score"] for r in rows) / len(rows) if rows else 0
@@ -485,16 +593,27 @@ async def tech_13(spec, ctx):
     return result(spec, score=min(100, avg), evidence={"pages": rows}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
 
 
+_VIDEO_HOST = re.compile(r"^(?:https?:)?//(?:[\w-]+\.)*(?:youtube\.com|youtube-nocookie\.com|youtu\.be|vimeo\.com|"
+                         r"wistia\.(?:com|net)|wi\.st|vidyard\.com|brightcove\.(?:net|com)|bcove\.video|loom\.com|"
+                         r"dailymotion\.com|dai\.ly)(?:[:/?#]|$)", re.I)
+
+
 async def tech_14(spec, ctx):
     t = timed()
     images = []
     videos = 0
     transcripts = 0
-    for page in ctx.pages:
+    for page in scorable_pages(ctx):
         images.extend(page.images)
         if page.soup:
-            videos += len(page.soup.find_all(["video", "iframe"]))
-            if re.search(r"transcript", page.result.text or "", re.I):
+            # A <video>, or an iframe that embeds a video player. Every iframe used to count, so
+            # Google Tag Manager's noscript frame and an embedded map were "videos without transcripts".
+            videos += len(page.soup.find_all("video"))
+            videos += sum(1 for frame in page.soup.find_all("iframe")
+                          if _VIDEO_HOST.search(frame.get("src") or frame.get("data-src") or ""))
+            # The visible copy, not the raw HTML: "transcript" in a script, class name or JSON
+            # blob is not a transcript a reader or an assistant can use.
+            if re.search(r"transcript", page.text or "", re.I):
                 transcripts += 1
     if not images and not videos:
         return no_data(spec, reason="the crawled pages contain no images or videos",
@@ -518,7 +637,7 @@ async def tech_15(spec, ctx):
     t = timed()
     found = 0
     rows = []
-    for page in ctx.pages:
+    for page in scorable_pages(ctx):
         has = bool(page.dates.get("published") or page.dates.get("modified"))
         if page.soup:
             for item in flatten_schema(page.schema_blocks):
@@ -598,24 +717,42 @@ async def tech_16(spec, ctx):
 # Below this many items a pass is reported, but flagged as resting on very little evidence.
 _SMALL_SAMPLE = rules.threshold("small_sample_items")
 
+#
+# Types are matched by exact name. Substring matching let "offer" accept OfferCatalog and
+# "product" accept ProductCollection, so the genuine subtypes that substring matching used to
+# catch are listed here instead.
+_ARTICLE_TYPES = ("article", "blogposting", "newsarticle", "techarticle", "report", "scholarlyarticle",
+                  "analysisnewsarticle", "opinionnewsarticle", "reportagenewsarticle")
+_ORGANIZATION_TYPES = ("organization", "corporation", "localbusiness", "ngo", "educationalorganization",
+                       "medicalorganization", "governmentorganization", "newsmediaorganization",
+                       "researchorganization", "onlinebusiness")
 _PAGE_TYPE_SCHEMA = {
-    "article": ("article", "blogposting", "newsarticle", "techarticle", "report"),
-    "service": ("service", "product", "offer", "professionalservice"),
-    "about": ("organization", "corporation", "localbusiness", "aboutpage"),
-    "home": ("organization", "corporation", "localbusiness", "website"),
-    "case_study": ("article", "casestudy", "creativework"),
+    "article": _ARTICLE_TYPES,
+    # Exact names, so the genuine schema.org subtypes are listed: matching "service" or "offer" as
+    # substrings also accepted OfferCatalog and ProductCollection, which say nothing about a page.
+    "service": ("service", "product", "offer", "professionalservice", "financialservice", "legalservice",
+                "governmentservice", "productmodel", "productgroup", "individualproduct", "someproducts",
+                "aggregateoffer"),
+    "about": _ORGANIZATION_TYPES + ("aboutpage",),
+    "home": _ORGANIZATION_TYPES + ("website",),
+    "case_study": ("article", "casestudy", "creativework") + _ARTICLE_TYPES[1:],
 }
+
+
+def _type_name(schema_type: str) -> str:
+    """The bare, lower-case type name: a full schema.org IRI and "schema:Product" are both "product"."""
+    return re.split(r"[/:#]", schema_type.strip())[-1].lower()
 
 
 async def tech_17(spec, ctx):
     t = timed()
     rows = []
     expected_types = {**_PAGE_TYPE_SCHEMA, **{k: tuple(v) for k, v in industry.page_schema(ctx).items()}}
-    for page in ctx.pages:
+    for page in scorable_pages(ctx):
         types = schema_types(page.schema_blocks)
         accepted = expected_types.get(page.page_type)
         expected = accepted[0].title() if accepted else None
-        hit = bool(accepted) and any(any(a in ty.lower() for a in accepted) for ty in types)
+        hit = bool(accepted) and any(_type_name(ty) in accepted for ty in types)
         if expected is None:
             rows.append({"url": page.result.final_url, "page_type": page.page_type, "types": types, "applicable": False})
         else:
@@ -632,54 +769,91 @@ async def tech_17(spec, ctx):
 
 
 def _collect_author_signals(pages) -> list[dict]:
-    """The synchronous per-page schema-walk + CSS-selector scan behind TECH-18.
+    """The structured author markup behind TECH-18: Person nodes, and the people named in `author`.
 
-    Run off the event loop via asyncio.to_thread(): on a large site (1000+
-    pages) this loop alone measured 74-101s with no `await` inside it, which
-    blocks every other parameter scheduled in the same concurrency batch for
-    that whole time, not just this one.
+    Markup only. A visible byline (an element styled .author or .byline) is not markup a machine can
+    read as a person, and it used to count here: AAOS scored 80 on 166 such elements while ON-12 found
+    that none of them named a real person. Visible bylines are ON-12's to judge. Organization authors
+    (a publisher) do not count either.
+
+    Run off the event loop via asyncio.to_thread(): on a large site (1000+ pages) the walk alone took
+    74-101s with no `await` inside it.
     """
-    authors = []
-    for page in pages:
-        for item in flatten_schema(page.schema_blocks):
-            if "Person" in str(item.get("@type")) or item.get("author"):
-                authors.append({"url": page.result.final_url, "item": {k: item.get(k) for k in ("name", "jobTitle", "url", "@type") if item.get(k)}})
-        if page.soup:
-            by = page.soup.select_one("[rel=author], .author, .byline")
-            if by:
-                authors.append({"url": page.result.final_url, "visible": by.get_text(" ", strip=True)[:160]})
-    return authors
+    return [{"url": page.result.final_url, "item": person}
+            for page in pages for person in structured_authors(page.schema_blocks)]
 
 
 async def tech_18(spec, ctx):
     t = timed()
     authors = await asyncio.to_thread(_collect_author_signals, ctx.pages)
-    score = 80 if authors else 25
-    if any("jobTitle" in (a.get("item") or {}) for a in authors):
-        score = 95
+    if not authors:
+        return no_data(spec, reason="no page marks up an author as a Person in its structured data",
+                       evidence={"author_signals": []}, checked=ctx.origin, duration_ms=ms_since(t))
+    score = 95 if any("jobTitle" in (a.get("item") or {}) for a in authors) else 80
     rec = "Publish author/Person markup with role, credentials and a reachable profile URL." if score < 90 else None
     return result(spec, score=score, evidence={"author_signals": authors}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.65)
 
 
+_RAW_TYPE = re.compile(r'"@type"\s*:\s*"([^"]+)"')
+
+
+def _why_broken(error: str) -> str:
+    """The parser's complaint about a JSON-LD block, in plain words."""
+    e = (error or "").lower()
+    if "control character" in e:
+        return "a raw line break or tab inside a text value"
+    if "expecting" in e or "delimiter" in e:
+        return "a missing comma, quote or bracket"
+    if "extra data" in e:
+        return "more than one JSON object in one script tag"
+    return "it is not valid JSON"
+
+
 async def tech_19(spec, ctx):
+    """Does the structured data the site has parse? Every block is named by its @type, broken
+    ones included (read from their raw text), so the report says exactly what was validated --
+    "1 of 4 blocks valid" next to TECH-16/17/18 at 0 read as a riddle until it said all four
+    were VideoObject embeds. Whether the site has the markup it should is TECH-16/17/18's job."""
     t = timed()
     total = valid = 0
     mismatches = []
+    validated = []   # every block, with its type, so the report says what markup this check read
     for page in ctx.pages:
         for block in page.schema_blocks:
             total += 1
             if block.get("ok"):
+                types = sorted(set(schema_types([block])))
+                validated.append({"url": page.result.final_url, "valid": True, "types": types})
                 valid += 1
             else:
-                mismatches.append({"url": page.result.final_url, "error": block.get("error")})
+                types = sorted(set(_RAW_TYPE.findall(block.get("raw_preview") or "")))
+                why = _why_broken(block.get("error"))
+                validated.append({"url": page.result.final_url, "valid": False, "types": types,
+                                  "error": block.get("error"), "why": why})
+                mismatches.append({"url": page.result.final_url, "error": block.get("error"), "why": why})
     if not total:
-        # Nothing to validate is not 40% valid. Whether the site *should* have markup is
-        # already scored by TECH-16 and TECH-17; scoring a number here would penalise the
-        # same absence a third time. UNKNOWN is excluded from the pillar average instead.
-        return result(spec, score=None, unknown=True, evidence={"blocks": 0, "note": "No JSON-LD blocks were found on any crawled page, so there was no markup to validate. Markup presence is scored by TECH-16 and TECH-17."}, recommendation="Publish JSON-LD structured data (see TECH-16 and TECH-17), then re-run to validate it.", checked=ctx.origin, error="no structured data to validate", duration_ms=ms_since(t))
+        # Nothing to validate: N/A, not a third penalty for the absence TECH-16/17/18 already score.
+        return not_applicable(spec, reason="the site has no JSON-LD structured data, so there is nothing to validate "
+                                           "(whether it should have some is scored by TECH-16, TECH-17 and TECH-18)",
+                              evidence={"blocks": 0}, checked=ctx.origin, duration_ms=ms_since(t))
     score = valid / total * 100
-    rec = "Fix invalid JSON-LD blocks so markup parses and matches visible entity values." if score < 90 else None
-    evidence = {"blocks": total, "valid": valid, "errors": mismatches}
+    all_types = sorted({t for b in validated for t in b["types"]})
+    broken = [b for b in validated if not b["valid"]]
+    rec = None
+    if score < 90:
+        kinds = sorted({t for b in broken for t in b["types"]}) or ["JSON-LD"]
+        reasons = sorted({b["why"] for b in broken})
+        broken_on = list(dict.fromkeys(b["url"] for b in broken))
+        # The recommendation names up to five pages to keep it readable; every block is scored and
+        # every broken one is listed in the evidence.
+        rec = (f"Fix the {len(broken)} broken {'/'.join(kinds)} block{'s' if len(broken) != 1 else ''} "
+               f"({'; '.join(reasons)}) on: {', '.join(broken_on[:5])}{' and others' if len(broken_on) > 5 else ''}.")
+    evidence = {"blocks": total, "valid": valid, "errors": mismatches, "validated_blocks": validated,
+                "types_found": all_types,
+                "markup_validated": (f"{total} JSON-LD block{'s' if total != 1 else ''} on "
+                                     f"{len({b['url'] for b in validated})} page{'s' if len({b['url'] for b in validated}) != 1 else ''}: "
+                                     + (", ".join(all_types) if all_types else "type unreadable")
+                                     + f". {valid} valid, {total - valid} broken.")}
     confidence = 0.85
     if total < _SMALL_SAMPLE:
         # Valid, but there is almost nothing: 1 block passing is not "the site's markup is clean".
@@ -692,16 +866,19 @@ async def tech_19(spec, ctx):
 async def tech_20(spec, ctx):
     t = timed()
     rows = []
-    for page in ctx.pages:
+    for page in scorable_pages(ctx):
         final = page.result.final_url
         canonical = page.canonical
         ok = True
         notes = []
         if canonical:
-            if urlparse(canonical).path and urlparse(final).path.rstrip("/") != urlparse(canonical).path.rstrip("/") and urlparse(canonical).netloc:
-                if urlparse(canonical).path not in {"", "/"} and page.page_type != "home":
-                    notes.append("canonical differs from final URL")
-                    ok = False
+            # Only the homepage itself is exempt. A canonical pointing at "/" used to be exempt
+            # as well, so every page canonicalised to the homepage -- the classic template bug
+            # that de-indexes a whole site -- passed.
+            target = urlparse(canonical)
+            if target.netloc and urlparse(final).path.rstrip("/") != target.path.rstrip("/") and page.page_type != "home":
+                notes.append("canonical differs from final URL")
+                ok = False
         else:
             notes.append("missing canonical")
             ok = False
@@ -714,20 +891,90 @@ async def tech_20(spec, ctx):
     return result(spec, score=score, evidence={"pages": rows}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
 
 
+_MIN_PAGES_PER_LOCALE = 3
+_MIN_SHARED_PATHS = 3   # translations share many page paths; unrelated sections rarely do
+
+
+def _markets(ctx, tags=()) -> dict:
+    """The markets a site visibly serves, from evidence that cannot be an ordinary site section.
+
+    A site serves several markets when any of these holds:
+      * its pages declare two or more languages in <html lang>;
+      * two or more country-style locale prefixes ("/en-us/", "/de-de/") each open at least three URLs;
+      * the same page paths (at least three) exist under two short language prefixes ("/en/about", "/fr/about").
+    A bare two-letter first segment on its own proves nothing: AAOS has /dc/, /go/, /id/ and /us/
+    sections, which an earlier version of this test read as six markets on an English-only site.
+    URLs come from the crawled pages, their links and the sitemap.
+    """
+    urls = [p.result.final_url for p in ctx.pages if getattr(p, "result", None)]
+    urls += [link.get("href") if isinstance(link, dict) else link
+             for p in ctx.pages for link in (getattr(p, "links", None) or []) if link]
+    urls += list(((getattr(ctx, "sitemap", None) or {}).get("urls") or []))
+    pages_per_locale: dict[str, int] = {}
+    rest_by_locale: dict[str, set] = {}
+    for u in {u for u in urls if isinstance(u, str)}:
+        loc = locale_of(u)
+        if not loc:
+            continue
+        pages_per_locale[loc] = pages_per_locale.get(loc, 0) + 1
+        rest = "/".join(urlparse(u).path.strip("/").split("/")[1:])
+        if rest:
+            rest_by_locale.setdefault(loc, set()).add(rest)
+    regional = sorted(loc for loc, n in pages_per_locale.items() if "-" in loc and n >= _MIN_PAGES_PER_LOCALE)
+    bare = [loc for loc in rest_by_locale if "-" not in loc]
+    pairs = [(a, b) for a in bare for b in bare if a < b and len(rest_by_locale[a] & rest_by_locale[b]) >= _MIN_SHARED_PATHS]
+    translated = sorted({loc for pair in pairs for loc in pair})
+    # A regional prefix names a language as well as a country: /en-us/ and /es-us/ are one
+    # country in two languages, which counted as a single market when only countries were read.
+    languages = {loc.split("-")[0] for loc in translated} | {loc.split("-")[0] for loc in regional}
+    countries = {loc.split("-")[1] for loc in regional}
+    codes = []
+    for page in ctx.pages:
+        html = page.soup.find("html") if getattr(page, "soup", None) else None
+        codes.append(str((html.get("lang") if html else "") or ""))
+    # The site's own hreflang tags are evidence too: tags pointing at two countries prove two markets.
+    codes += [str(t.get("lang") or "") for t in tags]
+    for code in codes:
+        code = code.strip().lower().replace("_", "-")
+        if not code or code == "x-default":
+            continue
+        lang, _, region = code.partition("-")
+        if lang:
+            languages.add(lang)
+        if len(region) == 2:
+            countries.add(region)
+    locales = sorted(set(regional) | set(translated))
+    return {"locales": locales[:20], "languages": sorted(languages), "countries": sorted(countries),
+            "several_markets": len(countries) >= 2 or len(languages) >= 2}
+
+
 async def tech_21(spec, ctx):
     t = timed()
     tags = []
     for page in ctx.pages:
         tags.extend({"url": page.result.final_url, **h} for h in page.hreflang)
+    markets = _markets(ctx, tags)
+    if not markets["several_markets"]:
+        # hreflang links the country and language versions of a page. A site serving one country in
+        # one language has none to link, so TECH-21 does not apply to it -- with or without a few
+        # hreflang tags (a lone "en-us" plus "x-default" links the page to itself).
+        where = f" ({', '.join(c.upper() for c in markets['countries'])})" if markets["countries"] else ""
+        own = (f"; its {len(tags)} hreflang tag{'s' if len(tags) != 1 else ''} all point to that one market"
+               if tags else "")
+        return not_applicable(spec, reason=f"the site serves one country{where} in one language{own}, so there are no "
+                                           "country or language versions for hreflang to link",
+                              evidence={"hreflang": tags, **markets}, checked=ctx.origin, duration_ms=ms_since(t))
     if not tags:
-        # No hreflang at all: a failure at 0, with the fix, never a free 100.
-        return no_data(spec, reason="no hreflang annotations were found on the site",
-                              evidence={"hreflang": []}, checked=ctx.origin, duration_ms=ms_since(t))
-    # if present, require valid lang codes
+        # Several countries or languages and no hreflang: a real gap.
+        found = ", ".join(markets["locales"] or [c.upper() for c in markets["countries"]] or markets["languages"])
+        return no_data(spec, reason=f"the site serves several countries or languages ({found}) but has no hreflang annotations",
+                       evidence={"hreflang": [], **markets}, checked=ctx.origin, duration_ms=ms_since(t))
+    # A multi-country site with hreflang: the share of tags that are complete (a language and a link).
     valid = sum(1 for h in tags if h.get("lang") and h.get("href"))
     score = valid / len(tags) * 100
     rec = "Make hreflang reciprocal and use valid locale codes." if score < 90 else None
-    return result(spec, score=score, evidence={"tags": tags}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    return result(spec, score=score, evidence={"tags": tags, **markets}, recommendation=rec, checked=ctx.origin,
+                  duration_ms=ms_since(t))
 
 
 async def tech_22(spec, ctx):
@@ -735,19 +982,26 @@ async def tech_22(spec, ctx):
     titles = []
     metas = []
     rows = []
-    for page in ctx.pages:
+    for page in scorable_pages(ctx):
         titles.append(page.title.strip().lower())
         metas.append(page.meta_description.strip().lower())
         t_ok = 20 <= len(page.title) <= 70
         d_ok = 70 <= len(page.meta_description) <= 170
         rows.append({"url": page.result.final_url, "title": page.title, "title_len": len(page.title), "description": page.meta_description[:180], "desc_len": len(page.meta_description), "title_ok": t_ok and bool(page.title), "desc_ok": d_ok})
-    uniq_t = len({x for x in titles if x}) / max(1, len([x for x in titles if x]))
-    uniq_d = len({x for x in metas if x}) / max(1, len([x for x in metas if x]))
+    # The exact counts go into the evidence: the rows keep only the first 180 characters of a
+    # description, so two that differ after that read as duplicates to anyone recounting them.
+    counts = {
+        "titles": {"unique": len({x for x in titles if x}), "nonempty": len([x for x in titles if x])},
+        "descriptions": {"unique": len({x for x in metas if x}), "nonempty": len([x for x in metas if x])},
+    }
+    uniq_t = counts["titles"]["unique"] / max(1, counts["titles"]["nonempty"])
+    uniq_d = counts["descriptions"]["unique"] / max(1, counts["descriptions"]["nonempty"])
     presence = sum(1 for r in rows if r["title"] and r["desc_len"]) / max(1, len(rows))
     length_q = sum(1 for r in rows if r["title_ok"] and r["desc_ok"]) / max(1, len(rows))
     score = presence * 50 + uniq_t * 15 + uniq_d * 10 + length_q * 25
     rec = "Write unique titles and meta descriptions in recommended length ranges." if score < 90 else None
-    return result(spec, score=score, evidence={"pages": rows, "unique_title_ratio": round(uniq_t, 2)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    return result(spec, score=score, evidence={"pages": rows, "unique_title_ratio": round(uniq_t, 2), "uniqueness_counts": counts},
+                  recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
 
 
 HANDLERS = {

@@ -26,7 +26,8 @@ def _checked(ev: dict, kind: str) -> tuple[str, ...]:
     """The sites this row was checked against. Rows from before the lists were configurable
     carry no record of them, and were checked against the default set."""
     listed = ev.get("platforms_checked")
-    return tuple(listed) if isinstance(listed, list) and listed else DEFAULT[kind]
+    # Only a row with no record falls back; an empty record means this scan checked no sites.
+    return tuple(listed) if isinstance(listed, list) else DEFAULT[kind]
 
 
 def fmt(value: float) -> str:
@@ -237,13 +238,16 @@ def off_08(ev: dict) -> Result:
     if "in_generic_results" not in ev:
         return None
     topic = ev.get("topic") or "the category"
+    # The query the check actually ran: it drops "companies" after a topic that already ends in a
+    # noun ("best orthopedic organization", not "best orthopedic organization companies").
+    query = ev.get("query") if str(ev.get("query") or "").startswith("best ") else f"best {topic} companies"
     if ev["in_generic_results"]:
-        return f"The company appears in the search results for 'best {topic} companies', so it scores 100.", 100.0
+        return f"The company appears in the search results for '{query}', so it scores 100.", 100.0
     pages = ev.get("list_pages_naming_company") or []
     score = _band(len(pages), "best_list_pages")
     named = (f"{len(pages)} 'best' or 'top' list {'page names' if len(pages) == 1 else 'pages name'} it" if pages
              else "no 'best' or 'top' list names it")
-    return f"The company is not in the search results for 'best {topic} companies', and {named}, {_so(score)}", score
+    return f"The company is not in the search results for '{query}', and {named}, {_so(score)}", score
 
 
 @_safe
