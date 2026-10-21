@@ -36,12 +36,21 @@ from .common import (
     near_duplicate_pairs,
     structured_authors,
     primary_brand,
+    page_links,
     result,
     scorable_pages,
     timed,
     top_term_density,
+    url_links,
     word_count,
 )
+
+
+def _key_pages_why(ctx, what: str) -> str:
+    """The reason for ON-01 / ON-10, which read the key pages, or every page when none is identified."""
+    if _service_pages(ctx):
+        return f"Key page (service, solution, home or case study): {what}"
+    return f"Crawled page (no service, solution or case-study page was identified, so every page is used): {what}"
 
 # Openings that say nothing about the business. Only used when the model is unavailable.
 _FILLER_OPENINGS = ("welcome to", "in today's", "in today’s", "we are a leading", "leveraging cutting")
@@ -174,6 +183,8 @@ _QUESTION_HEADING_BANDS, _QUESTION_HEADING_FLOOR = rules.band("question_headings
 async def on_01(spec, ctx):
     t = timed()
     rows = []
+    links = page_links(_service_pages(ctx) or scorable_pages(ctx),
+                       _key_pages_why(ctx, "its H1-H3 headings are read, and the AI judges which are phrased the way buyers ask questions."))
     for page in _service_pages(ctx) or scorable_pages(ctx):
         for h in page.headings:
             if h["level"] > 3:
@@ -187,7 +198,7 @@ async def on_01(spec, ctx):
             spec, reason="no H1-H3 content headings were found on the key pages",
             evidence={"eligible_headings": 0, "pages_assessed": len(_service_pages(ctx) or scorable_pages(ctx)),
                       "pages_crawled": len(ctx.pages)},
-            checked=ctx.origin, duration_ms=ms_since(t))
+            checked=ctx.origin, duration_ms=ms_since(t), links=links)
     hits = sum(1 for r in rows if r["question"])
     share = hits / len(rows)
     score = band(share, _QUESTION_HEADING_BANDS, _QUESTION_HEADING_FLOOR)
@@ -249,12 +260,13 @@ async def on_01(spec, ctx):
         evidence["llm_unavailable"] = coverage.error
 
     rec = "Phrase more H2/H3 headings as buyer questions (How/What/Why/Which…) rather than generic labels." if score < 90 else None
-    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence, links=links)
 
 
 async def on_02(spec, ctx):
     t = timed()
     pages, html_pages, headings, rows = _question_blocks(ctx)
+    links = page_links(pages, "Crawled page: its headings are read for questions, and the answer under each question heading is scored for a direct, self-contained 40-60 word reply.")
     if not rows:
         if not html_pages:
             why = "The crawl did not retrieve any HTML, so there was no page text to extract answers from. Check the URL and run a new scan."
@@ -278,6 +290,7 @@ async def on_02(spec, ctx):
             },
             checked=ctx.origin,
             duration_ms=ms_since(t),
+            links=links,
         )
     avg = sum(r["score"] for r in rows) / len(rows)
     rec = "Write a 40–60 word, self-contained answer under every question heading." if avg < 90 else None
@@ -300,6 +313,7 @@ async def on_02(spec, ctx):
         checked=ctx.origin,
         duration_ms=ms_since(t),
         confidence=0.7,
+        links=links,
     )
 
 
@@ -339,6 +353,7 @@ async def on_03(spec, ctx):
     t = timed()
     concepts = derive_site_categories(ctx)
     blob = " ".join((p.text or "") for p in scorable_pages(ctx)).lower()
+    links = page_links(scorable_pages(ctx), "Crawled page: its text is searched for the site's core concepts and for the sentences that define them.")
     defined = []
     for c in concepts:
         windows = _definition_windows(blob, c)
@@ -356,7 +371,7 @@ async def on_03(spec, ctx):
     if not present:
         return no_data(spec, reason="none of the site's core concepts is explained anywhere in its page text",
                               evidence={"concepts_derived": len(concepts), "concepts_found_on_site": 0},
-                              checked=ctx.origin, duration_ms=ms_since(t))
+                              checked=ctx.origin, duration_ms=ms_since(t), links=links)
     hits = sum(1 for d in defined if d["defined"])
     score = (hits / max(1, len(present))) * 100
     confidence = 0.65
@@ -381,7 +396,7 @@ async def on_03(spec, ctx):
             evidence["llm_unavailable"] = coverage.error
 
     rec = "Add one-sentence definitions for core services and technologies." if score < 90 else None
-    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence, links=links)
 
 
 async def on_04(spec, ctx):
@@ -403,7 +418,8 @@ async def on_04(spec, ctx):
     if not with_opening:
         return no_data(spec, reason="no page opens with a substantial paragraph",
                               evidence={"pages_assessed": len(rows), "pages_with_an_opening": 0},
-                              checked=ctx.origin, duration_ms=ms_since(t))
+                              checked=ctx.origin, duration_ms=ms_since(t),
+                              links=url_links([r["url"] for r in rows], "Crawled page: read for an opening paragraph; none was substantial enough to judge."))
     # A page with no opening has nothing to lead with; it is left out rather than scored 35.
     avg = sum(r["score"] for r in with_opening) / len(with_opening)
     confidence = 0.6
@@ -425,16 +441,19 @@ async def on_04(spec, ctx):
             evidence["llm_unavailable"] = coverage.error
 
     rec = "Lead each page with the conclusion / value proposition, then supporting detail." if avg < 90 else None
-    return result(spec, score=avg, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
+    links = url_links([r["url"] for r in with_opening], "Crawled page: its opening paragraph is judged (by the AI, or by keywords when the AI is unavailable) for whether it leads with the conclusion.")
+    return result(spec, score=avg, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence, links=links)
 
 
 async def on_05(spec, ctx):
     t = timed()
     services = [p for p in scorable_pages(ctx) if p.page_type == "service" or re.search(r"service|solution", _path(p))]
+    why = "Service or solution page: checked for a visible FAQ section or FAQPage structured data."
     # The homepage counted as a "service page" alongside real ones, so a homepage FAQ alone could
     # carry the score. It stands in only for a site whose services live on the homepage.
     if not services:
         services = [p for p in scorable_pages(ctx) if p.page_type == "home"]
+        why = "The homepage (no service or solution page was found, so it stands in): checked for a visible FAQ section or FAQPage structured data."
     if not services:
         # The parameter is "FAQ on every service and solution page". With no such page to
         # inspect there is nothing to score; grading every crawled page instead (the old
@@ -463,6 +482,7 @@ async def on_05(spec, ctx):
         recommendation=rec,
         checked=ctx.origin,
         duration_ms=ms_since(t),
+        links=page_links(services, why),
     )
 
 
@@ -512,6 +532,7 @@ async def on_06(spec, ctx):
             recommendation="Mark up the FAQ sections that already exist with FAQPage structured data, using the same questions and answers as the page.",
             checked=ctx.origin,
             duration_ms=ms_since(t),
+            links=url_links([r["url"] for r in rows], "Page showing an FAQ: checked for FAQPage structured data (none was found on any page)."),
         )
     if not rows:
         # No FAQ on any page: a failure. The page count says how hard it looked.
@@ -543,6 +564,7 @@ async def on_06(spec, ctx):
         recommendation=rec,
         checked=ctx.origin,
         duration_ms=ms_since(t),
+        links=url_links([r["url"] for r in rows], "Page with an FAQ: its FAQPage markup is checked for valid questions and answers, and for whether those questions also appear on the page."),
     )
 
 
@@ -593,14 +615,21 @@ async def on_07(spec, ctx):
             # The model read the pages and found none where buyers evaluate options.
             return no_data(spec, reason="no page lets buyers compare or evaluate options, so the site has no comparison tables",
                                   evidence={"eligible_pages_total": 0, "pages_judged": len(verdicts), "method": "llm"},
-                                  checked=ctx.origin, duration_ms=ms_since(t))
+                                  checked=ctx.origin, duration_ms=ms_since(t),
+                                  links=url_links([c["url"] for c in candidates], _ON07_AI))
         elif verdicts:
             evidence["llm_unavailable"] = "the AI's replies did not match the pages sent"
         elif coverage.error:
             evidence["llm_unavailable"] = coverage.error
 
     rec = "Add real HTML comparison tables where buyers evaluate capabilities or alternatives." if score < 90 else None
-    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
+    links = (url_links([c["url"] for c in candidates], _ON07_AI) if evidence["method"] == "llm" else
+             url_links([e["url"] for e in eligible], "Page where buyers evaluate options (a service page, or one about pricing, features, alternatives or comparisons): checked for a real HTML table."))
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence, links=links)
+
+
+_ON07_AI = ("Crawled page: read by the AI to decide whether buyers evaluate options on it; the pages it picks are "
+            "checked for a real HTML comparison table.")
 
 
 async def on_08(spec, ctx):
@@ -635,7 +664,8 @@ async def on_08(spec, ctx):
                 samples.append({"url": page.result.final_url, "items": items, "useful": good})
             candidates.append({"url": page.result.final_url, "items": items})
     if not total:
-        return result(spec, score=35, evidence={"lists": 0, "empty_or_markup_only_lists": empty_lists, "note": "No content lists were found outside navigation."}, recommendation="Use lists for procedures, benefits and evaluation criteria.", checked=ctx.origin, duration_ms=ms_since(t))
+        return result(spec, score=35, evidence={"lists": 0, "empty_or_markup_only_lists": empty_lists, "note": "No content lists were found outside navigation."}, recommendation="Use lists for procedures, benefits and evaluation criteria.", checked=ctx.origin, duration_ms=ms_since(t),
+                      links=page_links([p for p in scorable_pages(ctx) if p.soup], "Crawled page: searched for bulleted or numbered lists outside the menu, header and footer; none was found on any page."))
     score = useful / total * 100
     confidence = 0.7
     evidence = {"lists": total, "lists_total": total, "useful": useful,
@@ -659,7 +689,8 @@ async def on_08(spec, ctx):
             evidence["llm_unavailable"] = coverage.error
 
     rec = "Use lists for procedures, benefits and evaluation criteria — not decorative nav repeats." if score < 90 else None
-    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
+    links = url_links([c["url"] for c in candidates], "Page with content lists: each bulleted or numbered list outside the menu, header and footer is judged for whether it helps answer a question (steps, benefits, criteria).")
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence, links=links)
 
 
 async def on_09(spec, ctx):
@@ -695,6 +726,7 @@ async def on_09(spec, ctx):
         recommendation=rec,
         checked=ctx.origin,
         duration_ms=ms_since(t),
+        links=url_links([r["url"] for r in rows], f"Crawled page with at least {rules.threshold('min_content_words_for_density')} content words: the share taken by its most repeated terms is measured for keyword stuffing."),
     )
 
 
@@ -760,7 +792,8 @@ async def on_10(spec, ctx):
             evidence["llm_unavailable"] = coverage.error
 
     rec = f"Cover the full checklist on key pages: {'; '.join(points)}." if score < 90 else None
-    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
+    links = page_links(pages, _key_pages_why(ctx, f"checked against the {rubric_points}-point content checklist for this industry, by keyword and by the AI."))
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence, links=links)
 
 
 # What counts as a citable data point: a percentage, a "500+", a currency figure, a
@@ -830,7 +863,11 @@ async def on_11(spec, ctx):
             evidence["llm_unavailable"] = coverage.error
 
     rec = "Add original, citable statistics on major pages with a source or date." if score < 90 else None
-    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
+    links = url_links([r["url"] for r in major],
+                      "Major page (home, service, case study or about): checked for a statistic, and the AI judges whether it is the company's own data."
+                      if any(r["major"] for r in rows) else
+                      "Crawled page (no home, service, case-study or about page was identified, so every page is used): checked for a statistic, and the AI judges whether it is the company's own data.")
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence, links=links)
 
 
 def _collect_thought_leadership_signals(pages) -> list[dict]:
@@ -901,7 +938,8 @@ async def on_12(spec, ctx):
             evidence["llm_unavailable"] = coverage.error
 
     rec = "Name an author with role, credentials and a real profile on thought-leadership pages." if score < 90 else None
-    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
+    links = page_links(scorable_pages(ctx), "Crawled page: searched for an author byline or author markup; every byline found is judged by the AI for a real person's name and role.")
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence, links=links)
 
 
 async def on_13(spec, ctx):
@@ -942,7 +980,8 @@ async def on_13(spec, ctx):
             evidence["llm_unavailable"] = coverage.error
 
     rec = "Name clients, quantify outcomes and describe deployment context on case-study pages." if score < 90 else None
-    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
+    links = url_links([r["url"] for r in rows], "Crawled page: read (by keywords, then by the AI) for a named client, a quantified outcome and deployment detail.")
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence, links=links)
 
 
 async def on_14(spec, ctx):
@@ -951,6 +990,7 @@ async def on_14(spec, ctx):
     sourced = 0
     samples = []
     candidates = []
+    claim_pages = []
     seen: set[str] = set()
     for page in scorable_pages(ctx):
         for sent in re.split(r"(?<=[.!?])\s+", page.text or ""):
@@ -963,6 +1003,7 @@ async def on_14(spec, ctx):
                     continue
                 seen.add(key)
                 claims += 1
+                claim_pages.append(page)
                 # Link text counts only as whole words of 4+ characters: a link reading "IT"
                 # was found inside "digital" and marked the claim as sourced.
                 hrefs = [l for l in page.links if len((l["text"] or "").strip()) >= 4
@@ -977,7 +1018,8 @@ async def on_14(spec, ctx):
                     samples.append({"sentence": sent[:220], "sourced": False})
     if not claims:
         return no_data(spec, reason="the site makes no statistical or factual claims backed by a source",
-                              evidence={"claims": 0}, checked=ctx.origin, duration_ms=ms_since(t))
+                              evidence={"claims": 0}, checked=ctx.origin, duration_ms=ms_since(t),
+                              links=page_links(scorable_pages(ctx), "Crawled page: searched for sentences making a claim with a statistic; none was found on any page."))
     score = sourced / claims * 100
     confidence = 0.55
     evidence = {"claims": claims, "claims_total": claims, "sourced": sourced,
@@ -1001,7 +1043,8 @@ async def on_14(spec, ctx):
             evidence["llm_unavailable"] = coverage.error
 
     rec = "Cite dated primary sources next to material claims and statistics." if score < 90 else None
-    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
+    links = page_links(claim_pages, "Page making a claim with a statistic: each such claim is checked, and judged by the AI, for a source a reader could follow.")
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence, links=links)
 
 
 async def on_15(spec, ctx):
@@ -1030,6 +1073,7 @@ async def on_15(spec, ctx):
         checked=ctx.origin,
         duration_ms=ms_since(t),
         confidence=0.6,
+        links=url_links([r["url"] for r in rows], "Crawled page: checked for a published or last-updated date, to measure how much of the site shows when it was last updated."),
     )
 
 
@@ -1085,7 +1129,8 @@ async def on_16(spec, ctx):
             evidence["llm_unavailable"] = coverage.error
 
     rec = "Add missing journey stages — especially comparison, objection-handling and decision pages." if score < 90 else None
-    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
+    links = page_links(scorable_pages(ctx), "Crawled page: its title, URL and opening text are read (by keywords and by the AI) to place it in a buying-journey stage, from discovery to decision.")
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence, links=links)
 
 
 async def on_17(spec, ctx):
@@ -1125,17 +1170,21 @@ async def on_17(spec, ctx):
             evidence["llm_unavailable"] = coverage.error
 
     rec = "Create Best X for Y and X vs Y pages for priority industries and services." if score < 90 else None
-    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
+    links = (url_links([x["url"] for x in sample], "Crawled page: its title is judged by the AI for whether it is a 'best X for Y' or 'X vs Y' comparison page.")
+             if evidence["method"] == "llm" else
+             page_links(scorable_pages(ctx), "Crawled page: its URL and title are matched against comparison patterns (best ... for, vs, versus, alternative)."))
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence, links=links)
 
 
 async def on_18(spec, ctx):
     t = timed()
     titles = [(p.result.final_url, (p.title or "").lower().strip()) for p in scorable_pages(ctx) if p.title]
+    links = url_links([u for u, _ in titles], "Crawled page with a title: its title is compared with every other page's title, and overlapping pairs are judged by the AI for competing over the same buyer question.")
     if not titles:
         return result(spec, score=None, unknown=True, evidence={}, recommendation="No page titles were available to compare.", checked=ctx.origin, error="no page titles", duration_ms=ms_since(t))
     if len(titles) < 2:
         return no_data(spec, reason="only one page title was available to compare",
-                              evidence={"pages_compared": len(titles)}, checked=ctx.origin, duration_ms=ms_since(t))
+                              evidence={"pages_compared": len(titles)}, checked=ctx.origin, duration_ms=ms_since(t), links=links)
     by_url = dict(titles)
     pairs = [p for p in near_duplicate_pairs(titles, _COMPETING_TITLE_SIMILARITY) if by_url.get(p["a"]) != by_url.get(p["b"])]
     for p in pairs:
@@ -1186,7 +1235,7 @@ async def on_18(spec, ctx):
             evidence["llm_unavailable"] = coverage.error
 
     rec = "Consolidate pages that compete for the same buyer question." if competing_pairs else None
-    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence, links=links)
 
 
 async def on_19(spec, ctx):
@@ -1205,7 +1254,8 @@ async def on_19(spec, ctx):
     share = affected / len(scorable)
     score = band(1 - share, _DILUTION_BANDS, _DILUTION_FLOOR)
     rec = "Merge or expand thin/near-duplicate pages so topics are not diluted." if score < 90 else None
-    return result(spec, score=score, evidence={"thin": thin, "thin_count": len(thin), "near_duplicates": dups, "duplicate_pairs": len(dups), "pages_affected": affected, "pages_assessed": len(scorable)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    links = page_links(scorable, f"Content page (contact, careers and policy pages are left out): checked for thin content (under {_THIN_PAGE_WORDS} words) and for near-duplicate text on another page.")
+    return result(spec, score=score, evidence={"thin": thin, "thin_count": len(thin), "near_duplicates": dups, "duplicate_pairs": len(dups), "pages_affected": affected, "pages_assessed": len(scorable)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), links=links)
 
 
 # Both duplicate checks score the share of the site that is *clean*, so the penalty scales
@@ -1259,6 +1309,7 @@ async def on_20(spec, ctx):
         checked=ctx.origin,
         duration_ms=ms_since(t),
         confidence=0.7,
+        links=url_links([r["url"] for r in rows], "Crawled page: its title and text are checked for the brand named together with a service category and a geography."),
     )
 
 

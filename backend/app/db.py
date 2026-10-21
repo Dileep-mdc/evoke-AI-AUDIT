@@ -27,6 +27,10 @@ CREATE TABLE IF NOT EXISTS scans (
     errors_count INTEGER DEFAULT 0,
     started_at TEXT,
     completed_at TEXT,
+    -- The scrape alone (crawl_site: link discovery, fetching, rendering), apart from scoring.
+    crawl_started_at TEXT,
+    crawl_completed_at TEXT,
+    crawl_duration_ms INTEGER,
     crawler_version TEXT,
     overall_score REAL,
     technical_score REAL,
@@ -37,6 +41,18 @@ CREATE TABLE IF NOT EXISTS scans (
     report_json TEXT,
     crawl_output_path TEXT,
     excel_output_path TEXT
+);
+
+-- What decides whether a finished audit can answer a new request for the same site
+-- (api/scans.py _existing_scan). Read from the saved report once per audit and kept here: the
+-- report is a 6-14 MB value, and parsing it on every request took 100-200 ms an audit.
+CREATE TABLE IF NOT EXISTS scan_reuse (
+    scan_id TEXT PRIMARY KEY,
+    snapshot_folder TEXT,
+    industry TEXT,
+    industry_detected INTEGER,
+    region TEXT,
+    FOREIGN KEY(scan_id) REFERENCES scans(id)
 );
 
 CREATE TABLE IF NOT EXISTS pages (
@@ -166,8 +182,25 @@ def init_db() -> None:
     migrate_legacy_data_dir()
     with get_db() as conn:
         conn.executescript(SCHEMA)
+        _add_missing_columns(conn)
         _renumber_parameters(conn)
     fail_interrupted_scans()
+
+
+# Columns added after the first release. CREATE TABLE IF NOT EXISTS leaves an existing table as
+# it was, so a database made by an earlier build gets them here; older scans keep NULL.
+ADDED_SCAN_COLUMNS = {
+    "crawl_started_at": "TEXT",
+    "crawl_completed_at": "TEXT",
+    "crawl_duration_ms": "INTEGER",
+}
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    have = {r[1] for r in conn.execute("PRAGMA table_info(scans)")}
+    for name, kind in ADDED_SCAN_COLUMNS.items():
+        if name not in have:
+            conn.execute(f"ALTER TABLE scans ADD COLUMN {name} {kind}")
 
 
 def _renumber_parameters(conn: sqlite3.Connection) -> None:

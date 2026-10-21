@@ -11,6 +11,7 @@ openai
 openai-agents
 python-dotenv
 openpyxl
+xlsxwriter
 trafilatura
 lxml
 playwright

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -23,6 +24,7 @@ from ..parameters import crosschecks, identity, industry
 from ..parameters.platforms import resolve as resolve_platforms
 from ..parameters.working import working_for
 from ..parameters.scoring import SCORING_METHOD, build_report, final_from_rules, prioritize
+from .. import parameter_links, site_folder
 from ..pdf_export import build_pdf
 from ..scan_output import build_excel, save_crawl_failures, save_crawl_output, save_excel_output
 from ..storage.repository import ScanRepository
@@ -70,6 +72,9 @@ class ScanRequest(BaseModel):
     # from the site when omitted) and a region whose sites the off-page checks add.
     industry: str | None = None
     region: str | None = None
+    # A site audited before is not read again: its most recent audit is returned (see
+    # _existing_scan). True runs a new audit regardless -- the report's "Run fresh audit" button.
+    fresh: bool = False
 
 
 def usage_history(limit: int = 10) -> list[dict]:
@@ -109,6 +114,9 @@ def _progress_payload(scan: dict) -> dict:
         "offpage_total": scan.get("offpage_total") or SECTION_TOTALS["off_page"],
         "started_at": scan.get("started_at"),
         "completed_at": scan.get("completed_at"),
+        "crawl_started_at": scan.get("crawl_started_at"),
+        "crawl_completed_at": scan.get("crawl_completed_at"),
+        "crawl_duration_ms": scan.get("crawl_duration_ms"),
         "errors_count": scan.get("errors_count") or 0,
         "overall_score": scan.get("overall_score"),
         "ai_usage": _live_usage(scan["id"]),
@@ -138,7 +146,15 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None, choice
             # Every fetch this scan makes -- crawl, robots.txt, sitemap, the link checks in the
             # parameters -- now reads the folder; see crawler/snapshot.py.
             snapshot.activate(snapshot.open_folder(folder))
+        # The scrape is timed on its own, so the report can say how long reading the site took
+        # apart from scoring it. perf_counter for the duration; the timestamps are for display.
+        crawl_started = datetime.now(timezone.utc).isoformat()
+        repo.update(scan_id, crawl_started_at=crawl_started)
+        crawl_clock = time.perf_counter()
         ctx = await crawl_site(url, on_progress=bump)
+        crawl_ms = int((time.perf_counter() - crawl_clock) * 1000)
+        repo.update(scan_id, crawl_completed_at=datetime.now(timezone.utc).isoformat(), crawl_duration_ms=crawl_ms)
+        log.info("Scan %s scraped %d pages in %.1fs", scan_id, len(ctx.pages), crawl_ms / 1000)
         # Company Identity Agent: who owns the site, before any off-page research searches for it.
         ctx.identity = await identity.resolve(ctx)
         ctx.company_name = ctx.identity["name"]
@@ -161,7 +177,15 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None, choice
         await asyncio.to_thread(repo.save_pages, scan_id, ctx.pages)
         # Both crawl artifacts are written before scoring starts, so the scraped content and
         # the failed-link list survive even if the model calls or the workbook later fail.
-        crawl_path = await asyncio.to_thread(save_crawl_output, scan_id, ctx)
+        # The readable site folder (<project>/<host>/: a .txt per page, _index.csv, the links
+        # workbook) is written alongside, not after: it reads pages in worker processes while
+        # this writes the JSON, and it logs rather than raises, so it can never fail the scan.
+        crawl_path, site_dir = await asyncio.gather(
+            asyncio.to_thread(save_crawl_output, scan_id, ctx),
+            site_folder.save(scan_id, ctx, crawl_ms),
+        )
+        if site_dir:
+            log.info("Scan %s saved the site folder %s", scan_id, site_dir)
         # Writing the scraped content is tens of megabytes on a large site and takes real
         # time, so it gets its own step on the bar rather than looking like a stalled crawl.
         repo.update(scan_id, status="crawling", progress_percent=29)
@@ -209,6 +233,9 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None, choice
                 by_id[row["parameter_id"]] = row
             results = [by_id[s["parameter_id"]] for s in registry if s["parameter_id"] in by_id]
             repo.update(scan_id, errors_count=sum(1 for r in results if r.get("error")))
+        # The links each check read, taken off the rows now that the results are final: they go
+        # to the <company>.xlsx workbook below, not into the report or the model's input.
+        checked_links = parameter_links.take(results)
         # Read the checks together and explain results that look contradictory. Annotated rows
         # are saved again.
         findings = crosschecks.reconcile(results, ctx)
@@ -244,6 +271,10 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None, choice
             repo.update(scan_id, excel_output_path=str(excel_path))
         except Exception:
             log.exception("Scan %s completed but its workbook could not be written", scan_id)
+        # <company>.xlsx: every link each parameter was scored from, and why. Logs, never raises.
+        links_path = await asyncio.to_thread(parameter_links.save, scan_id, ctx, results, checked_links)
+        if links_path:
+            log.info("Scan %s saved the parameter links workbook %s", scan_id, links_path)
         # Only flip status to "completed" once the report is fully persisted, so a client
         # that sees "completed" and immediately requests the report never hits a window
         # where report_json is still empty.
@@ -284,6 +315,11 @@ async def create_scan(payload: ScanRequest):
         choice = {"industry": payload.industry, "region": payload.region}
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+    if not folder and not payload.fresh:
+        existing = await asyncio.to_thread(_existing_scan, url, choice)
+        if existing:
+            log.info("Scan request for %s answered with %s audit %s", url, existing["status"], existing["id"])
+            return {**_progress_payload(existing), "reused": True}
     domain = urlparse(url).netloc.lower()
     scan_id = str(uuid.uuid4())
     scan = repo.create(
@@ -296,6 +332,53 @@ async def create_scan(payload: ScanRequest):
     _running.add(task)
     task.add_done_callback(_running.discard)
     return _progress_payload(scan)
+
+
+_IN_PROGRESS = {"queued", "crawling", "evaluating"}
+# How many recent audits are searched for one of the same site. Only columns stored before the
+# report are read (repo.recent_lean), so this costs a few milliseconds even at the limit.
+_REUSE_LOOKBACK = 500
+
+
+def _site_key(url_or_host: str) -> str:
+    """One site however it is typed: 'https://www.tcs.com/', 'tcs.com' and 'WWW.TCS.COM' are all 'tcs.com'."""
+    text = (url_or_host or "").strip().lower()
+    host = urlparse(text if "//" in text else f"//{text}").hostname or ""
+    return host.strip(".").removeprefix("www.")
+
+
+def _existing_scan(url: str, choice: dict) -> dict | None:
+    """The audit to answer this request with instead of reading the site again, or None.
+
+    Matched by site, not by the exact URL typed. An audit of the site still running is joined
+    rather than started twice. Otherwise the most recent finished audit is returned when it
+    actually read the site (an audit refused with 403 has no on-page score and is not reused, so
+    asking again tries again), audited the live site rather than a saved folder, and was scored
+    for the same industry and region -- a different profile changes the scores, so it runs anew.
+    """
+    key = _site_key(url)
+    explicit = bool(choice.get("industry") or choice.get("region"))
+    for scan in repo.recent_lean(_REUSE_LOOKBACK):   # newest first
+        if key not in (_site_key(scan.get("domain") or ""), _site_key(scan.get("input_url") or "")):
+            continue
+        if scan["status"] in _IN_PROGRESS:
+            # What a running audit was asked to score against is not recorded, so an explicit
+            # industry or region cannot be matched to it and starts its own.
+            if not explicit:
+                return scan
+            continue
+        if scan["status"] != "completed":
+            continue
+        # No on-page score: no page of the site was read (tcs.com's 403), so ask the site again.
+        if scan["onpage_score"] is None:
+            continue
+        facts = repo.reuse_facts(scan["id"])
+        if not facts or facts["snapshot_folder"]:
+            continue
+        same_industry = (facts["industry"] == choice["industry"]) if choice.get("industry") else facts["industry_detected"]
+        if same_industry and (facts["region"] or None) == (choice.get("region") or None):
+            return scan
+    return None
 
 
 async def _run(scan_id: str, url: str, folder: str | None = None, choice: dict | None = None) -> None:
@@ -343,7 +426,7 @@ async def execute_recheck(scan_id: str, ids: list[str]) -> None:
             repo.save_parameter(scan_id, row)
             state["done"] += 1
 
-        await run_all_parameters(ctx, specs, on_each)
+        rechecked_links = parameter_links.take(await run_all_parameters(ctx, specs, on_each))
         state["message"] = "Rebuilding the report"
         results = repo.parameters(scan_id)
         # Notes from the first pass are cleared, so none survives about a result that changed.
@@ -374,6 +457,8 @@ async def execute_recheck(scan_id: str, ids: list[str]) -> None:
             repo.update(scan_id, excel_output_path=str(excel_path))
         except Exception:
             log.exception("Re-check of %s finished but its workbook could not be written", scan_id)
+        # The re-run checks' links replace theirs in <company>.xlsx; the others keep the audit's.
+        await asyncio.to_thread(parameter_links.save, scan_id, ctx, results, rechecked_links, True)
         still = [pid for pid in unmeasured(results) if pid in ids]
         state.update(state="done", message=(f"{len(ids) - len(still)} of {len(ids)} now measured"
                                             + (f"; still unmeasured: {', '.join(still)}" if still else "")),

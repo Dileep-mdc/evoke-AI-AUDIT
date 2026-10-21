@@ -79,12 +79,56 @@ def result(
     unknown: bool = False,
     pass_at: Optional[int] = None,
     partial_at: Optional[int] = None,
+    links: Optional[list] = None,
 ) -> dict:
     pa = pass_at if pass_at is not None else spec.get("pass_threshold", 90)
     pb = partial_at if partial_at is not None else spec.get("partial_threshold", 60)
     friendly = humanize_error(error)
     unknown = bool(unknown or score is None)
     st = "UNKNOWN" if unknown else status_from_score(score, pa, pb)
+    row = _row(spec, st, score, confidence, checked, evidence, friendly, unknown, recommendation, duration_ms)
+    if links:
+        row[CHECKED_LINKS] = merge_links(links)
+    return row
+
+
+# The links a check read, with why, kept on the row beside the evidence -- never inside it. The
+# evidence is what the model grades and what the report stores; a thousand-URL list in it would be
+# sent to the model and shipped to the dashboard on every report view. parameter_links.py writes
+# these to the per-company workbook and strips them before the report is built.
+CHECKED_LINKS = "checked_links"
+
+
+def link(url: Optional[str], why: str) -> Optional[dict]:
+    return {"url": url.strip(), "why": why} if isinstance(url, str) and url.strip() else None
+
+
+def page_links(pages, why: str) -> list[dict]:
+    """One link per crawled page, by the URL it was finally read from (after redirects)."""
+    out = []
+    for page in pages or []:
+        res = getattr(page, "result", None)
+        out.append(link((getattr(res, "final_url", None) or getattr(page, "url", None)), why))
+    return [x for x in out if x]
+
+
+def url_links(urls, why: str) -> list[dict]:
+    return [x for x in (link(u, why) for u in urls or []) if x]
+
+
+def merge_links(links) -> list[dict]:
+    """Deduplicated by URL in first-seen order; a URL read for two reasons keeps both."""
+    merged: dict[str, list[str]] = {}
+    for item in links or []:
+        if not item:
+            continue
+        reasons = merged.setdefault(item["url"], [])
+        if item["why"] not in reasons:
+            reasons.append(item["why"])
+    return [{"url": url, "why": " Also: ".join(reasons)} for url, reasons in merged.items()]
+
+
+def _row(spec, st, score, confidence, checked, evidence, friendly, unknown, recommendation, duration_ms) -> dict:
     return {
         "parameter_id": spec["parameter_id"],
         "section": spec["section"],
@@ -127,7 +171,7 @@ NOT_APPLICABLE = "N/A"
 
 
 def not_applicable(spec: dict, *, reason: str, checked: str, evidence: Optional[dict] = None,
-                   duration_ms: int = 0) -> dict:
+                   duration_ms: int = 0, links: Optional[list] = None) -> dict:
     """A check that does not apply to this site: status N/A, no score, left out of the pillar score.
 
     Different from no_data(), which fails a site for lacking something it should have. N/A is only
@@ -139,13 +183,13 @@ def not_applicable(spec: dict, *, reason: str, checked: str, evidence: Optional[
     ev = {**(evidence or {}), "does_not_apply": reason, "retry_pointless": True,
           "summary": f"Not applicable: {reason}."}
     row = result(spec, score=None, unknown=True, evidence=ev, recommendation=None, checked=checked,
-                 duration_ms=duration_ms)
+                 duration_ms=duration_ms, links=links)
     row.update(status=NOT_APPLICABLE, confidence=0.9)
     return row
 
 
 def no_data(spec: dict, *, reason: str, checked: str, evidence: Optional[dict] = None,
-            recommendation: Optional[str] = None, duration_ms: int = 0) -> dict:
+            recommendation: Optional[str] = None, duration_ms: int = 0, links: Optional[list] = None) -> dict:
     """A check that found none of what it looks for on the site: a FAIL at 0, with the fix.
 
     Nothing to evaluate is scored as missing, not left out: an FAQ check on a site with no FAQs
@@ -154,7 +198,7 @@ def no_data(spec: dict, *, reason: str, checked: str, evidence: Optional[dict] =
     ev = {**(evidence or {}), "no_data": True, "no_data_reason": reason, "summary": f"Failed: {reason}."}
     advice = recommendation or NO_DATA_ADVICE.get(spec["parameter_id"]) or f"Add what this check looks for: {spec['name'].lower()}."
     return result(spec, score=0.0, evidence=ev, recommendation=advice, checked=checked, duration_ms=duration_ms,
-                  confidence=0.9)
+                  confidence=0.9, links=links)
 
 
 def upgrade_na_row(row: dict) -> bool:

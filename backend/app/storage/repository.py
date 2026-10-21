@@ -171,6 +171,41 @@ class ScanRepository:
                 ),
             )
 
+    # Columns stored BEFORE report_json in the scans row. SQLite reads a row front to back, so any
+    # column after the 6-14 MB report (crawl_output_path, the crawl_* timings) costs a walk through
+    # it: the full summary row of 9 finished audits took 465 ms. These cost microseconds.
+    _LEAN = ("id, domain, input_url, status, progress_percent, technical_completed, technical_total, "
+             "onpage_completed, onpage_total, offpage_completed, offpage_total, errors_count, started_at, "
+             "completed_at, overall_score, onpage_score")
+
+    def recent_lean(self, limit: int) -> list[dict]:
+        """The newest audits, newest first, without touching any column stored after the report."""
+        with get_db() as conn:
+            rows = conn.execute(f"SELECT {self._LEAN} FROM scans ORDER BY started_at DESC LIMIT ?", (limit,)).fetchall()
+            return [dict(r) for r in rows]
+
+    def reuse_facts(self, scan_id: str) -> dict | None:
+        """The saved report's facts that decide whether this audit can be shown again: whether it read a
+        saved folder, and the industry and region it was scored for. None until the report is saved.
+
+        These never change once an audit's report exists (a re-check keeps them), so they are parsed out
+        of the report once -- one multi-path json_extract, inside SQLite -- and served from scan_reuse after."""
+        with get_db() as conn:
+            row = conn.execute("SELECT snapshot_folder, industry, industry_detected, region FROM scan_reuse WHERE scan_id=?",
+                               (scan_id,)).fetchone()
+            if row is None:
+                found = conn.execute(
+                    """SELECT json_extract(report_json, '$.snapshot.folder', '$.industry.key',
+                              '$.industry.detected', '$.platforms.region')
+                       FROM scans WHERE id=? AND report_json IS NOT NULL""", (scan_id,)).fetchone()
+                if not found or not found[0]:
+                    return None
+                folder, industry_key, detected, region = json.loads(found[0])
+                row = (folder, industry_key, 1 if detected else 0, region)
+                conn.execute("INSERT OR REPLACE INTO scan_reuse VALUES (?, ?, ?, ?, ?)", (scan_id, *row))
+        folder, industry_key, detected, region = row
+        return {"snapshot_folder": folder, "industry": industry_key, "industry_detected": bool(detected), "region": region}
+
     def report(self, scan_id: str) -> dict | None:
         with get_db() as conn:
             row = conn.execute("SELECT report_json FROM scans WHERE id=?", (scan_id,)).fetchone()

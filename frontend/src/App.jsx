@@ -17,6 +17,19 @@ function fmt(n, digits = 1) {
   return Number(n).toFixed(digits);
 }
 
+// 1823456 -> "30m 23.5s"; 4200 -> "4.2s". Matches the workbook's Scraping Time.
+function duration(ms) {
+  if (ms == null || Number.isNaN(ms)) return "—";
+  const minutes = Math.floor(ms / 60000);
+  const seconds = ((ms % 60000) / 1000).toFixed(1);
+  return minutes ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+function spanMs(from, to) {
+  if (!from || !to) return null;
+  return new Date(to) - new Date(from);
+}
+
 function friendlyError(error) {
   if (!error) return "";
   const t = String(error);
@@ -419,7 +432,8 @@ function Landing() {
     setError("");
     try {
       const scan = await createScan(target, { industry });
-      nav(`/scan/${scan.scan_id}`);
+      // An audit of this site already finished: straight to its report, which says it was reused.
+      nav(scan.status === "completed" ? `/report/${scan.scan_id}?reused=1` : `/scan/${scan.scan_id}`);
     } catch (e) {
       setError(e.message);
       setBusy(false);
@@ -576,6 +590,9 @@ function Scanning() {
       ))}
       {p && (
         <p style={{ color: "var(--muted)" }}>Overall {Math.round(p.progress_percent || 0)}% · {PHASES[p.status] || p.status}</p>
+      )}
+      {p?.crawl_duration_ms != null && (
+        <p style={{ color: "var(--muted)" }}>Scraping finished in {duration(p.crawl_duration_ms)}</p>
       )}
       {busy && !err && (
         <p className="scan-busy">Working through the heavier checks. Progress will update in a moment.</p>
@@ -760,6 +777,9 @@ function ScanHistoryGrid({ scans, onOpen }) {
 function Dashboard() {
   const { scanId } = useParams();
   const nav = useNavigate();
+  const [query] = useSearchParams();
+  const reused = query.get("reused") === "1";
+  const [freshBusy, setFreshBusy] = useState(false);
   const [report, setReport] = useState(null);
   const [err, setErr] = useState("");
   const [search, setSearch] = useState("");
@@ -870,6 +890,22 @@ function Dashboard() {
     return <Shell search={search} onSearch={setSearch}><div className="card">Loading report…</div></Shell>;
   }
 
+  // A new audit of the same site, with the same industry profile and region as this report.
+  async function runFreshAudit() {
+    setFreshBusy(true);
+    try {
+      const scan = await createScan(report.input_url, {
+        fresh: true,
+        industry: report.industry && !report.industry.detected ? report.industry.key : null,
+        region: report.platforms?.region || null,
+      });
+      nav(`/scan/${scan.scan_id}`);
+    } catch (e) {
+      setFreshBusy(false);
+      notify(`Could not start a fresh audit: ${e.message}`, 5000);
+    }
+  }
+
   function exportPdf() {
     window.location.href = downloadUrl(scanId);
     notify("Preparing PDF download");
@@ -900,9 +936,26 @@ function Dashboard() {
           <div className="page-head">
             <div>
               <h1>{report.domain}</h1>
+              {report.crawl_duration_ms != null && (
+                <p title={`Scraping started ${new Date(report.crawl_started_at).toLocaleString()}, finished ${new Date(report.crawl_completed_at).toLocaleString()}`}>
+                  Scraping time {duration(report.crawl_duration_ms)}
+                  {report.ai_usage?.pages != null && ` · ${report.ai_usage.pages.toLocaleString()} pages`}
+                  {spanMs(report.started_at, report.completed_at) != null && ` · Total scan ${duration(spanMs(report.started_at, report.completed_at))}`}
+                </p>
+              )}
               {report.rechecked && <p>Re-checked</p>}
+              {reused && (
+                <p className="reused-note">
+                  This site was already audited on {new Date(report.audited_at || report.generated_at).toLocaleString()}, so
+                  that report is shown instead of reading the site again. Use "Run fresh audit" for an up-to-date one.
+                </p>
+              )}
             </div>
             <div className="head-actions">
+              <button className="btn btn-ghost" onClick={runFreshAudit} disabled={freshBusy}
+                      title="Read the website again and score it from scratch">
+                <Icon name="rerun" /> {freshBusy ? "Starting…" : "Run fresh audit"}
+              </button>
               {(rechecking || unmeasured.length > 0) && (
                 <button
                   className="btn btn-ghost"

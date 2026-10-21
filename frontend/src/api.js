@@ -9,7 +9,8 @@ async function read(res) {
 }
 
 export function createScan(url, options = {}) {
-  const body = { url, industry: options.industry || null, region: options.region || null };
+  // A site audited before comes back as its most recent audit (reused: true) unless fresh is set.
+  const body = { url, industry: options.industry || null, region: options.region || null, fresh: Boolean(options.fresh) };
   return fetch("/api/scans", { method: "POST", headers, body: JSON.stringify(body) }).then(read);
 }
 

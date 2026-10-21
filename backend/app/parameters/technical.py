@@ -14,8 +14,9 @@ from ..llm.prompts import SYSTEM, tech11_prompt
 from . import rules
 from . import industry
 from ..crawler.sitemap import locale_of
-from .common import (VITAL_NAMES, VITALS, band, flatten_schema, heading_blocks, ms_since, no_data, not_applicable,
-                     result, schema_types, scorable_pages, structured_authors, timed, vital_rating, vital_score)
+from .common import (VITAL_NAMES, VITALS, band, flatten_schema, heading_blocks, link, ms_since, no_data, not_applicable,
+                     page_links, result, schema_types, scorable_pages, structured_authors, timed, url_links, vital_rating,
+                     vital_score)
 
 # Declared in scoring_rules.json rather than inline, for the same reason as onpage.py: these
 # are the methodology, and they belong where a reviewer can read them together.
@@ -41,17 +42,18 @@ def _at_most(value: float, bands: tuple[tuple[float, float], ...], floor: float)
 async def tech_01(spec, ctx):
     t = timed()
     robots = ctx.robots
+    links = [link(robots.url, "The site's robots.txt: read to see whether each AI crawler (GPTBot, ClaudeBot, PerplexityBot and the others) is allowed or blocked.")]
     if not robots.result.ok and not robots.raw.strip():
-        return result(spec, score=None, unknown=True, evidence={"url": robots.url}, recommendation="Publish a robots.txt that explicitly allows AI crawlers.", checked=robots.url, error="robots.txt unavailable", duration_ms=ms_since(t))
+        return result(spec, score=None, unknown=True, evidence={"url": robots.url}, recommendation="Publish a robots.txt that explicitly allows AI crawlers.", checked=robots.url, error="robots.txt unavailable", duration_ms=ms_since(t), links=links)
     decisions = [bot_decision(robots, bot) for bot in AI_BOTS]
     known = [d for d in decisions if d["decision"] in {"ALLOWED", "BLOCKED"}]
     if not known:
-        return result(spec, score=None, unknown=True, evidence={"url": robots.url, "decisions": decisions}, recommendation="Ensure robots.txt parses cleanly so AI-crawler rules can be evaluated.", checked=robots.url, error="robots.txt did not parse", duration_ms=ms_since(t))
+        return result(spec, score=None, unknown=True, evidence={"url": robots.url, "decisions": decisions}, recommendation="Ensure robots.txt parses cleanly so AI-crawler rules can be evaluated.", checked=robots.url, error="robots.txt did not parse", duration_ms=ms_since(t), links=links)
     allowed = sum(1 for d in known if d["decision"] == "ALLOWED")
     score = allowed / len(known) * 100
     blocked = [d["name"] for d in known if d["decision"] == "BLOCKED"]
     rec = f"Allow these AI crawlers in robots.txt: {', '.join(blocked)}." if blocked else None
-    return result(spec, score=score, evidence={"url": robots.url, "decisions": decisions}, recommendation=rec, checked=robots.url, duration_ms=ms_since(t))
+    return result(spec, score=score, evidence={"url": robots.url, "decisions": decisions}, recommendation=rec, checked=robots.url, duration_ms=ms_since(t), links=links)
 
 
 async def tech_02(spec, ctx):
@@ -60,8 +62,9 @@ async def tech_02(spec, ctx):
     # The app's full browser user-agent. The abbreviated "Mozilla/5.0 (compatible; Chrome/...)"
     # used before is itself refused by bot-management CDNs, which left no baseline at all.
     browser_fetch = await fetch(url, user_agent=BROWSER_UA, live=True)
+    links = [link(url, "The homepage: requested once as a normal browser and once as each AI crawler, to see whether the CDN or firewall blocks AI crawlers or serves them less content.")]
     if not browser_fetch.ok:
-        return result(spec, score=None, unknown=True, evidence={"url": url, "error": browser_fetch.error}, recommendation="Homepage was unreachable; retry the scan.", checked=url, error=browser_fetch.error or "homepage unreachable", duration_ms=ms_since(t))
+        return result(spec, score=None, unknown=True, evidence={"url": url, "error": browser_fetch.error}, recommendation="Homepage was unreachable; retry the scan.", checked=url, error=browser_fetch.error or "homepage unreachable", duration_ms=ms_since(t), links=links)
     baseline_len = len(browser_fetch.content)
     bot_results = await asyncio.gather(*(fetch(url, user_agent=f"{bot}/1.0") for bot in AI_BOTS))
     rows = []
@@ -75,7 +78,7 @@ async def tech_02(spec, ctx):
             blocked.append(bot)
     score = (len(AI_BOTS) - len(blocked)) / len(AI_BOTS) * 100
     rec = f"Allow CDN/firewall traffic from: {', '.join(blocked)}." if blocked else None
-    return result(spec, score=score, evidence={"baseline_bytes": baseline_len, "bots": rows}, recommendation=rec, checked=url, duration_ms=ms_since(t), confidence=0.6)
+    return result(spec, score=score, evidence={"baseline_bytes": baseline_len, "bots": rows}, recommendation=rec, checked=url, duration_ms=ms_since(t), confidence=0.6, links=links)
 
 
 _LLMS_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)\s]+)\)")
@@ -103,8 +106,9 @@ def _llms_link_target(link: str, origin: str) -> str | None:
 async def tech_03(spec, ctx):
     t = timed()
     llms = ctx.llms
+    file_link = [link(llms.url or ctx.origin.rstrip("/") + "/llms.txt", "The site's /llms.txt file: checked that it exists, has content, links to pages that resolve, and carries a date.")]
     if not llms.ok or not llms.text.strip():
-        return result(spec, score=0, evidence={"url": llms.url, "status": llms.status_code}, recommendation="Publish an /llms.txt file listing the site's most important pages for AI assistants.", checked=ctx.origin.rstrip("/") + "/llms.txt", duration_ms=ms_since(t))
+        return result(spec, score=0, evidence={"url": llms.url, "status": llms.status_code}, recommendation="Publish an /llms.txt file listing the site's most important pages for AI assistants.", checked=ctx.origin.rstrip("/") + "/llms.txt", duration_ms=ms_since(t), links=file_link)
     text = llms.text
     non_empty = len(text.strip()) > 40
     found = _LLMS_LINK_RE.findall(text)
@@ -117,7 +121,8 @@ async def tech_03(spec, ctx):
     fresh = bool(_DATE_RE.search(text))
     score = 40 + (20 if non_empty else 0) + (20 * link_ratio if links else 10) + (20 if fresh else 0)
     rec = "Keep llms.txt non-empty, link to pages that resolve, and include a freshness/date signal." if score < 90 else None
-    return result(spec, score=min(100, score), evidence={"non_empty": non_empty, "links_found": len(links), "non_web_links_skipped": len(found) - len(links), "sampled_links": resolved, "freshness_signal": fresh}, recommendation=rec, checked=llms.final_url, duration_ms=ms_since(t))
+    checked_links = file_link + url_links([u for _, u in links], "Linked from llms.txt: requested to confirm the link resolves.")
+    return result(spec, score=min(100, score), evidence={"non_empty": non_empty, "links_found": len(links), "non_web_links_skipped": len(found) - len(links), "sampled_links": resolved, "freshness_signal": fresh}, recommendation=rec, checked=llms.final_url, duration_ms=ms_since(t), links=checked_links)
 
 
 _OVERLAY_MARKERS = ("cookie", "consent", "gdpr", "onetrust", "cookiebot", "trustarc", "cookieyes", "modal", "overlay", "paywall")
@@ -140,15 +145,18 @@ async def tech_04(spec, ctx):
     if login_form and home.word_count < 80:
         score = min(score, 20)
     rec = "Ensure the main page content is not hidden behind a login, pop-up or cookie wall." if score < 90 else None
-    return result(spec, score=score, evidence={"markers_found": matched, "login_form": login_form, "word_count": home.word_count}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.55)
+    return result(spec, score=score, evidence={"markers_found": matched, "login_form": login_form, "word_count": home.word_count}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.55,
+                  links=page_links([home], "The homepage: its HTML is searched for a login form and for cookie, consent or pop-up overlays covering the content."))
 
 
 async def tech_05(spec, ctx):
     t = timed()
     sm = ctx.sitemap
     urls = sm.get("urls") or []
+    files = url_links([s.get("url") for s in sm.get("sources") or []], "Sitemap file: read for the list of page URLs it publishes.")
     if not urls:
-        return result(spec, score=0, evidence={"candidates": sm.get("candidates"), "errors": sm.get("errors")}, recommendation="Publish an XML sitemap and reference it from robots.txt.", checked=ctx.origin, duration_ms=ms_since(t))
+        tried = url_links(sm.get("candidates"), "Sitemap location tried (from robots.txt or the usual /sitemap.xml paths); no page URLs were found in it.")
+        return result(spec, score=0, evidence={"candidates": sm.get("candidates"), "errors": sm.get("errors")}, recommendation="Publish an XML sitemap and reference it from robots.txt.", checked=ctx.origin, duration_ms=ms_since(t), links=files + tried)
     # Every sitemap URL is validated, not the first fifteen in document order -- "is the
     # sitemap accurate" cannot be answered from a fixed-size slice of the front of it.
     sample = urls
@@ -162,7 +170,9 @@ async def tech_05(spec, ctx):
     coverage = (covered / len(crawled) * 100) if crawled else 0
     score = 25 + validity * 0.45 + coverage * 0.30
     rec = "Fix sitemap URLs that don't resolve and ensure crawled pages are listed in the sitemap." if score < 90 else None
-    return result(spec, score=min(100, score), evidence={"sitemap_url_count": len(urls), "sampled": len(sample), "valid_sampled": valid, "crawled_coverage_pct": round(coverage, 1), "errors": sm.get("errors")}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.7)
+    checked_links = (files + url_links(sample, "Listed in the sitemap: requested to confirm the URL resolves (sitemap accuracy).")
+                     + page_links(scorable_pages(ctx), "Crawled page: checked for whether the sitemap lists it (sitemap coverage)."))
+    return result(spec, score=min(100, score), evidence={"sitemap_url_count": len(urls), "sampled": len(sample), "valid_sampled": valid, "crawled_coverage_pct": round(coverage, 1), "errors": sm.get("errors")}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.7, links=checked_links)
 
 
 async def tech_06(spec, ctx):
@@ -190,6 +200,10 @@ async def tech_06(spec, ctx):
                       recommendation="No internal link could be checked; raise LINK_RECHECK_LIMIT and re-scan.",
                       checked=ctx.origin, error="no internal links checked", duration_ms=ms_since(t))
     checks =[crawled.get(u) or fresh[u] for u in links]
+    checked_links = [link(u, "Internal link found on the site's pages: its status and redirect hops come from the crawl's own request for it."
+                          if u in crawled else
+                          "Internal link found on the site's pages that the crawl never requested: requested now to see whether it resolves.")
+                     for u in links]
     rows = []
     broken = chains = 0
     for u, c in zip(links, checks):
@@ -201,7 +215,7 @@ async def tech_06(spec, ctx):
     score = (len(links) - broken) / len(links) * 100 - min(_CHAIN_PENALTY_MAX, chains * _CHAIN_PENALTY)
     rec = "Fix broken internal links and collapse redirect chains to 1-2 hops." if score < 90 else None
     return result(spec, score=max(0, score), evidence={"sampled": len(links), "from_crawl": len(links) - len(pending), "rechecked": len(pending),
-                                                     "uncrawled_links": len(uncrawled), "not_checked": len(uncrawled) - len(pending), "broken": broken, "redirect_chains": chains, "pages": rows}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.7)
+                                                     "uncrawled_links": len(uncrawled), "not_checked": len(uncrawled) - len(pending), "broken": broken, "redirect_chains": chains, "pages": rows}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.7, links=checked_links)
 
 
 async def tech_07(spec, ctx):
@@ -210,8 +224,9 @@ async def tech_07(spec, ctx):
     t = timed()
     vit = await vitals.measure(ctx)
     source = vit.get("source")
+    links = _tech_07_links(ctx, vit)
     if source not in VITALS:
-        return _tech_07_proxy(spec, ctx, t, vit.get("unavailable") or [])
+        return _tech_07_proxy(spec, ctx, t, vit.get("unavailable") or [], links)
     metrics = vit["metrics"]
     # Averaged unrounded, and stored that way: rounding each metric's points first, or having the
     # working re-derive them from the rounded metrics below, could land a tenth off the score.
@@ -237,14 +252,30 @@ async def tech_07(spec, ctx):
            "space for images, ads and embeds so the layout does not shift.")
     rec = None if score >= 90 else (f"Improve {', '.join(weak)}: {how}" if weak else how[:1].upper() + how[1:])
     return result(spec, score=score, evidence=evidence, recommendation=rec, checked=vit.get("origin") or ctx.origin,
-                  duration_ms=ms_since(t), confidence=0.9 if source == "field" else 0.7)
+                  duration_ms=ms_since(t), confidence=0.9 if source == "field" else 0.7, links=links)
 
 
-def _tech_07_proxy(spec, ctx, t, unavailable: list[str]):
+def _tech_07_links(ctx, vit: dict) -> list:
+    """What TECH-07 measured: the origin's Chrome UX Report record (only when the API was actually
+    asked -- with no key configured no request is made), and the pages the browser lab run loaded."""
+    reasons = list(vit.get("unavailable") or []) + [vit.get("field_unavailable") or ""]
+    out = []
+    if not any("CRUX_API_KEY" in r for r in reasons):
+        out.append(link(vit.get("origin") or ctx.origin,
+                        "Site origin: Google's Chrome UX Report was asked for this site's real-user Core Web Vitals (LCP, INP, CLS)."
+                        + ("" if vit.get("source") == "field" else " It had no complete record, so it did not decide the score.")))
+    for page in vit.get("lab_pages") or []:
+        measured = all(k in page for k in ("lcp_ms", "cls", "tbt_ms"))
+        out.append(link(page.get("url"), "Key page loaded in a throttled headless browser to measure LCP, CLS and Total Blocking Time."
+                        if measured else "Key page a headless browser tried to measure; the measurement failed, so it did not count."))
+    return [x for x in out if x]
+
+
+def _tech_07_proxy(spec, ctx, t, unavailable: list[str], links: list):
     """Latency and HTML weight from the crawl itself: the fallback when no Core Web Vitals source works."""
     pages = [p for p in ctx.pages if p.result and p.result.ok]
     if not pages:
-        return result(spec, score=None, unknown=True, evidence={"vitals_unavailable": unavailable}, recommendation="No successfully crawled pages to measure.", checked=ctx.origin, error="no pages", duration_ms=ms_since(t))
+        return result(spec, score=None, unknown=True, evidence={"vitals_unavailable": unavailable}, recommendation="No successfully crawled pages to measure.", checked=ctx.origin, error="no pages", duration_ms=ms_since(t), links=links)
     latencies = [p.result.elapsed_ms for p in pages]
     sizes = [len(p.result.content) for p in pages]
     avg_latency = sum(latencies) / len(latencies)
@@ -258,7 +289,8 @@ def _tech_07_proxy(spec, ctx, t, unavailable: list[str]):
     evidence = {"vitals_source": "proxy", "pages_measured": len(pages), "avg_latency_ms": round(avg_latency), "avg_page_bytes": round(avg_size),
                 "latency_score": latency_score, "weight_score": weight_score, "vitals_unavailable": unavailable,
                 "note": "Latency/weight proxy: real Core Web Vitals could not be measured for the reasons listed."}
-    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.4)
+    links = links + page_links(pages, "Crawled page: its response time and HTML size from the crawl feed the speed estimate, because no Core Web Vitals source was available.")
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.4, links=links)
 
 
 # A fixed layout width of 1000px or more declared as a CSS rule (`min-width: 1200px`), which
@@ -317,7 +349,8 @@ async def tech_08(spec, ctx):
     if overflow:
         score = min(score, 80)
     rec = "Serve HTTPS and include a mobile viewport meta tag." if score < 90 else None
-    return result(spec, score=score, evidence={"final_url": home.result.final_url, "https": https, "viewport": viewport, "fixed_width_layout": overflow}, recommendation=rec, checked=home.result.final_url, duration_ms=ms_since(t))
+    return result(spec, score=score, evidence={"final_url": home.result.final_url, "https": https, "viewport": viewport, "fixed_width_layout": overflow}, recommendation=rec, checked=home.result.final_url, duration_ms=ms_since(t),
+                  links=page_links([home], "The homepage: checked for HTTPS, a mobile viewport tag and fixed-width layout rules that force sideways scrolling on a phone."))
 
 
 def _tech_09_row(url, info: dict):
@@ -366,7 +399,8 @@ async def tech_09(spec, ctx):
             # The probe found no words in either copy: nothing to hide, and nothing to divide by.
             return result(spec, score=100, evidence={"compared_pages": 1, "probe_url": probe_url, "summary": render.get("reason"),
                                                      "pages": [{"url": probe_url, **(render.get("probe") or {})}]},
-                          recommendation=None, checked=probe_url or ctx.origin, duration_ms=ms_since(t), confidence=0.7)
+                          recommendation=None, checked=probe_url or ctx.origin, duration_ms=ms_since(t), confidence=0.7,
+                          links=[link(probe_url, _TECH_09_PROBE)])
         rows, shares = [probe_row[0]], [probe_row[1]]
         summary, confidence = render.get("reason"), 0.7
     else:
@@ -440,6 +474,9 @@ async def tech_09(spec, ctx):
     }
     if probe_url:
         evidence["probe_url"] = probe_url
+    checked_links = [link(r["url"], _TECH_09_PROBE if probe_url and r["url"].rstrip("/") == probe_url.rstrip("/") else
+                          "Page fetched a second time in a real browser; its rendered text was compared with the server's raw HTML to measure how much only appears after JavaScript runs.")
+                     for r in rows]
     return result(
         spec,
         score=score,
@@ -448,15 +485,21 @@ async def tech_09(spec, ctx):
         checked=(probe_url or ctx.origin) if decision == "not_needed" else ctx.origin,
         duration_ms=ms_since(t),
         confidence=confidence,
+        links=checked_links,
     )
+
+
+_TECH_09_PROBE = ("Homepage probe: fetched a second time in a real browser and compared with the server's raw HTML, "
+                  "to see whether the site hides content behind JavaScript.")
 
 
 async def tech_10(spec, ctx):
     t = timed()
     rows = []
     pages = scorable_pages(ctx)
+    links = page_links(pages, "Crawled page: its number of H1 headings and the order of its H1-H2-H3 headings are scored.")
     if not any(page.headings for page in pages):
-        return result(spec, score=0, evidence={"note": "No headings extracted"}, recommendation="Add a single H1 and logical H2/H3 structure on every template.", checked=ctx.origin, duration_ms=ms_since(t))
+        return result(spec, score=0, evidence={"note": "No headings extracted"}, recommendation="Add a single H1 and logical H2/H3 structure on every template.", checked=ctx.origin, duration_ms=ms_since(t), links=links)
     for page in pages:
         # A readable page with no headings at all is a page with no H1 and is scored as one;
         # skipping it left only the pages that have headings to set the average.
@@ -470,7 +513,7 @@ async def tech_10(spec, ctx):
         rows.append({"url": page.result.final_url, "h1_count": len(h1s), "heading_count": len(page.headings), "skipped_levels": skips, "score": max(0, score)})
     avg =sum(r["score"] for r in rows) / len(rows)
     rec = "Use exactly one H1 and avoid skipped heading levels." if avg < 90 else None
-    return result(spec, score=avg, evidence={"pages": rows, "page_count": len(rows)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    return result(spec, score=avg, evidence={"pages": rows, "page_count": len(rows)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), links=links)
 
 
 def _as_count(value) -> int | None:
@@ -546,7 +589,8 @@ async def tech_11(spec, ctx):
             evidence["llm_unusable"] = "the model's reply had no usable liftable_count"
 
     rec = "Break long sections with H2/H3 question-style headings so assistants can lift a passage." if avg < 90 else None
-    return result(spec, score=avg, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
+    links = url_links([r["url"] for r in rows], f"Crawled page with at least {_MIN_CONTENT_WORDS} words of body text: words per heading and heading density are scored, and its sections may be sent to the AI to judge whether a passage can be lifted on its own.")
+    return result(spec, score=avg, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence, links=links)
 
 
 async def tech_12(spec, ctx):
@@ -562,7 +606,8 @@ async def tech_12(spec, ctx):
         lists += sum(1 for el in page.soup.find_all(["ul", "ol"]) if not _in_chrome(el))
     score = 100 if lists + tables >= 8 else (70 if lists + tables >= 3 else 40)
     rec = "Use semantic <ul>/<ol>/<table> markup instead of image-only comparisons." if score < 90 else None
-    return result(spec, score=score, evidence={"tables": tables, "lists": lists, "pages": len(pages)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    links = page_links([p for p in pages if p.soup], "Crawled page: its tables and bulleted / numbered lists outside the menu, header and footer are counted.")
+    return result(spec, score=score, evidence={"tables": tables, "lists": lists, "pages": len(pages)}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), links=links)
 
 
 # A text-to-code ratio is a percentage of bytes, not a score: a genuinely content-rich
@@ -590,7 +635,8 @@ async def tech_13(spec, ctx):
     # depth is ON-10's measure; counting word totals here as well charged a thin page twice.
     avg = sum(r["text_to_code_score"] for r in rows) / len(rows) if rows else 0
     rec = "Increase indexable copy relative to markup, inline scripts and styles." if avg < 90 else None
-    return result(spec, score=min(100, avg), evidence={"pages": rows}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    links = url_links([r["url"] for r in rows], "Crawled page: its readable text is measured against the size of its HTML (text-to-code ratio).")
+    return result(spec, score=min(100, avg), evidence={"pages": rows}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), links=links)
 
 
 _VIDEO_HOST = re.compile(r"^(?:https?:)?//(?:[\w-]+\.)*(?:youtube\.com|youtube-nocookie\.com|youtu\.be|vimeo\.com|"
@@ -603,6 +649,7 @@ async def tech_14(spec, ctx):
     images = []
     videos = 0
     transcripts = 0
+    links = page_links(scorable_pages(ctx), "Crawled page: every image's alt text is checked, and any embedded video is checked for a transcript.")
     for page in scorable_pages(ctx):
         images.extend(page.images)
         if page.soup:
@@ -617,7 +664,7 @@ async def tech_14(spec, ctx):
                 transcripts += 1
     if not images and not videos:
         return no_data(spec, reason="the crawled pages contain no images or videos",
-                              evidence={"images": 0, "videos": 0}, checked=ctx.origin, duration_ms=ms_since(t))
+                              evidence={"images": 0, "videos": 0}, checked=ctx.origin, duration_ms=ms_since(t), links=links)
     usable = sum(1 for i in images if i["alt"] and i["alt"].lower() not in {"image", "img", "logo"} and len(i["alt"]) > 3)
     img_score = usable / len(images) * 100 if images else None
     vid_score = min(100, transcripts / videos * 100) if videos else None
@@ -630,7 +677,7 @@ async def tech_14(spec, ctx):
     rec = (f"Add descriptive alt text; {len(images) - usable}/{len(images)} images are missing useful alt."
            if img_score is not None and img_score < 90 else
            ("Publish transcripts for videos." if vid_score is not None and vid_score < 90 else None))
-    return result(spec, score=score, evidence={"images": len(images), "usable_alt": usable, "videos": videos, "transcript_signals": transcripts, "missing_alt": [i for i in images if not i["alt"]]}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    return result(spec, score=score, evidence={"images": len(images), "usable_alt": usable, "videos": videos, "transcript_signals": transcripts, "missing_alt": [i for i in images if not i["alt"]]}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), links=links)
 
 
 async def tech_15(spec, ctx):
@@ -648,7 +695,8 @@ async def tech_15(spec, ctx):
     # dates are more relevant on articles; home/service absence is partial not total fail
     score = 60 + (found / max(1, len(rows))) * 40
     rec = "Expose datePublished/dateModified in visible copy and JSON-LD on articles and resources." if score < 90 else None
-    return result(spec, score=score, evidence={"pages_with_dates": found, "samples": rows}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    links = url_links([r["url"] for r in rows], "Crawled page: checked for a published or last-updated date, in the visible copy or in its structured data.")
+    return result(spec, score=score, evidence={"pages_with_dates": found, "samples": rows}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), links=links)
 
 
 def _organization_nodes(obj, out: list) -> list:
@@ -708,7 +756,8 @@ async def tech_16(spec, ctx):
     if not org:
         score = 0
     rec = "Add Organization JSON-LD with name, url, logo, address/contact and sameAs profiles." if score < 90 else None
-    return result(spec, score=score, evidence={"organization": bool(org), "fields": present + extra, "types": schema_types(home.schema_blocks) if home else []}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    links = page_links([home] if home else [], "The homepage: its Organization structured data is checked for name, url, logo, sameAs profiles, address and contact details.")
+    return result(spec, score=score, evidence={"organization": bool(org), "fields": present + extra, "types": schema_types(home.schema_blocks) if home else []}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), links=links)
 
 
 # Schema.org types that genuinely satisfy each page type, including the subtypes a CMS
@@ -758,14 +807,16 @@ async def tech_17(spec, ctx):
         else:
             rows.append({"url": page.result.final_url, "page_type": page.page_type, "expected": expected, "types": types, "match": bool(hit)})
     applicable = [r for r in rows if r.get("applicable", True) and "match" in r]
+    links = [link(r["url"], f"Crawled {r['page_type'].replace('_', ' ')} page: checked for the structured-data type that page type needs ({r['expected']}).")
+             for r in applicable]
     if not applicable:
         return no_data(spec, reason="no crawled page carries the structured data its page type needs (home, service or product, article, about, case study)",
-                              evidence={"pages": rows}, checked=ctx.origin, duration_ms=ms_since(t))
+                              evidence={"pages": rows}, checked=ctx.origin, duration_ms=ms_since(t), links=links)
     score = sum(1 for r in applicable if r["match"]) / len(applicable) * 100
     missing = sorted({r["expected"] for r in applicable if not r["match"]})
     rec = (f"Add page-type schema that matches each template ({', '.join(missing)})." if score < 90 else None)
     return result(spec, score=score, evidence={"pages": rows, "industry_profile": industry.for_ctx(ctx)["label"]},
-                  recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+                  recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), links=links)
 
 
 def _collect_author_signals(pages) -> list[dict]:
@@ -786,12 +837,13 @@ def _collect_author_signals(pages) -> list[dict]:
 async def tech_18(spec, ctx):
     t = timed()
     authors = await asyncio.to_thread(_collect_author_signals, ctx.pages)
+    links = page_links(ctx.pages, "Crawled page: its structured data is searched for an author marked up as a Person (with a job title for full marks).")
     if not authors:
         return no_data(spec, reason="no page marks up an author as a Person in its structured data",
-                       evidence={"author_signals": []}, checked=ctx.origin, duration_ms=ms_since(t))
+                       evidence={"author_signals": []}, checked=ctx.origin, duration_ms=ms_since(t), links=links)
     score = 95 if any("jobTitle" in (a.get("item") or {}) for a in authors) else 80
     rec = "Publish author/Person markup with role, credentials and a reachable profile URL." if score < 90 else None
-    return result(spec, score=score, evidence={"author_signals": authors}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.65)
+    return result(spec, score=score, evidence={"author_signals": authors}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.65, links=links)
 
 
 _RAW_TYPE = re.compile(r'"@type"\s*:\s*"([^"]+)"')
@@ -837,6 +889,7 @@ async def tech_19(spec, ctx):
                                            "(whether it should have some is scored by TECH-16, TECH-17 and TECH-18)",
                               evidence={"blocks": 0}, checked=ctx.origin, duration_ms=ms_since(t))
     score = valid / total * 100
+    links = url_links([b["url"] for b in validated], "Page carrying JSON-LD structured data: every block on it is parsed to see whether it is valid.")
     all_types = sorted({t for b in validated for t in b["types"]})
     broken = [b for b in validated if not b["valid"]]
     rec = None
@@ -860,7 +913,7 @@ async def tech_19(spec, ctx):
         evidence["small_sample"] = (f"Only {total} JSON-LD block{'s' if total != 1 else ''} on the whole site, so this "
                                     "result describes very little markup. How much markup the site has is scored by TECH-16 and TECH-17.")
         confidence = 0.4
-    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence)
+    return result(spec, score=score, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence, links=links)
 
 
 async def tech_20(spec, ctx):
@@ -888,11 +941,21 @@ async def tech_20(spec, ctx):
         rows.append({"url": final, "canonical": canonical, "hops": page.result.hops, "ok": ok, "notes": notes})
     score = sum(1 for r in rows if r["ok"]) / max(1, len(rows)) * 100
     rec = "Set one canonical URL per page and collapse redirect chains." if score < 90 else None
-    return result(spec, score=score, evidence={"pages": rows}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+    links = url_links([r["url"] for r in rows], "Crawled page: its canonical tag is compared with the URL it was read from, and its redirect hops are counted.")
+    return result(spec, score=score, evidence={"pages": rows}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), links=links)
 
 
 _MIN_PAGES_PER_LOCALE = 3
 _MIN_SHARED_PATHS = 3   # translations share many page paths; unrelated sections rarely do
+
+
+def _market_urls(ctx) -> list[str]:
+    """Every URL _markets() reads for locale prefixes: the crawled pages, their links and the sitemap."""
+    urls = [p.result.final_url for p in ctx.pages if getattr(p, "result", None)]
+    urls += [item.get("href") if isinstance(item, dict) else item
+             for p in ctx.pages for item in (getattr(p, "links", None) or []) if item]
+    urls += list(((getattr(ctx, "sitemap", None) or {}).get("urls") or []))
+    return urls
 
 
 def _markets(ctx, tags=()) -> dict:
@@ -906,10 +969,7 @@ def _markets(ctx, tags=()) -> dict:
     sections, which an earlier version of this test read as six markets on an English-only site.
     URLs come from the crawled pages, their links and the sitemap.
     """
-    urls = [p.result.final_url for p in ctx.pages if getattr(p, "result", None)]
-    urls += [link.get("href") if isinstance(link, dict) else link
-             for p in ctx.pages for link in (getattr(p, "links", None) or []) if link]
-    urls += list(((getattr(ctx, "sitemap", None) or {}).get("urls") or []))
+    urls = _market_urls(ctx)
     pages_per_locale: dict[str, int] = {}
     rest_by_locale: dict[str, set] = {}
     for u in {u for u in urls if isinstance(u, str)}:
@@ -954,6 +1014,8 @@ async def tech_21(spec, ctx):
     for page in ctx.pages:
         tags.extend({"url": page.result.final_url, **h} for h in page.hreflang)
     markets = _markets(ctx, tags)
+    links = (page_links(ctx.pages, "Crawled page: read for hreflang tags and its <html lang> language code.")
+             + url_links(_market_urls(ctx), "URL found on the site or in its sitemap: its path is read for a country or language prefix (such as /en-us/ or /fr/) to tell how many markets the site serves."))
     if not markets["several_markets"]:
         # hreflang links the country and language versions of a page. A site serving one country in
         # one language has none to link, so TECH-21 does not apply to it -- with or without a few
@@ -963,18 +1025,18 @@ async def tech_21(spec, ctx):
                if tags else "")
         return not_applicable(spec, reason=f"the site serves one country{where} in one language{own}, so there are no "
                                            "country or language versions for hreflang to link",
-                              evidence={"hreflang": tags, **markets}, checked=ctx.origin, duration_ms=ms_since(t))
+                              evidence={"hreflang": tags, **markets}, checked=ctx.origin, duration_ms=ms_since(t), links=links)
     if not tags:
         # Several countries or languages and no hreflang: a real gap.
         found = ", ".join(markets["locales"] or [c.upper() for c in markets["countries"]] or markets["languages"])
         return no_data(spec, reason=f"the site serves several countries or languages ({found}) but has no hreflang annotations",
-                       evidence={"hreflang": [], **markets}, checked=ctx.origin, duration_ms=ms_since(t))
+                       evidence={"hreflang": [], **markets}, checked=ctx.origin, duration_ms=ms_since(t), links=links)
     # A multi-country site with hreflang: the share of tags that are complete (a language and a link).
     valid = sum(1 for h in tags if h.get("lang") and h.get("href"))
     score = valid / len(tags) * 100
     rec = "Make hreflang reciprocal and use valid locale codes." if score < 90 else None
     return result(spec, score=score, evidence={"tags": tags, **markets}, recommendation=rec, checked=ctx.origin,
-                  duration_ms=ms_since(t))
+                  duration_ms=ms_since(t), links=links)
 
 
 async def tech_22(spec, ctx):
@@ -1000,8 +1062,9 @@ async def tech_22(spec, ctx):
     length_q = sum(1 for r in rows if r["title_ok"] and r["desc_ok"]) / max(1, len(rows))
     score = presence * 50 + uniq_t * 15 + uniq_d * 10 + length_q * 25
     rec = "Write unique titles and meta descriptions in recommended length ranges." if score < 90 else None
+    links = url_links([r["url"] for r in rows], "Crawled page: its title and meta description are checked for presence, length and uniqueness across the site.")
     return result(spec, score=score, evidence={"pages": rows, "unique_title_ratio": round(uniq_t, 2), "uniqueness_counts": counts},
-                  recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t))
+                  recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), links=links)
 
 
 HANDLERS = {

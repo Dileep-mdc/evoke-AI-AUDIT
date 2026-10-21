@@ -33,7 +33,7 @@ def _contract(f: Findings, inputs: dict) -> dict:
 
 def _row(spec, t, f: Findings, score: float, evidence: dict, inputs: dict, rec, confidence: float):
     return result(spec, score=score, evidence={**evidence, **_contract(f, inputs)}, recommendation=rec,
-                  checked=f.checked, duration_ms=ms_since(t), confidence=confidence)
+                  checked=f.checked, duration_ms=ms_since(t), confidence=confidence, links=f.links)
 
 
 def _no_sites(spec, ctx, t, kind: str):
@@ -51,7 +51,7 @@ def _no_sites(spec, ctx, t, kind: str):
 
 def _unknown(spec, t, f: Findings, rec: str = RETRY_SEARCH):
     return result(spec, score=None, unknown=True, evidence={**f.evidence, **_contract(f, {})}, recommendation=rec,
-                  checked=f.checked, error=f.error, duration_ms=ms_since(t))
+                  checked=f.checked, error=f.error, duration_ms=ms_since(t), links=f.links)
 
 
 # ---------------------------------------------------------------------------------------------

@@ -71,6 +71,14 @@ def _friendly_timestamp(value: str | None) -> str:
     return dt.strftime("%d %b %Y, %I:%M:%S %p UTC")
 
 
+def _friendly_duration(ms: int | None) -> str:
+    """1823456 -> '30m 23.5s'; 4200 -> '4.2s'."""
+    if ms is None:
+        return ""
+    minutes, seconds = divmod(ms / 1000, 60)
+    return f"{int(minutes)}m {seconds:.1f}s" if minutes else f"{seconds:.1f}s"
+
+
 def _slug(name: str) -> str:
     """A filesystem-safe, readable stem: 'www.example.com' -> 'example-com'."""
     name = (name or "site").strip().lower().removeprefix("www.")
@@ -773,6 +781,10 @@ def build_excel(report: dict, registry: list[dict]) -> bytes:
     kv("Generated At", generated_at)
     if report.get("audited_at") and report.get("audited_at") != report.get("generated_at"):
         kv("Website Read At", _friendly_timestamp(report["audited_at"]))
+    if report.get("crawl_duration_ms") is not None:
+        kv("Scraping Started", _friendly_timestamp(report.get("crawl_started_at")))
+        kv("Scraping Finished", _friendly_timestamp(report.get("crawl_completed_at")))
+        kv("Scraping Time", _friendly_duration(report["crawl_duration_ms"]))
     r += 1
 
     overall_row = kv("Overall Score", report.get("overall_score"), bold_value=True)

@@ -40,7 +40,7 @@ from ..crawler.google_search import SearchResult
 from ..llm.client import judge
 from ..llm.prompts import SYSTEM, analyst_prompt, category_prompt
 from . import offpage_tools as tools
-from .common import derive_site_categories, derive_site_geographies, primary_brand
+from .common import derive_site_categories, derive_site_geographies, link, page_links, primary_brand
 from .platforms import platforms_for
 
 # parameter_status values (data contract). The first three mean the evidence was not available.
@@ -68,11 +68,21 @@ class Findings:
     verification: dict = field(default_factory=dict)
     require: list[str] = field(default_factory=list)   # a source must also name one of these
     verify: bool = True                                # False: the validator opens no source pages
+    links: list = field(default_factory=list)          # every URL this check read, with why (common.link)
 
     @property
     def available(self) -> bool:
         """False when the evidence the calculation needs could not be collected."""
         return self.error is None
+
+    def add(self, url: Optional[str], why: str) -> None:
+        item = link(url, why)
+        if item:
+            self.links.append(item)
+
+    def searched(self, sr: SearchResult, purpose: str) -> None:
+        """The search itself, as the results page a reader can open to repeat it."""
+        self.add(sr.display_url, f"Web search run for this check ({sr.provider}): {sr.query} -- {purpose}")
 
 
 def _search_failed(pid: str, agent: str, source_type: str, sr: SearchResult) -> Findings:
@@ -83,8 +93,10 @@ def _search_failed(pid: str, agent: str, source_type: str, sr: SearchResult) -> 
         status = BLOCKED
     else:
         status = UNABLE_TO_VERIFY
-    return Findings(pid, agent, source_type, checked=sr.display_url, status=status, error=sr.error,
-                    evidence={"provider": sr.provider, "query": sr.query, "error": sr.error})
+    f = Findings(pid, agent, source_type, checked=sr.display_url, status=status, error=sr.error,
+                 evidence={"provider": sr.provider, "query": sr.query, "error": sr.error})
+    f.add(sr.display_url, f"Web search run for this check ({sr.provider}): {sr.query} -- it failed ({sr.error}), so the check could not be measured.")
+    return f
 
 
 def _wikidata_page(entity: Optional[dict]) -> list[str]:
@@ -147,6 +159,8 @@ class KnowledgeEntityAgent(Agent):
         f = Findings("OFF-01", self.name, "Wikidata and Wikipedia", checked=wp_page, verify=False)
         f.evidence = {"provider": "Wikidata + Wikipedia",
                       "matched_on": tools.short_name(tools.drop_acronym(ctx.company_name))}
+        f.add(wd_page, "Wikidata searched for an item named after the company: is the company on Wikidata?")
+        f.add(wp_page, "Wikipedia searched for an article about the company: is the company on Wikipedia?")
 
         ident = _identity(ctx)
         if ident.get("wikidata_id"):
@@ -196,6 +210,8 @@ class KnowledgeEntityAgent(Agent):
             f.evidence["wikipedia"] = {"error": wp_meta.get("error") or f"HTTP {wp_meta.get('status')}", "search_url": wp_page}
             f.values["on_wikipedia"] = None
 
+        for url in f.source_urls:
+            f.add(url, "Wikidata item or Wikipedia article matched to the company: counts as the company being present there.")
         # Both are needed, so one confirmed absence settles it even if the other source is down.
         answers = (f.values["on_wikidata"], f.values["on_wikipedia"])
         if False not in answers and None in answers:
@@ -210,6 +226,7 @@ class KnowledgeEntityAgent(Agent):
         data, meta = await tools.wikidata_search(ctx.company_name, ctx)
         search_page = tools.wikidata_search_page(meta.get("name") or ctx.company_name)
         f = Findings("OFF-02", self.name, "Wikidata (Knowledge Panel proxy)", checked=search_page)
+        f.add(search_page, "Wikidata searched for the company's entity, the record a Google Knowledge Panel is built from.")
         if data is None:
             f.status, f.error = UNABLE_TO_VERIFY, meta.get("error") or "Wikidata unavailable"
             f.evidence = {"provider": "Wikidata (Knowledge Panel proxy)", **meta}
@@ -231,6 +248,8 @@ class KnowledgeEntityAgent(Agent):
         f.values.update(has_description=bool(match.get("description")), brand_in_label=brand_in_label)
         f.source_urls = _wikidata_page(match)
         f.checked = f.source_urls[0] if f.source_urls else f.checked
+        for url in f.source_urls:
+            f.add(url, "The company's Wikidata entity: checked for a description and for the brand in its name.")
         f.evidence = {"provider": "Wikidata (Knowledge Panel proxy)", "entity": _entity_summary(match),
                       "brand_in_label": brand_in_label, "page_url": f.checked,
                       "finding": f"Wikidata item found: {match.get('label')}",
@@ -258,6 +277,11 @@ class CompanyProfileAgent(Agent):
         locations = [g.lower() for g in derive_site_geographies(ctx) if len(g.strip()) >= 3]
         profiles = tools.extract_company_details(sr.items, tuple(found), [ctx.company_name.lower(), primary_brand(ctx)], locations)
         f = Findings("OFF-03", self.name, "Business profiles", checked=sr.display_url)
+        f.searched(sr, f"looks for the company's profiles on {', '.join(domains)}.")
+        for url in sr.urls:
+            on = next((d for d in found if tools.on_domain(url, d)), None)
+            f.add(url, f"Search result on {on}: counted as a company profile, and its title and snippet are checked for the same company name and office location as the website."
+                  if on else "Search result not on one of the profile sites, so it did not count.")
         f.values = {"platforms_found": found, "profiles": profiles, "platforms_checked": list(domains)}
         f.evidence = {"provider": sr.provider, "query": sr.query, "platforms_checked": list(domains),
                       "platform_set": platforms_for(ctx)["label"], "platforms_found": found, "matches": hits,
@@ -297,6 +321,7 @@ class CertificationVerificationAgent(Agent):
                 if label in _SEARCHABLE:
                     named += found
         f = Findings("OFF-04", self.name, "Company website and off-site certification sources", checked=ctx.origin)
+        f.links += page_links(ctx.pages, "Crawled page: its text is read for certification claims (ISO standards, CMMI, accreditations, partner tiers).")
         f.values["claims"] = claims
         f.evidence = {"claims": claims}
         if not claims:
@@ -312,7 +337,11 @@ class CertificationVerificationAgent(Agent):
         if not sr.ok:
             f.status = _search_failed("OFF-04", self.name, f.source_type, sr).status
             f.verification = {"search_error": sr.error}
+            f.add(sr.display_url, f"Web search run for this check ({sr.provider}): {sr.query} -- it failed ({sr.error}).")
             return f
+        f.searched(sr, "looks off-site for the certificates the website names.")
+        for url in sr.urls:
+            f.add(url, "Off-site search result for the certificates the website names: kept as verification evidence.")
         f.source_urls = sr.urls
         f.require = terms
         return f
@@ -340,6 +369,11 @@ class ReviewIntelligenceAgent(Agent):
         # Rules-based reading first, so the check still has an input with no model available.
         rules_category_match = bool(listings and categories and tools.compare_entities(blob, categories))
         f = Findings("OFF-05", self.name, "Review platforms", checked=sr.display_url)
+        f.searched(sr, f"looks for the company's listings on {', '.join(domains)}.")
+        for url in sr.urls:
+            on = next((d for d in found if tools.on_domain(url, d)), None)
+            f.add(url, f"Search result on {on}: counted as a review-platform listing, and its title and snippet are checked for the company's category."
+                  if on else "Search result not on one of the review sites, so it did not count.")
         f.evidence = {"provider": sr.provider, "query": sr.query, "platforms_checked": list(domains),
                       "platform_set": platforms_for(ctx)["label"], "platforms_found": found, "matches": hits,
                       "snippets": listings[:8], "site_categories": categories, "category_method": "keyword"}
@@ -365,6 +399,11 @@ class ReviewIntelligenceAgent(Agent):
         rows = tools.extract_reviews(sr.items, domains)
         dated = tools.extract_dates_and_rankings(rows)
         f = Findings("OFF-06", self.name, "Review platforms", checked=sr.display_url)
+        f.searched(sr, f"looks for reviews of the company on {', '.join(domains)}.")
+        counted = {i["url"] for i in rows}
+        for url in sr.urls:
+            f.add(url, "Review-site result: counted toward review volume, and its date toward recency."
+                  if url in counted else "Search result not on one of the review sites, so it did not count.")
         f.values = {"review_results": len(rows), "newest_review_age_days": dated["age_days"]}
         f.evidence = {"provider": sr.provider, "query": sr.query, "platforms_checked": list(domains),
                       "platform_set": platforms_for(ctx)["label"], "review_results": len(rows),
@@ -401,6 +440,11 @@ class CommunityPresenceAgent(Agent):
                 found["forums"].append(u)
         count = sum(len(v) for v in found.values())
         f = Findings("OFF-07", self.name, "Reddit, Quora and forums", checked=sr.display_url)
+        f.searched(sr, f"looks for discussions naming the company on {', '.join(sites)} and other forums.")
+        mentions = {u for v in found.values() for u in v}
+        for url in sr.urls:
+            f.add(url, "Forum or community thread naming the company: counted as a mention."
+                  if url in mentions else "Search result on the company's own site or not on a forum, so it did not count.")
         f.values = {"mentions_found": count}
         f.evidence = {"provider": sr.provider, "query": sr.query, "platforms_checked": list(sites),
                       "platform_set": platforms_for(ctx)["label"], "mentions_found": count, "matches": found,
@@ -436,6 +480,14 @@ class IndustryVisibilityAgent(Agent):
         ranked = tools.extract_dates_and_rankings(named.items, own_domain=ctx.domain or "")["list_pages"]
         list_pages = [r["url"] for r in ranked]
         f = Findings("OFF-08", self.name, "Best/top list pages", checked=generic.display_url)
+        f.searched(generic, f"a generic 'best {topic}' search, to see whether the company appears without being named.")
+        for item in generic.items:
+            f.add(item.get("url"), "Result of the generic 'best' search: names the company, so it counts as appearing in the generic results."
+                  if item.get("url") in in_generic else "Result of the generic 'best' search: does not name the company.")
+        f.searched(named, f"looks for best / top / leading {topic} list pages that name the company.")
+        for item in named.items:
+            f.add(item.get("url"), "Ranked list page naming the company: counted as a best/top list placement."
+                  if item.get("url") in list_pages else "Search result that is not a ranked list page naming the company (or is the company's own site), so it did not count.")
         f.values = {"in_generic_results": bool(in_generic), "list_pages": len(list_pages)}
         f.evidence = {"provider": generic.provider, "topic": topic, "query": generic.query, "list_query": named.query,
                       "in_generic_results": bool(in_generic), "generic_result_urls": in_generic[:5],
@@ -452,6 +504,11 @@ class IndustryVisibilityAgent(Agent):
         # Rules-based reading first, so the check still has an input with no model available.
         rules_coverage_found = bool(snippets)
         f = Findings("OFF-09", self.name, "Analyst, directory and trade press", checked=sr.display_url)
+        f.searched(sr, "looks for analyst, directory and trade-press coverage of the company.")
+        # Coverage is read from the first results that carry a title or snippet (sr.snippets()); later ones are not used.
+        used = [i for i in sr.items[:8] if i.get("title") or i.get("snippet")]
+        for item in used:
+            f.add(item.get("url"), "Analyst, directory or trade-press result: counted as coverage, and its snippet is judged by the AI for whether it describes the company accurately.")
         f.values = {"coverage_results": len(snippets), "llm_accurate": None}
         f.evidence = {"provider": sr.provider, "query": sr.query, "snippets": snippets}
         f.source_urls = sr.urls
@@ -492,6 +549,9 @@ class EvidenceValidationAgent:
         terms = [t for t in (ctx.company_name, primary_brand(ctx)) if t]
         results = await asyncio.gather(*(tools.verify_source(u, terms, ctx, require=f.require) for u in urls))
         verified = sum(1 for r in results if r["result"] == "verified")
+        for r in results:
+            f.add(r["url"], f"Source page opened to confirm it is about the company (result: {r['result'].replace('_', ' ')}). "
+                            "This sets the check's verification status, not its score.")
         f.status = VERIFIED if verified else SOURCES_UNCONFIRMED
         f.verification = {**f.verification, "sources_checked": len(results), "sources_verified": verified,
                           "sources": list(results)}

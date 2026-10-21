@@ -341,6 +341,12 @@ LLM_SCAN_BUDGET_USD = float(os.getenv("LLM_SCAN_BUDGET_USD", "0"))
 OUTPUT_GZIP_LEVEL = int(os.getenv("OUTPUT_GZIP_LEVEL", "6"))
 OUTPUT_WRITE_WORKERS = int(os.getenv("OUTPUT_WRITE_WORKERS", "8"))
 
+# The readable copy of every scanned site (site_folder.py): <SITE_FOLDERS_ROOT>/<host>/ with one
+# .txt per page, _index.csv and the links workbook. Same root as the snapshots, so the folder a
+# scan writes is the one snapshot_site.py reads. SAVE_SITE_FOLDER=false turns it off.
+SITE_FOLDERS_ROOT = Path(os.getenv("SITE_FOLDERS_ROOT", str(SNAPSHOT_ROOT)))
+SAVE_SITE_FOLDER = os.getenv("SAVE_SITE_FOLDER", "true").strip().lower() in {"1", "true", "yes"}
+
 # Section weights are scoring methodology, so they live with the other scoring rules in
 # parameters/scoring_rules.json (overridable via SCORING_RULES_PATH).
 from .parameters import rules as _rules  # noqa: E402  (needs the .env loaded above)

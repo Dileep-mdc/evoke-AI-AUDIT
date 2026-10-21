@@ -40,6 +40,20 @@ def no_live_web_search_during_tests():
 
 
 @pytest.fixture(autouse=True)
+def no_output_outside_the_test_directory(tmp_path_factory, monkeypatch):
+    """A test that runs a scan or a re-check end to end reaches the writers of the site folder and
+    the <company>.xlsx workbook, which default to the project root and the user's data directory.
+    One did, and left site/site.xlsx in the project. Every test writes under its own temp dir."""
+    import app.parameter_links as parameter_links
+    import app.site_folder as site_folder
+
+    root = tmp_path_factory.mktemp("output")
+    monkeypatch.setattr(site_folder, "SITE_FOLDERS_ROOT", root / "sites")
+    monkeypatch.setattr(parameter_links, "SITE_FOLDERS_ROOT", root / "sites")
+    monkeypatch.setattr(parameter_links, "OUTPUT_DIR", root / "data")
+
+
+@pytest.fixture(autouse=True)
 def no_request_pacing_during_tests(monkeypatch):
     """backend/.env records the OpenAI project's requests-per-minute limit. Each test starts
     unpaced and with no learned limit; a test that is about pacing or sampling sets its own."""
