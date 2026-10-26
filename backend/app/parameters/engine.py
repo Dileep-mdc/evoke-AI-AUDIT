@@ -31,6 +31,7 @@ from ..config import JUDGEMENT_TIMEOUT, PARAMETER_CONCURRENCY, PARAMETER_TIMEOUT
 from ..errors import humanize_error
 from ..llm.scoring import curate, score_parameter
 from .citations import build_citations
+from . import page_fixes
 from .common import excluded_page_counts, result, scorable_pages, status_from_score
 from .offpage import HANDLERS as OFF
 from .onpage import HANDLERS as ON
@@ -54,7 +55,18 @@ def _skip(spec: dict, ctx) -> dict | None:
     pid = spec["parameter_id"]
     if spec["section"] != "off_page" and pid not in _PAGE_INDEPENDENT and not scorable_pages(ctx):
         # A crawl that read nothing measured nothing: unscored, never a 0 or a floor score.
-        return result(spec, score=None, unknown=True, evidence={"no_readable_pages": True}, checked=ctx.origin,
+        # retry_pointless because the scan's retry re-reads the same crawl, which still holds
+        # no readable page -- re-running these could only repeat this row.
+        access = getattr(ctx, "access", None) or {}
+        if access.get("blocked"):
+            return result(spec, score=None, unknown=True, checked=ctx.origin,
+                          evidence={"no_readable_pages": True, "site_refused_access": True,
+                                    "homepage_status": access.get("homepage_status"), "retry_pointless": True},
+                          recommendation="Ask the site owner to allow the audit's user-agent "
+                                         "(AIVisibilityAuditBot/1.0) or your IP address, then run the audit again.",
+                          error=access.get("reason") or "The site refused automated access, so no page could be read.")
+        return result(spec, score=None, unknown=True, evidence={"no_readable_pages": True, "retry_pointless": True},
+                      checked=ctx.origin,
                       recommendation="Make sure the site's pages can be fetched, then run the audit again.",
                       error="No page of the site could be read, so there was no page content to evaluate.")
     return None
@@ -132,7 +144,41 @@ async def evaluate(spec: dict, ctx) -> dict:
         }
 
 
-async def apply_judgement(spec: dict, row: dict) -> dict:
+def site_context(ctx, row: dict) -> str:
+    """Whose site this is, and which of its pages need changing for this parameter.
+
+    Handed to the model beside the curated data so the recommendation it writes names this
+    organisation, its real pages and how many need the change, instead of advice that would read
+    the same on any website.
+    """
+    if ctx is None:
+        return ""
+    company = (getattr(ctx, "company_name", "") or getattr(ctx, "domain", "")).strip()
+    lines = [f"Organisation: {company} ({getattr(ctx, 'domain', '')})"]
+    # What kind of organisation it is, in its own and Wikidata's words. The industry profile alone
+    # is too coarse: it filed a surgeons' professional association as "healthcare", and the model
+    # then recommended patient review sites to it.
+    described = (getattr(ctx, "identity", None) or {}).get("wikidata_description")
+    if described:
+        lines.append(f"What it is (Wikidata): {described}")
+    homepage = getattr(ctx, "homepage", None)
+    about = (getattr(homepage, "meta_description", "") or "").strip()
+    if about:
+        lines.append(f"How its homepage describes it: {about[:300]}")
+    industry = (getattr(ctx, "industry", None) or {}).get("label")
+    if industry:
+        lines.append(f"Industry profile: {industry}")
+    pages = getattr(ctx, "pages", None) or []
+    lines.append(f"Pages crawled: {len(pages)}; readable: {len(scorable_pages(ctx))}")
+    fixes = page_fixes.fixes_for(row, page_fixes.Site(origin=getattr(ctx, "origin", ""), company=company))
+    if fixes["scope"] == "page":
+        lines.append(f"Pages or items needing a change for this parameter: {fixes['total']}")
+        for fix in fixes["fixes"][:5]:
+            lines.append(f"- {fix['target']}: {fix['issue']}")
+    return "\n".join(lines)
+
+
+async def apply_judgement(spec: dict, row: dict, ctx=None) -> dict:
     """Have the model score, explain and advise on one already-evaluated parameter.
 
     Returns the same row, with the model's verdict merged in. Never raises: a parameter
@@ -185,6 +231,7 @@ async def apply_judgement(spec: dict, row: dict) -> dict:
                 reference_score=rules_score,
                 reference_unknown=row.get("status") == "UNKNOWN",
                 reference_recommendation=row.get("recommendation"),
+                site_context=site_context(ctx, row),
             ),
             timeout=JUDGEMENT_TIMEOUT,
         )
@@ -244,7 +291,7 @@ async def apply_judgement(spec: dict, row: dict) -> dict:
 
 
 async def run_one(spec: dict, ctx) -> dict:
-    row = await apply_judgement(spec, await evaluate(spec, ctx))
+    row = await apply_judgement(spec, await evaluate(spec, ctx), ctx)
     # Every score carries its sources -- whichever pass, rules or model, produced the number.
     row["evidence"] = {**(row.get("evidence") or {}), "citations": build_citations(row)}
     return row

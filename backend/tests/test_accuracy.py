@@ -117,7 +117,8 @@ def test_robots_allowing_while_the_firewall_blocks_is_explained_and_gates_the_re
     ]
     found = crosschecks.reconcile(rows, _ctx([]))
     assert "robots.txt allows these AI crawlers (GPTBot)" in rows[1]["evidence"]["cross_check"]
-    assert rows[1]["recommendation"].startswith("robots.txt allows")
+    # The note is shown beside the fix (workbook explanation, score panel), never inside it.
+    assert "robots.txt allows" not in (rows[1]["recommendation"] or "")
     assert "gating" not in found
 
 

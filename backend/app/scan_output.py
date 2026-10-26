@@ -306,6 +306,7 @@ def save_crawl_output(scan_id: str, ctx) -> Path:
         "crawl_errors": ctx.crawl_errors,
         "render": getattr(ctx, "render", None) or {},
         "snapshot": getattr(ctx, "snapshot", None) or {},
+        "access": getattr(ctx, "access", None) or {},
         # Where the source documents went, stated up front so this file explains itself:
         # anyone opening it can see the documents exist and where, without knowing to look.
         "raw_document_store": {
@@ -745,6 +746,42 @@ def _write_how_to_read_sheet(wb: Workbook) -> None:
         line(label, band)
 
 
+_FIX_COLUMNS = (("Parameter", 12), ("Check", 34), ("Page or Item", 60), ("What Is Wrong", 60), ("How to Fix It", 80))
+
+
+def _write_fix_by_page_sheet(wb: Workbook, report: dict, params: list[dict], domain: str, generated_at: str) -> None:
+    """Every page each check found needing a change, with the problem and the fix -- one row each.
+
+    The pillar sheets give one recommended fix per check; this is the work list behind them,
+    built from the same evidence by parameters/page_fixes.py, so a team can filter it by check
+    or by page and work through it.
+    """
+    from .parameters import page_fixes
+
+    site = page_fixes.site_from_report(report)
+    ws = wb.create_sheet("Fix by Page")
+    header_row = _title_bar(ws, f"Fix by Page - {domain}",
+                            f"Generated {generated_at}. Every page each check found needing a change; "
+                            "checks measured site-wide are covered by their recommended fix.", len(_FIX_COLUMNS))
+    for col, (label, width) in enumerate(_FIX_COLUMNS, start=1):
+        cell = ws.cell(row=header_row, column=col, value=label)
+        cell.font = HEADER_FONT
+        cell.border = HEADER_BORDER
+        cell.alignment = WRAP
+        ws.column_dimensions[get_column_letter(col)].width = width
+    r = header_row + 1
+    for row in params:
+        for fix in page_fixes.fixes_for(row, site)["fixes"]:
+            if r > 1_048_576:
+                return
+            for col, value in enumerate((row.get("parameter_id"), row.get("name"), fix["target"], fix["issue"], fix["fix"]), start=1):
+                ws.cell(row=r, column=col, value=_safe(value)).alignment = WRAP
+            r += 1
+    ws.freeze_panes = ws.cell(row=header_row + 1, column=1)
+    if r > header_row + 1:
+        ws.auto_filter.ref = f"A{header_row}:{get_column_letter(len(_FIX_COLUMNS))}{r - 1}"
+
+
 def build_excel(report: dict, registry: list[dict]) -> bytes:
     """A professional, self-explanatory workbook: a "How to Read This Report" guide, a
     Summary sheet, and one sheet per pillar (Technical, On-Page, Off-Page) - each row
@@ -827,6 +864,8 @@ def build_excel(report: dict, registry: list[dict]) -> bytes:
     for section, sheet_name in PILLARS:
         rows = [p for p in params if p.get("section") == section]
         _write_pillar_sheet(wb, sheet_name, rows, reg_by_id, domain, generated_at)
+
+    _write_fix_by_page_sheet(wb, report, params, domain, generated_at)
 
     buf = io.BytesIO()
     wb.save(buf)

@@ -455,18 +455,7 @@ async def _run_render_pass(
     failure path here leaves the raw pages untouched and records the reason.
     """
     budget = len(ordered_targets) if saved_renders else RENDER_BUDGET
-    summary = {
-        "enabled": ENABLE_RENDER,
-        "decision": "disabled",
-        "reason": "",
-        "probe_url": "",
-        "budget": budget,
-        "threshold": RENDER_DELTA_THRESHOLD,
-        "attempted": 0,
-        "rendered_count": 0,
-        "failed_count": 0,
-        "probe": {},
-    }
+    summary = _render_summary(budget)
     if not ENABLE_RENDER:
         summary["reason"] = "JavaScript rendering is switched off (ENABLE_RENDER=false)."
         return summary
@@ -540,13 +529,48 @@ async def _run_render_pass(
                 on_progress(100)
             return summary
 
-    url_by_key = {k: (pages_by_target[k].result.final_url or pages_by_target[k].url) for k in candidates}
+    await _render_and_apply(candidates, pages_by_target, summary, on_progress)
+    return summary
+
+
+def _render_summary(budget: int) -> dict:
+    """The render pass's report before anything has happened. One definition, because the
+    pass, the refused-site skip and the post-render follow-up all fill in the same record."""
+    return {
+        "enabled": ENABLE_RENDER,
+        "decision": "disabled",
+        "reason": "",
+        "probe_url": "",
+        "budget": budget,
+        "threshold": RENDER_DELTA_THRESHOLD,
+        "attempted": 0,
+        "rendered_count": 0,
+        "failed_count": 0,
+        "probe": {},
+    }
+
+
+async def _render_and_apply(
+    keys: list,
+    pages_by_target: dict,
+    summary: dict,
+    on_progress: Optional[Callable[[int], None]] = None,
+) -> list:
+    """Render `keys` in the browser and swap each successful render into pages_by_target.
+
+    Returns the keys whose rendered copy was applied. The counts in `summary` are updated in
+    place, so every call against one crawl adds up to a single honest total.
+    """
+    if not keys:
+        return []
+    url_by_key = {k: (pages_by_target[k].result.final_url or pages_by_target[k].url) for k in keys}
     # Deduplicated because two crawl targets can redirect to one final URL, and rendering the
     # same page twice would spend budget on a document already in hand.
     urls = list(dict.fromkeys(url_by_key.values()))
     summary["attempted"] += len(urls)
     rendered = await render_many(urls, on_progress=on_progress)
 
+    applied = []
     for key, url in url_by_key.items():
         result = rendered.get(url)
         raw_page = pages_by_target[key]
@@ -568,8 +592,102 @@ async def _run_render_pass(
         new_page.render = {**new_page.render, **page_comparison, "applied": True}
         pages_by_target[key] = new_page
         summary["rendered_count"] += 1
+        applied.append(key)
+    return applied
 
-    return summary
+
+def _site_is_client_rendered(summary: dict) -> bool:
+    """Whether the homepage probe showed this site assembling its content in the browser."""
+    return (summary.get("probe") or {}).get("gain_ratio", 0) >= RENDER_DELTA_THRESHOLD
+
+
+def _new_links(pages: list, visited: set, origin: str) -> list[str]:
+    """Same-site page links on `pages` that the crawl has not seen yet, marking them seen."""
+    found: list[str] = []
+    for p in pages:
+        for link in p.links:
+            href = urldefrag(link["href"])[0]
+            if not href or href in visited:
+                continue
+            visited.add(href)
+            if same_host(href, origin) and looks_like_document(href):
+                found.append(href)
+    return found
+
+
+# The answers a site gives when it refuses a client rather than failing to serve a page:
+# 401/403 from a WAF or CDN rule, 429 from a rate limiter that has decided this client is a bot.
+_REFUSED_STATUS = {401, 403, 429}
+
+
+def _refused(result: Optional[FetchResult]) -> bool:
+    return result is not None and result.status_code in _REFUSED_STATUS
+
+
+def _readable(page: Page) -> bool:
+    """A page the audit can score: retrieved, and not a bot-challenge page. Same rule as
+    parameters.common.scorable_pages(), which every on-site check applies."""
+    return page.result.ok and not page.blocked_reason
+
+
+def site_access(
+    domain: str,
+    *,
+    homepage: Optional[FetchResult],
+    robots: Optional[FetchResult],
+    sitemap: dict,
+    llms: Optional[FetchResult],
+    pages: list,
+) -> dict:
+    """Whether the site let the audit read it, and in what words to say so when it did not.
+
+    `blocked` is the case where the scan has nothing on-site to score and the reason is the
+    site's own refusal -- its homepage answered 401/403/429 or served a bot-check page, and no
+    page of the crawl was readable. The report shows `reason` in place of a bare "1 pages", and
+    the scan uses `blocked` to skip retrying checks that cannot change against the same refusal.
+
+    A site that refuses SOME pages (a rate limiter that kicks in mid-crawl) is not blocked;
+    `pages_refused` carries the count so the report can say how much was left out.
+    """
+    pages = pages or []
+    readable = sum(1 for p in pages if _readable(p))
+    refused_pages = sum(1 for p in pages if _refused(p.result) or (p.result.ok and p.blocked_reason))
+    home_page = pages[0] if pages else None
+    home_challenge = bool(home_page and home_page.result.ok and home_page.blocked_reason)
+    home_status = homepage.status_code if homepage is not None else None
+
+    refused: list[str] = []
+    if _refused(homepage) or home_challenge:
+        refused.append("the homepage")
+    if _refused(robots):
+        refused.append("robots.txt")
+    sources = (sitemap or {}).get("sources") or []
+    if sources and all(s.get("status") in _REFUSED_STATUS for s in sources):
+        refused.append("the sitemap")
+    if _refused(llms):
+        refused.append("llms.txt")
+
+    blocked = readable == 0 and (_refused(homepage) or home_challenge)
+    reason = ""
+    if blocked:
+        how = (f"a bot-check page ({home_page.blocked_reason.rstrip('.')})" if home_challenge
+               else f"HTTP {home_status}")
+        listed = ", ".join(refused[:-1]) + (" and " if len(refused) > 1 else "") + refused[-1]
+        reason = (
+            f"{domain} refused automated access: {listed} answered with {how}, so no page of the "
+            "site could be read and only the off-page checks, which search the wider web, could run. "
+            "Auditing it needs the site owner to allow this audit's user-agent "
+            "(AIVisibilityAuditBot/1.0) or your IP address in their firewall or CDN."
+        )
+    return {
+        "blocked": blocked,
+        "reason": reason,
+        "homepage_status": home_status,
+        "refused": refused,
+        "pages_fetched": len(pages),
+        "pages_readable": readable,
+        "pages_refused": refused_pages,
+    }
 
 
 @dataclass
@@ -600,6 +718,9 @@ class SiteContext:
     industry: dict = field(default_factory=dict)
     # Who owns the site (parameters/identity.py): official name, abbreviation, brand term, Wikidata ID.
     identity: dict = field(default_factory=dict)
+    # Whether the site let the audit read it -- see site_access(). Empty on a context restored
+    # from an audit saved before this was recorded.
+    access: dict = field(default_factory=dict)
 
 
 def _priority_urls(origin: str, sitemap_urls: list[str], homepage_links: list[str]) -> list[str]:
@@ -799,6 +920,19 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
     )
     frontier = await _parse_batch(targets, fetched, on_parse_progress=_band(18, 21, bump))
 
+    # A site that refuses this client outright -- its homepage answered 401/403/429 and nothing
+    # in the first batch was readable -- is not crawled any further. Following links off a
+    # refusal page, or reopening the refused homepage in a browser, cannot produce a readable
+    # page; it only spends the crawl budget and then reports "1 pages" as if that were the site.
+    # site_access() below says what happened, and the report shows it.
+    refused_early = (
+        snap is None
+        and _refused(seed_probe)
+        and not any(_readable(p) for p in pages_by_target.values())
+    )
+    if refused_early:
+        log.info("%s refused the crawl (HTTP %s); not following links or rendering", domain, seed_probe.status_code)
+
     # The sitemap can be missing, stale, or blocked outright, which would otherwise cap
     # the crawl at whatever handful of links happen to be on the homepage. Keep following
     # same-host links actually found on the pages fetched so far -- in batches, across a
@@ -808,47 +942,53 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
     # every page every round could not discover anything new -- `visited` already holds all of
     # their links -- it just re-read hundreds of thousands of hrefs to find nothing.
     visited = set(all_targets)
-    for round_number in range(MAX_DISCOVERY_ROUNDS if snap is None else 0):
-        if len(pages_by_target) >= MAX_PAGES or not frontier:
-            break
-        if time.monotonic() > deadline:
-            errors.append(
-                f"link discovery stopped after {int(time.monotonic() - started_at)}s: "
-                "the crawl reached its time budget"
+    deadline_noted = False
+
+    async def _discover(frontier: list[Page], band_lo: float, band_hi: float) -> int:
+        """Follow same-site links out of `frontier` for up to MAX_DISCOVERY_ROUNDS rounds,
+        reporting progress inside [band_lo, band_hi]. Returns how many new pages it fetched."""
+        nonlocal deadline_noted
+        added = 0
+        for round_number in range(MAX_DISCOVERY_ROUNDS):
+            if len(pages_by_target) >= MAX_PAGES or not frontier:
+                break
+            if time.monotonic() > deadline:
+                if not deadline_noted:
+                    deadline_noted = True
+                    errors.append(
+                        f"link discovery stopped after {int(time.monotonic() - started_at)}s: "
+                        "the crawl reached its time budget"
+                    )
+                break
+            discovered = _new_links(frontier, visited, origin)
+            if not discovered:
+                break
+            discovered = discovered[: MAX_PAGES - len(pages_by_target)]
+            all_targets.extend(discovered)
+            # Rounds share the band, each taking an equal slice, and inside a slice the fetch
+            # and the parse take their own sub-bands -- so a long crawl keeps moving instead of
+            # sitting on one number until every round has finished.
+            span = (band_hi - band_lo) / max(1, MAX_DISCOVERY_ROUNDS)
+            lo = band_lo + round_number * span
+            hi = band_lo + (round_number + 1) * span
+            batch_fetched = await crawl_raw(
+                discovered,
+                user_agent=BROWSER_UA,
+                on_progress=_band(lo, hi - span / 3, bump),
+                deadline=deadline,
             )
-            break
-        discovered: list[str] = []
-        for p in frontier:
-            for link in p.links:
-                href = urldefrag(link["href"])[0]
-                if not href or href in visited:
-                    continue
-                visited.add(href)
-                if same_host(href, origin) and looks_like_document(href):
-                    discovered.append(href)
-        if not discovered:
-            break
-        discovered = discovered[: MAX_PAGES - len(pages_by_target)]
-        all_targets.extend(discovered)
-        # Rounds share the 21-27 band, each taking an equal slice, and inside a slice the
-        # fetch and the parse take their own sub-bands -- so a long crawl keeps moving instead
-        # of sitting on one number until every round has finished.
-        span = 6 / max(1, MAX_DISCOVERY_ROUNDS)
-        lo = 21 + round_number * span
-        hi = 21 + (round_number + 1) * span
-        batch_fetched = await crawl_raw(
-            discovered,
-            user_agent=BROWSER_UA,
-            on_progress=_band(lo, hi - span / 3, bump),
-            deadline=deadline,
-        )
-        frontier = await _parse_batch(
-            discovered, batch_fetched, on_parse_progress=_band(hi - span / 3, hi, bump)
-        )
-        log.info(
-            "discovery round %d: %d new urls, %d pages held, %.0fs elapsed",
-            round_number + 1, len(discovered), len(pages_by_target), time.monotonic() - started_at,
-        )
+            frontier = await _parse_batch(
+                discovered, batch_fetched, on_parse_progress=_band(hi - span / 3, hi, bump)
+            )
+            added += len(discovered)
+            log.info(
+                "discovery round %d: %d new urls, %d pages held, %.0fs elapsed",
+                round_number + 1, len(discovered), len(pages_by_target), time.monotonic() - started_at,
+            )
+        return added
+
+    if snap is None and not refused_early:
+        await _discover(frontier, 21, 26)
     bump(26)
 
     # The second half of the hybrid crawl. Every page above was fetched over plain HTTP and
@@ -866,10 +1006,50 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
         None,
     )
 
-    render_summary = await _run_render_pass(
-        home_key, pages_by_target, all_targets, on_progress=_band(26, 28, bump),
-        saved_renders=bool(snap is not None and snap.has_renders),
-    )
+    if refused_early:
+        render_summary = _render_summary(RENDER_BUDGET)
+        render_summary["decision"] = "skipped"
+        render_summary["reason"] = (
+            f"the site refused the crawl (HTTP {seed_probe.status_code}), so its pages were not "
+            "opened in a browser either."
+        )
+    else:
+        render_summary = await _run_render_pass(
+            home_key, pages_by_target, all_targets, on_progress=_band(26, 27, bump),
+            saved_renders=bool(snap is not None and snap.has_renders),
+        )
+    bump(27)
+
+    # Links that exist only once JavaScript has run. On a client-rendered site the server's
+    # HTML carries little or no navigation, so link discovery above -- which reads that HTML --
+    # stops at whatever the shell happened to link to, and the browser's copy of each page,
+    # with the full menu, footer and in-page links, arrived only after discovery had finished.
+    # Each cycle follows the links on pages just rendered, then renders the new pages that need
+    # it, until no new links turn up or the render budget, the page cap or the time runs out.
+    # A server-rendered site renders nothing here (the probe found no gain), so it costs nothing.
+    if snap is None and not refused_early:
+        found_after_render = 0
+        just_rendered = [p for p in pages_by_target.values() if p.render.get("applied")]
+        client_rendered = _site_is_client_rendered(render_summary)
+        while just_rendered and len(pages_by_target) < MAX_PAGES and time.monotonic() < deadline:
+            before = set(pages_by_target)
+            added = await _discover(just_rendered, 27, 28)
+            found_after_render += added
+            budget_left = render_summary["budget"] - render_summary["attempted"]
+            if not added or budget_left <= 0:
+                break
+            new_keys = [k for k in all_targets if k in pages_by_target and k not in before]
+            candidates = [
+                key for key in _render_candidates(pages_by_target, new_keys, exclude=set(), budget=budget_left)
+                # The same rule the first pass used: every page of a client-rendered site, but
+                # only the empty-looking ones of a site whose homepage arrives fully rendered.
+                if client_rendered or _looks_like_shell(pages_by_target[key])
+            ]
+            applied = await _render_and_apply(candidates, pages_by_target, render_summary)
+            just_rendered = [pages_by_target[k] for k in applied]
+        if found_after_render:
+            render_summary["pages_found_after_render"] = found_after_render
+            log.info("%d more pages found by following links on rendered pages", found_after_render)
     bump(28)
 
     homepage = (
@@ -926,6 +1106,14 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
         crawl_errors=errors,
         render=render_summary,
         snapshot=snap.summary() if snap is not None else {},
+        access=site_access(
+            domain,
+            homepage=seed_probe,
+            robots=robots.result,
+            sitemap=sitemap,
+            llms=llms,
+            pages=ordered,
+        ),
     )
 
 

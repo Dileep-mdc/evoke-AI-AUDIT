@@ -1,13 +1,13 @@
-"""A site audited before is not read again: the request gets its most recent audit (api/scans.py).
+"""Every request for a site reads it afresh (api/scans.py).
 
-Pinned here: the site is matched however it is typed; a running audit is joined; the newest
-finished audit is returned only when it actually read the site, audited the live site and used
-the same industry and region; and fresh=True always starts a new audit.
+Pinned here: a finished audit is never shown in place of a new one, whatever its outcome; the
+only request answered with an existing audit is one for a site whose audit is still running,
+which is joined rather than started twice -- matched however the site is typed, and not when
+an explicit industry or region was asked for.
 """
 from __future__ import annotations
 
 import asyncio
-import json
 
 import pytest
 
@@ -28,17 +28,14 @@ def repo(tmp_path, monkeypatch):
 _n = 0
 
 
-def _audit(repo, domain, *, status="completed", onpage=72.5, industry="it_services", detected=True,
-           region=None, folder=None, started=None):
+def _audit(repo, domain, *, status="completed"):
     global _n
     _n += 1
     scan_id = f"scan-{_n}"
     repo.create(scan_id, domain, f"https://{domain}/", "test", 22, 20, 9)
-    report = {"snapshot": {"folder": folder} if folder else {}, "industry": {"key": industry, "detected": detected},
-              "platforms": {"region": region}}
-    fields = {"status": status, "onpage_score": onpage, "started_at": started or f"2026-10-{_n:02d}T00:00:00+00:00"}
+    fields = {"status": status, "started_at": f"2026-10-{_n:02d}T00:00:00+00:00"}
     if status == "completed":
-        fields["report_json"] = json.dumps(report)
+        fields["report_json"] = "{}"
     repo.update(scan_id, **fields)
     return scan_id
 
@@ -46,57 +43,32 @@ def _audit(repo, domain, *, status="completed", onpage=72.5, industry="it_servic
 NO_CHOICE = {"industry": None, "region": None}
 
 
-@pytest.mark.parametrize("typed", ["https://www.acme.com/", "acme.com", "WWW.ACME.COM/about", "http://acme.com"])
-def test_the_same_site_is_matched_however_it_is_typed(repo, typed):
-    sid = _audit(repo, "www.acme.com")
-    assert scans._existing_scan(scans.normalize_url(typed), NO_CHOICE)["id"] == sid
-
-
-def test_the_most_recent_usable_audit_is_returned(repo):
+def test_a_finished_audit_is_not_reused(repo):
     _audit(repo, "www.acme.com")
-    newest = _audit(repo, "www.acme.com")
-    _audit(repo, "www.other.com")
-    assert scans._existing_scan("https://www.acme.com/", NO_CHOICE)["id"] == newest
-
-
-def test_an_audit_that_could_not_read_the_site_is_not_reused(repo):
-    """tcs.com answered 403: no page read, no on-page score. Asking again must try again."""
-    _audit(repo, "www.tcs.com", onpage=None)
-    assert scans._existing_scan("https://www.tcs.com/", NO_CHOICE) is None
-
-
-def test_an_older_audit_that_read_the_site_beats_a_newer_one_that_did_not(repo):
-    good = _audit(repo, "www.acme.com")
-    _audit(repo, "www.acme.com", onpage=None)
-    assert scans._existing_scan("https://www.acme.com/", NO_CHOICE)["id"] == good
-
-
-def test_failed_and_saved_folder_audits_are_not_reused(repo):
     _audit(repo, "www.acme.com", status="error")
-    _audit(repo, "www.acme.com", folder=r"C:\sites\www.acme.com")
-    assert scans._existing_scan("https://www.acme.com/", NO_CHOICE) is None
+    assert scans._running_scan("https://www.acme.com/", NO_CHOICE) is None
 
 
-def test_a_running_audit_is_joined_instead_of_starting_another(repo):
+@pytest.mark.parametrize("typed", ["https://www.acme.com/", "acme.com", "WWW.ACME.COM/about", "http://acme.com"])
+def test_a_running_audit_is_joined_however_the_site_is_typed(repo, typed):
     _audit(repo, "www.acme.com")
     running = _audit(repo, "www.acme.com", status="crawling")
-    assert scans._existing_scan("https://www.acme.com/", NO_CHOICE)["id"] == running
+    assert scans._running_scan(scans.normalize_url(typed), NO_CHOICE)["id"] == running
 
 
-def test_a_different_industry_or_region_runs_a_new_audit(repo):
-    detected = _audit(repo, "www.acme.com", industry="it_services", detected=True)
-    assert scans._existing_scan("https://www.acme.com/", {"industry": "healthcare", "region": None}) is None
-    assert scans._existing_scan("https://www.acme.com/", {"industry": None, "region": "india"}) is None
-    assert scans._existing_scan("https://www.acme.com/", {"industry": "it_services", "region": None})["id"] == detected
+def test_a_running_audit_of_another_site_is_not_joined(repo):
+    _audit(repo, "www.other.com", status="evaluating")
+    assert scans._running_scan("https://www.acme.com/", NO_CHOICE) is None
 
 
-def test_an_audit_scored_for_a_chosen_industry_is_not_reused_for_auto_detect(repo):
-    _audit(repo, "www.acme.com", industry="healthcare", detected=False)
-    assert scans._existing_scan("https://www.acme.com/", NO_CHOICE) is None
+def test_an_explicit_industry_or_region_starts_its_own_audit(repo):
+    _audit(repo, "www.acme.com", status="crawling")
+    assert scans._running_scan("https://www.acme.com/", {"industry": "healthcare", "region": None}) is None
+    assert scans._running_scan("https://www.acme.com/", {"industry": None, "region": "india"}) is None
 
 
-def test_create_scan_returns_the_existing_audit_and_fresh_starts_a_new_one(repo, monkeypatch):
-    sid = _audit(repo, "www.acme.com")
+def test_create_scan_starts_a_new_audit_of_a_site_audited_before(repo, monkeypatch):
+    finished = _audit(repo, "www.acme.com")
     started = []
 
     async def fake_run(scan_id, url, folder=None, choice=None):
@@ -104,15 +76,12 @@ def test_create_scan_returns_the_existing_audit_and_fresh_starts_a_new_one(repo,
 
     monkeypatch.setattr(scans, "_run", fake_run)
 
-    async def go(fresh):
-        out = await scans.create_scan(scans.ScanRequest(url="acme.com", fresh=fresh))
+    async def go():
+        out = await scans.create_scan(scans.ScanRequest(url="acme.com"))
         await asyncio.sleep(0)   # let a started task run
         return out
 
-    out = asyncio.run(go(False))
-    assert out["scan_id"] == sid and out["reused"] is True and out["status"] == "completed"
-    assert not started
-
-    out = asyncio.run(go(True))
-    assert out["scan_id"] != sid and "reused" not in out
+    out = asyncio.run(go())
+    assert out["scan_id"] != finished
+    assert "reused" not in out
     assert started == [out["scan_id"]]

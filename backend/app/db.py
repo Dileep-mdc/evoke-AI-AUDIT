@@ -43,17 +43,10 @@ CREATE TABLE IF NOT EXISTS scans (
     excel_output_path TEXT
 );
 
--- What decides whether a finished audit can answer a new request for the same site
--- (api/scans.py _existing_scan). Read from the saved report once per audit and kept here: the
--- report is a 6-14 MB value, and parsing it on every request took 100-200 ms an audit.
-CREATE TABLE IF NOT EXISTS scan_reuse (
-    scan_id TEXT PRIMARY KEY,
-    snapshot_folder TEXT,
-    industry TEXT,
-    industry_detected INTEGER,
-    region TEXT,
-    FOREIGN KEY(scan_id) REFERENCES scans(id)
-);
+-- Finished audits are no longer reused to answer a new request for the same site: every request
+-- reads the site again. This table cached the facts that reuse decision read, copied out of the
+-- saved reports, so it holds nothing that is not in a report and is dropped from older databases.
+DROP TABLE IF EXISTS scan_reuse;
 
 CREATE TABLE IF NOT EXISTS pages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

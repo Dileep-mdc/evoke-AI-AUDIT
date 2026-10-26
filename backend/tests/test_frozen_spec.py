@@ -75,7 +75,7 @@ def test_the_engine_really_routes_every_parameter_through_the_model():
     engine = (PARAMS / "engine.py").read_text(encoding="utf-8")
     assert "score_parameter(" in engine, "engine.py no longer asks the model to score anything"
     assert "apply_judgement" in engine
-    assert "await apply_judgement(spec, await evaluate(spec, ctx))" in engine, \
+    assert "await apply_judgement(spec, await evaluate(spec, ctx), ctx)" in engine, \
         "run_one no longer applies the model judgement to every evaluated parameter"
 
 

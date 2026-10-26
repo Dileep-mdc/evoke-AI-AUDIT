@@ -192,8 +192,9 @@ tr.clickable:hover { background: #f8fafc; }
    longest id (TECH-22) at any zoom. Rows centre vertically so the ids sit evenly down the column
    even when a row's text runs to two lines. */
 .param-table td { vertical-align: middle; }
-.param-id-cell { width: 92px; min-width: 92px; white-space: nowrap; }
-.param-id { display: inline-block; min-width: 72px; padding: 3px 6px; border-radius: 6px; background: #f3f5f8;
+.param-id-cell { width: 48px; min-width: 48px; white-space: nowrap; }
+.drawer-definition { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.param-id { display: inline-block; min-width: 28px; padding: 3px 6px; border-radius: 6px; background: #f3f5f8;
   color: #4b5563; font: 600 12px/1.4 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
   text-align: center; letter-spacing: 0; }
 
@@ -206,6 +207,19 @@ tr.clickable:hover { background: #f8fafc; }
 .drawer-fact { padding: 10px 0; border-bottom: 1px solid #f1f4f7; font-size: 13px; line-height: 1.5; }
 .drawer-fact-label { display: block; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 3px; }
 .drawer-fact .ev-link { overflow-wrap: anywhere; }
+.page-fixes-note { margin: 2px 0 8px; color: var(--muted); font-size: 12px; }
+.page-fixes-search { width: 100%; box-sizing: border-box; margin: 4px 0 8px; padding: 7px 10px; border: 1px solid var(--line);
+  border-radius: 6px; font: inherit; font-size: 13px; color: var(--text); background: var(--card); }
+.page-fixes-list { list-style: none; margin: 0; padding: 0; }
+.page-fixes-list li { padding: 9px 0; border-bottom: 1px solid var(--line); }
+.page-fixes-list li:last-child { border-bottom: 0; }
+.page-fix-target { display: block; font-weight: 600; overflow-wrap: anywhere; margin-bottom: 3px; }
+.page-fix-line { margin-top: 3px; }
+.page-fix-tag { display: inline-block; min-width: 52px; margin-right: 6px; font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.03em; }
+.page-fix-tag.wrong { color: var(--red); }
+.page-fix-tag.do { color: var(--green); }
+.page-fixes-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 
 .evidence { margin-top: 18px; }
 .evidence h3 { margin: 0 0 10px; font-size: 15px; }
@@ -312,22 +326,8 @@ tr.clickable:hover { background: #f8fafc; }
 .hero-options select:focus { outline: 2px solid var(--indigo); outline-offset: 1px; }
 .hero-option-hint { font-size: 12.5px; color: var(--muted); margin: 0 auto 14px; max-width: 620px; }
 
-.hero-sub-heading { font-size: 19px; font-weight: 600; color: var(--text); margin-bottom: 22px; }
-.feature-grid {
-  display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
-  max-width: 880px; margin: 0 auto;
-}
-.feature-card {
-  background: #fff; border: 1px solid #eef1f4; border-radius: 16px;
-  box-shadow: var(--shadow); padding: 22px 20px; text-align: left;
-}
-.feature-card .emoji { font-size: 22px; display: block; margin-bottom: 14px; }
-.feature-card b { font-size: 14.5px; font-weight: 600; color: var(--text); }
-.feature-card p { margin: 6px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.55; }
-
 @media (max-width: 720px) {
   .hero-title { font-size: 30px; }
-  .feature-grid { grid-template-columns: 1fr; }
   .hero-input-pill { flex-direction: column; border-radius: 20px; padding: 14px; }
   .hero-input-pill input { width: 100%; text-align: center; }
   .btn-hero-primary { width: 100%; }
@@ -360,11 +360,19 @@ tr.clickable:hover { background: #f8fafc; }
 
 .calc { margin: 22px 0 4px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: #fafbfc; }
 .calc h3 { margin: 0 0 10px; font-size: 14px; }
-.calc-formula { background: #fff; border: 1px solid var(--line); border-left: 3px solid var(--blue); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
-.calc-formula span { display: block; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; }
-.calc-formula p { margin: 4px 0 0; font-size: 13.5px; color: var(--text); line-height: 1.55; }
-.calc-formula .calc-formula-next { margin-top: 10px; }
-.calc-formula:last-child { margin-bottom: 0; }
+.calc-steps { list-style: none; margin: 0; padding: 0; position: relative; }
+.calc-step { position: relative; display: flex; gap: 12px; padding: 0 0 14px; }
+.calc-step:not(:last-child)::before { content: ""; position: absolute; left: 11px; top: 26px; bottom: 2px; width: 2px; background: var(--line); }
+.calc-step-n { flex: 0 0 24px; height: 24px; border-radius: 50%; display: grid; place-items: center;
+  background: #eef2ff; color: var(--blue); font-size: 12px; font-weight: 700; }
+.calc-step > div { flex: 1; min-width: 0; padding-top: 2px; }
+.calc-step-label { display: block; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+.calc-step p { margin: 3px 0 0; font-size: 13.5px; color: var(--text); line-height: 1.55; }
+.calc-step.result > div { background: #fff; border: 1px solid var(--line); border-left: 3px solid var(--blue); border-radius: 8px; padding: 8px 12px; }
+.calc-step.result.good > div { border-left-color: var(--green); }
+.calc-step.result.mid > div { border-left-color: var(--orange); }
+.calc-step.result.bad > div { border-left-color: var(--red); }
+.calc-step.result p { font-weight: 600; }
 .calc-note { margin: 10px 0 0; color: var(--muted); line-height: 1.5; }
 @media (max-width: 760px) {
   .drawer { padding: 0 18px 22px; height: 94vh; }
@@ -402,11 +410,11 @@ tr.clickable:hover { background: #f8fafc; }
 .citation-detail { color: #6b7280; }
 
 
-.scan-cost-hint { font-size: 12.5px; color: var(--muted); margin: 0 auto 44px; }
 
 .scan-busy { color: var(--muted); font-size: 13px; font-style: italic; margin: 4px 0 0; }
-.page-head p.reused-note { color: var(--text); max-width: 640px; padding: 8px 12px; border-left: 3px solid var(--blue);
+.page-head p.access-note { color: var(--text); max-width: 640px; padding: 8px 12px; border-left: 3px solid var(--orange);
   background: var(--card); border-radius: 6px; font-size: 13px; }
+.page-head p.access-note.blocked { border-left-color: var(--red); }
 
 .head-actions { flex-shrink: 0; }
 .head-actions .btn { white-space: nowrap; }

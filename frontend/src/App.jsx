@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { createScan, downloadUrl, getParameter, getProgress, getRecheck, getReport, getStatus, listScans, startRecheck } from "./api";
+import { createScan, downloadUrl, getFixes, getParameter, getProgress, getRecheck, getReport, getStatus, listScans, startRecheck, workbookUrl } from "./api";
 import logoIcon from "./assets/logo-icon.png";
 
 function band(score) {
@@ -231,25 +231,137 @@ function fixText(p) {
   return "Improve this parameter against its Score Logic; see the evidence for what fell short.";
 }
 
+// A check's number within its pillar: "TECH-01" -> "1", "ON-20" -> "20". The pillar tab and
+// the panel heading already say which pillar it belongs to.
+function paramNumber(id) {
+  return String(id || "").replace(/^[A-Za-z]+-0*/, "") || id;
+}
+
+const SECTION_NAMES = { technical: "Technical", on_page: "On-Page", off_page: "Off-Page" };
+
+const PAGE_FIX_STEP = 50;
+
+// Every page this check found needing a change, with the problem and the fix, from the
+// server's fix-by-page list (parameters/page_fixes.py). Loaded when the panel opens: on a
+// large site it is thousands of rows, which the report itself does not carry.
+function PageFixes({ scanId, parameterId }) {
+  const [data, setData] = useState(null);
+  const [failed, setFailed] = useState("");
+  const [query, setQuery] = useState("");
+  const [shown, setShown] = useState(PAGE_FIX_STEP);
+
+  useEffect(() => {
+    let alive = true;
+    setData(null);
+    setFailed("");
+    setQuery("");
+    setShown(PAGE_FIX_STEP);
+    getFixes(scanId, parameterId)
+      .then((d) => alive && setData(d))
+      .catch((e) => alive && setFailed(e.message));
+    return () => { alive = false; };
+  }, [scanId, parameterId]);
+
+  const filtered = useMemo(() => {
+    const rows = data?.fixes || [];
+    const q = query.trim().toLowerCase();
+    return q ? rows.filter((f) => `${f.target} ${f.issue} ${f.fix}`.toLowerCase().includes(q)) : rows;
+  }, [data, query]);
+
+  if (failed) {
+    return (
+      <div className="drawer-fact">
+        <span className="drawer-fact-label">Fix by page</span>
+        <span className="ev-empty">Could not load the page list: {failed}</span>
+      </div>
+    );
+  }
+  if (!data) {
+    return (
+      <div className="drawer-fact">
+        <span className="drawer-fact-label">Fix by page</span>
+        <span className="ev-empty">Loading…</span>
+      </div>
+    );
+  }
+  if (data.scope === "site" || data.total === 0) {
+    return (
+      <div className="drawer-fact">
+        <span className="drawer-fact-label">Fix by page</span>
+        <span>{data.note}</span>
+      </div>
+    );
+  }
+  const more = filtered.length - shown;
+  return (
+    <div className="drawer-fact page-fixes">
+      <span className="drawer-fact-label">
+        Fix by page · {data.total.toLocaleString()} {data.total === 1 ? "page or item" : "pages or items"}
+      </span>
+      {data.note && <p className="page-fixes-note">{data.note}</p>}
+      {data.total > 10 && (
+        <input
+          className="page-fixes-search"
+          type="search"
+          placeholder="Filter by URL or problem"
+          value={query}
+          onChange={(e) => { setQuery(e.target.value); setShown(PAGE_FIX_STEP); }}
+        />
+      )}
+      {query && <p className="page-fixes-note">{filtered.length.toLocaleString()} of {data.total.toLocaleString()} match</p>}
+      <ol className="page-fixes-list">
+        {filtered.slice(0, shown).map((f, i) => (
+          <li key={`${f.target}-${i}`}>
+            {/^https?:\/\//i.test(f.target)
+              ? <a className="ev-link page-fix-target" href={f.target} target="_blank" rel="noreferrer">{f.target}</a>
+              : <span className="page-fix-target">{f.target}</span>}
+            <div className="page-fix-line"><span className="page-fix-tag wrong">Problem</span>{f.issue}</div>
+            <div className="page-fix-line"><span className="page-fix-tag do">Fix</span>{f.fix}</div>
+          </li>
+        ))}
+      </ol>
+      <div className="page-fixes-actions">
+        {more > 0 && (
+          <button className="btn btn-ghost" onClick={() => setShown((s) => s + PAGE_FIX_STEP)}>
+            Show {Math.min(PAGE_FIX_STEP, more).toLocaleString()} more ({more.toLocaleString()} left)
+          </button>
+        )}
+        <a className="btn btn-ghost" href={workbookUrl(scanId)}>Download all as Excel</a>
+      </div>
+    </div>
+  );
+}
+
 // Points are shown to 2 decimals: enough to add up, without the noise of a third digit.
 const pts = (n) => fmt(n, 2);
 
 function ScoreCalculation({ p }) {
   const ev = parseEvidence(p.evidence) || {};
   const measured = p.status !== "UNKNOWN" && p.score != null;
-  const max = p.max_points;
   const modelScore = typeof ev.model_score === "number" ? ev.model_score : null;
+
+  const steps = [
+    p.logic && { label: "What it checks", text: p.logic.checks },
+    p.logic && { label: "How it is scored", text: p.logic.scoring },
+    measured && p.working && { label: "Result for this site", text: p.working, result: true },
+  ].filter(Boolean);
+  const tone = p.status === "PASS" ? "good" : p.status === "PARTIAL" ? "mid" : "bad";
 
   return (
     <div className="calc">
       <h3>How this score is calculated</h3>
-      {p.logic && (
-        <div className="calc-formula">
-          <span>What it checks</span>
-          <p>{p.logic.checks}</p>
-          <span className="calc-formula-next">How it is scored</span>
-          <p>{p.logic.scoring}</p>
-        </div>
+      {steps.length > 0 && (
+        <ol className="calc-steps">
+          {steps.map((s, i) => (
+            <li key={s.label} className={s.result ? `calc-step result ${tone}` : "calc-step"}>
+              <span className="calc-step-n">{i + 1}</span>
+              <div>
+                <span className="calc-step-label">{s.label}</span>
+                <p>{s.text}</p>
+              </div>
+            </li>
+          ))}
+        </ol>
       )}
       {measured && ev.no_data && (
         <p className="calc-note">
@@ -261,14 +373,15 @@ function ScoreCalculation({ p }) {
         <p className="calc-note">
           <span className="badge NA">N/A</span>{" "}
           This check does not apply to this site{ev.does_not_apply ? `: ${ev.does_not_apply}` : ""}. It is left out of the
-          score rather than counted as 0{max != null && <>, so its {pts(max)} points neither help nor hurt the overall score</>}.
+          score rather than counted as 0, and its share of points is spread across the other checks in this pillar, so it
+          neither helps nor hurts the overall score.
         </p>
       )}
       {!measured && p.status !== "N/A" && (
         <p className="calc-note">
           <span className={`badge ${badgeClass(p.status)}`}>{p.status}</span>{" "}
-          This check could not be measured, so it is skipped rather than counted as 0.
-          {max != null && <> Its {pts(max)} points are left out, so it neither helps nor hurts the overall score.</>}
+          This check could not be measured, so it is skipped rather than counted as 0. Its share of points is spread
+          across the other checks in this pillar, so it neither helps nor hurts the overall score.
         </p>
       )}
       {measured && modelScore != null && Math.abs(modelScore - p.score) >= 0.1 && (
@@ -432,19 +545,12 @@ function Landing() {
     setError("");
     try {
       const scan = await createScan(target, { industry });
-      // An audit of this site already finished: straight to its report, which says it was reused.
-      nav(scan.status === "completed" ? `/report/${scan.scan_id}?reused=1` : `/scan/${scan.scan_id}`);
+      nav(`/scan/${scan.scan_id}`);
     } catch (e) {
       setError(e.message);
       setBusy(false);
     }
   }
-
-  const features = [
-    { emoji: "🎯", title: "Track your brand's AI visibility", detail: "See your brand visibility across AI platforms and identify key areas to improve." },
-    { emoji: "📊", title: "Get insights on competitors", detail: "Identify competitor mentions and discover ways to improve your visibility." },
-    { emoji: "👥", title: "Turn insights into growth", detail: "Find content opportunities to improve your visibility in AI and search." },
-  ];
 
   return (
     <div className="hero">
@@ -479,22 +585,6 @@ function Landing() {
           : "The industry is read from the site's own pages; pick one if it should be audited as something else."}
       </p>
       {error && <p className="hero-error">{error}</p>}
-      <p className="scan-cost-hint">
-        {status?.cost?.typical_per_100_pages
-          ? `Typical AI cost: about ${money(status.cost.typical_per_100_pages.cost_usd)} per 100 pages (from the last ${status.cost.typical_per_100_pages.based_on_scans} scans).`
-          : ""}
-        {status?.cost?.budget_usd ? ` Spending cap: ${money(status.cost.budget_usd)} per scan.` : ""}
-      </p>
-      <div className="hero-sub-heading">Understand where your brand stands in AI search:</div>
-      <div className="feature-grid">
-        {features.map((f) => (
-          <div className="feature-card" key={f.title}>
-            <span className="emoji">{f.emoji}</span>
-            <b>{f.title}</b>
-            <p>{f.detail}</p>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }
@@ -704,7 +794,7 @@ function ParameterTable({ title, rows, onSelect, tabs, activeTab, onTabChange })
             const tone = p.score == null ? "na" : p.score >= 75 ? "hi" : p.score >= 40 ? "mid" : "lo";
             return (
               <tr key={p.parameter_id} className="clickable" onClick={() => onSelect(p)}>
-                <td className="param-id-cell"><span className="param-id">{p.parameter_id}</span></td>
+                <td className="param-id-cell"><span className="param-id">{paramNumber(p.parameter_id)}</span></td>
                 <td>{p.name}</td>
                 <td><span className={`points ${tone}`}>{p.score == null ? "—" : `${fmt(p.score, 0)}%`}</span></td>
                 <td className="issue-cell">{issueText(p)}</td>
@@ -777,8 +867,6 @@ function ScanHistoryGrid({ scans, onOpen }) {
 function Dashboard() {
   const { scanId } = useParams();
   const nav = useNavigate();
-  const [query] = useSearchParams();
-  const reused = query.get("reused") === "1";
   const [freshBusy, setFreshBusy] = useState(false);
   const [report, setReport] = useState(null);
   const [err, setErr] = useState("");
@@ -895,7 +983,6 @@ function Dashboard() {
     setFreshBusy(true);
     try {
       const scan = await createScan(report.input_url, {
-        fresh: true,
         industry: report.industry && !report.industry.detected ? report.industry.key : null,
         region: report.platforms?.region || null,
       });
@@ -914,6 +1001,9 @@ function Dashboard() {
   // Only the checks that could not be measured are run again, against the pages this audit
   // already read; every other result stays as it is and the report is rebuilt in place.
   const unmeasured = params.filter((p) => p.status === "UNKNOWN");
+  // Whether the site let the audit read it (crawler/discover.py site_access). Empty on reports
+  // saved before this was recorded, which then show exactly what they always did.
+  const access = report.site_access || {};
   async function startRecheckRun() {
     setRecheck({ state: "running", done: 0, total: unmeasured.length, message: "Starting" });
     try {
@@ -936,18 +1026,18 @@ function Dashboard() {
           <div className="page-head">
             <div>
               <h1>{report.domain}</h1>
-              {report.crawl_duration_ms != null && (
-                <p title={`Scraping started ${new Date(report.crawl_started_at).toLocaleString()}, finished ${new Date(report.crawl_completed_at).toLocaleString()}`}>
-                  Scraping time {duration(report.crawl_duration_ms)}
-                  {report.ai_usage?.pages != null && ` · ${report.ai_usage.pages.toLocaleString()} pages`}
-                  {spanMs(report.started_at, report.completed_at) != null && ` · Total scan ${duration(spanMs(report.started_at, report.completed_at))}`}
+              {report.industry?.label && (
+                <p>
+                  Audited as <b>{report.industry.label}</b>
+                  {report.industry.detected ? " (detected from the site)" : " (chosen for this audit)"}
                 </p>
               )}
               {report.rechecked && <p>Re-checked</p>}
-              {reused && (
-                <p className="reused-note">
-                  This site was already audited on {new Date(report.audited_at || report.generated_at).toLocaleString()}, so
-                  that report is shown instead of reading the site again. Use "Run fresh audit" for an up-to-date one.
+              {access.blocked && <p className="access-note blocked">{access.reason}</p>}
+              {!access.blocked && access.pages_refused > 0 && (
+                <p className="access-note partial">
+                  {access.pages_refused.toLocaleString()} of {access.pages_fetched.toLocaleString()} pages were refused by
+                  the site (HTTP 401/403/429) or served a bot-check page, so they are left out of the scores.
                 </p>
               )}
             </div>
@@ -1041,8 +1131,13 @@ function Dashboard() {
           <div className="drawer" onClick={(e) => e.stopPropagation()}>
             <div className="drawer-head">
               <div>
-                <div className="kicker">{selected.parameter_id}</div>
+                <div className="kicker">{SECTION_NAMES[selected.section] || ""} · {paramNumber(selected.parameter_id)}</div>
                 <h2>{selected.name}</h2>
+                {(selected.definition || params.find((p) => p.parameter_id === selected.parameter_id)?.definition) && (
+                  <p className="drawer-definition">
+                    {selected.definition || params.find((p) => p.parameter_id === selected.parameter_id)?.definition}
+                  </p>
+                )}
               </div>
               <button className="btn btn-ghost" onClick={() => setSelected(null)} aria-label="Close">Close</button>
             </div>
@@ -1071,14 +1166,15 @@ function Dashboard() {
                 return note && text.startsWith(note) ? text.slice(note.length).trim() || text : text;
               })()}</span>
             </div>
+            <PageFixes scanId={scanId} parameterId={selected.parameter_id} />
             {parseEvidence(selected.evidence)?.cross_check && (
               <div className="drawer-fact">
                 <span className="drawer-fact-label">Read together with other checks</span>
                 <span>{parseEvidence(selected.evidence).cross_check}</span>
               </div>
             )}
-            <EvidencePanel evidence={selected.evidence} error={selected.error} />
             <ScoreCalculation p={selected} />
+            <EvidencePanel evidence={selected.evidence} error={selected.error} />
           </div>
         </div>
       )}

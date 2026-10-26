@@ -82,7 +82,7 @@ async def restore(scan_id: str, domain: str, report: dict) -> SiteContext:
         domain=payload.get("domain") or domain, robots=robots, sitemap=sitemap, homepage=homepage, pages=pages,
         llms=llms, company_name=payload.get("company_name") or "", brand_terms=payload.get("brand_terms") or [],
         crawl_errors=payload.get("crawl_errors") or [], render=payload.get("render") or {},
-        snapshot=payload.get("snapshot") or {},
+        snapshot=payload.get("snapshot") or {}, access=payload.get("access") or {},
     )
     # What the audit established about the site is carried over, not worked out again.
     ctx.identity = report.get("identity") or {}

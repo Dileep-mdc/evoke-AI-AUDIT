@@ -651,7 +651,9 @@ async def tech_14(spec, ctx):
     transcripts = 0
     links = page_links(scorable_pages(ctx), "Crawled page: every image's alt text is checked, and any embedded video is checked for a transcript.")
     for page in scorable_pages(ctx):
-        images.extend(page.images)
+        # The page each image sits on is kept, so the report's fix-by-page list can say where to
+        # add the alt text rather than handing over a bare image URL.
+        images.extend({**image, "page": page.result.final_url} for image in page.images)
         if page.soup:
             # A <video>, or an iframe that embeds a video player. Every iframe used to count, so
             # Google Tag Manager's noscript frame and an embedded map were "videos without transcripts".

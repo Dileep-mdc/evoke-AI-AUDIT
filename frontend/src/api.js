@@ -9,8 +9,8 @@ async function read(res) {
 }
 
 export function createScan(url, options = {}) {
-  // A site audited before comes back as its most recent audit (reused: true) unless fresh is set.
-  const body = { url, industry: options.industry || null, region: options.region || null, fresh: Boolean(options.fresh) };
+  // Every request reads the site afresh; one already being audited joins that audit instead.
+  const body = { url, industry: options.industry || null, region: options.region || null };
   return fetch("/api/scans", { method: "POST", headers, body: JSON.stringify(body) }).then(read);
 }
 
@@ -32,6 +32,15 @@ export function getParameter(id, parameterId) {
 
 export function downloadUrl(id) {
   return `/api/scans/${id}/download`;
+}
+
+export function workbookUrl(id) {
+  return `/api/scans/${id}/download.xlsx`;
+}
+
+// Every page one check found needing a change: {scope, total, note, fixes: [{target, issue, fix}]}.
+export function getFixes(id, parameterId) {
+  return fetch(`/api/scans/${id}/fixes/${parameterId}`).then(read);
 }
 
 export function listScans() {

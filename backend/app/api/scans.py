@@ -20,8 +20,9 @@ from ..llm import usage
 from ..parameters.engine import load_registry, run_all_parameters
 from ..parameters.common import upgrade_na_row
 from ..parameters.formula_simple import logic_for
-from ..parameters import crosschecks, identity, industry
+from ..parameters import crosschecks, identity, industry, page_fixes
 from ..parameters.platforms import resolve as resolve_platforms
+from ..parameters.spec import parameter_specs
 from ..parameters.working import working_for
 from ..parameters.scoring import SCORING_METHOD, build_report, final_from_rules, prioritize
 from .. import parameter_links, site_folder
@@ -72,8 +73,8 @@ class ScanRequest(BaseModel):
     # from the site when omitted) and a region whose sites the off-page checks add.
     industry: str | None = None
     region: str | None = None
-    # A site audited before is not read again: its most recent audit is returned (see
-    # _existing_scan). True runs a new audit regardless -- the report's "Run fresh audit" button.
+    # Accepted for older dashboards that still send it. Every request reads the site afresh now,
+    # so it changes nothing.
     fresh: bool = False
 
 
@@ -221,6 +222,11 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None, choice
         # re-run by hand afterwards.
         by_id = {r["parameter_id"]: r for r in results}
         retry = [spec for spec in registry if _worth_retrying(by_id.get(spec["parameter_id"]))]
+        if (ctx.access or {}).get("blocked"):
+            # The site refused this client, and a second try at robots.txt, the sitemap or the
+            # CDN probe meets the same refusal. Only the off-page checks, which search the wider
+            # web rather than the site, can come out differently.
+            retry = [spec for spec in retry if spec["section"] == "off_page"]
         if retry:
             log.info("Scan %s retrying %d unscored parameter(s): %s", scan_id, len(retry),
                      ", ".join(s["parameter_id"] for s in retry))
@@ -251,6 +257,9 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None, choice
         # Which copy of the site was audited: the saved folder or the live web. The dashboard
         # shows it, since scores from a snapshot describe the site as of the day it was saved.
         report["snapshot"] = getattr(ctx, "snapshot", None) or {}
+        # Whether the site let the audit read it. The dashboard shows `reason` when it did not,
+        # so a refused site reads as refused rather than as a one-page website.
+        report["site_access"] = getattr(ctx, "access", None) or {}
         report["audited_at"] = report["generated_at"]
         report["platforms"] = ctx.platforms
         report["industry"] = ctx.industry
@@ -315,11 +324,11 @@ async def create_scan(payload: ScanRequest):
         choice = {"industry": payload.industry, "region": payload.region}
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    if not folder and not payload.fresh:
-        existing = await asyncio.to_thread(_existing_scan, url, choice)
-        if existing:
-            log.info("Scan request for %s answered with %s audit %s", url, existing["status"], existing["id"])
-            return {**_progress_payload(existing), "reused": True}
+    if not folder:
+        running = await asyncio.to_thread(_running_scan, url, choice)
+        if running:
+            log.info("Scan request for %s joined the audit already running, %s", url, running["id"])
+            return _progress_payload(running)
     domain = urlparse(url).netloc.lower()
     scan_id = str(uuid.uuid4())
     scan = repo.create(
@@ -335,9 +344,9 @@ async def create_scan(payload: ScanRequest):
 
 
 _IN_PROGRESS = {"queued", "crawling", "evaluating"}
-# How many recent audits are searched for one of the same site. Only columns stored before the
-# report are read (repo.recent_lean), so this costs a few milliseconds even at the limit.
-_REUSE_LOOKBACK = 500
+# How many recent audits are searched for a running one of the same site. Only columns stored
+# before the report are read (repo.recent_lean), so this costs a few milliseconds.
+_RUNNING_LOOKBACK = 50
 
 
 def _site_key(url_or_host: str) -> str:
@@ -347,36 +356,22 @@ def _site_key(url_or_host: str) -> str:
     return host.strip(".").removeprefix("www.")
 
 
-def _existing_scan(url: str, choice: dict) -> dict | None:
-    """The audit to answer this request with instead of reading the site again, or None.
+def _running_scan(url: str, choice: dict) -> dict | None:
+    """An audit of this site still in progress, to join rather than start the same audit twice.
 
-    Matched by site, not by the exact URL typed. An audit of the site still running is joined
-    rather than started twice. Otherwise the most recent finished audit is returned when it
-    actually read the site (an audit refused with 403 has no on-page score and is not reused, so
-    asking again tries again), audited the live site rather than a saved folder, and was scored
-    for the same industry and region -- a different profile changes the scores, so it runs anew.
+    Only a running audit: a finished one is never shown in place of reading the site again, so
+    every request for a site that is not already being audited reads it afresh. Matched by
+    site, not by the exact URL typed.
     """
+    # What a running audit was asked to score against is not recorded, so an explicit industry
+    # or region cannot be matched to it and starts its own.
+    if choice.get("industry") or choice.get("region"):
+        return None
     key = _site_key(url)
-    explicit = bool(choice.get("industry") or choice.get("region"))
-    for scan in repo.recent_lean(_REUSE_LOOKBACK):   # newest first
-        if key not in (_site_key(scan.get("domain") or ""), _site_key(scan.get("input_url") or "")):
+    for scan in repo.recent_lean(_RUNNING_LOOKBACK):   # newest first
+        if scan["status"] not in _IN_PROGRESS:
             continue
-        if scan["status"] in _IN_PROGRESS:
-            # What a running audit was asked to score against is not recorded, so an explicit
-            # industry or region cannot be matched to it and starts its own.
-            if not explicit:
-                return scan
-            continue
-        if scan["status"] != "completed":
-            continue
-        # No on-page score: no page of the site was read (tcs.com's 403), so ask the site again.
-        if scan["onpage_score"] is None:
-            continue
-        facts = repo.reuse_facts(scan["id"])
-        if not facts or facts["snapshot_folder"]:
-            continue
-        same_industry = (facts["industry"] == choice["industry"]) if choice.get("industry") else facts["industry_detected"]
-        if same_industry and (facts["region"] or None) == (choice.get("region") or None):
+        if key in (_site_key(scan.get("domain") or ""), _site_key(scan.get("input_url") or "")):
             return scan
     return None
 
@@ -399,7 +394,7 @@ def _carried(report: dict) -> dict:
     out = {"snapshot": report.get("snapshot") or {}}
     # Recalculating a saved report is not a new report: it keeps the time it was generated.
     for key in ("platforms", "ai_usage", "industry", "identity", "cross_checks", "content_analysis",
-                "generated_at", "audited_at"):
+                "site_access", "generated_at", "audited_at"):
         if key in report:
             out[key] = report[key]
     return out
@@ -568,6 +563,11 @@ async def get_report(scan_id: str):
     report = _current_report(scan_id)
     if not report:
         raise HTTPException(409, "Report not persisted yet")
+    # What each check means, in plain words, shown under its name. Added on the way out rather
+    # than stored, so every report -- including ones saved before this -- carries the current text.
+    specs = parameter_specs()
+    for row in report.get("parameters") or []:
+        row["definition"] = (specs.get(row.get("parameter_id")) or {}).get("definition", "")
     return report
 
 
@@ -580,6 +580,34 @@ async def get_parameter(scan_id: str, parameter_id: str):
     row["working"] = working_for(row["parameter_id"], row.get("evidence"), row.get("score"))
     row["logic"] = logic_for(row["parameter_id"])
     return row
+
+
+def _report_or_409(scan_id: str) -> dict:
+    report = _current_report(scan_id)
+    if not report:
+        raise HTTPException(409, "Report not ready")
+    return report
+
+
+@router.get("/scans/{scan_id}/fixes")
+async def get_fix_counts(scan_id: str):
+    """How many pages need a change, per check -- shown beside each recommended fix."""
+    report = _report_or_409(scan_id)
+    return page_fixes.counts_for(report.get("parameters") or [], page_fixes.site_from_report(report))
+
+
+@router.get("/scans/{scan_id}/fixes/{parameter_id}")
+async def get_fixes(scan_id: str, parameter_id: str):
+    """Every page this check found needing a change, with what is wrong and what to do.
+
+    Built from the stored evidence on request rather than stored in the report: on a 2,500-page
+    site it is tens of thousands of rows, which every report view would otherwise download.
+    """
+    report = _report_or_409(scan_id)
+    row = next((p for p in report.get("parameters") or [] if p.get("parameter_id") == parameter_id), None)
+    if row is None:
+        raise HTTPException(404, "Parameter result not found")
+    return page_fixes.fixes_for(row, page_fixes.site_from_report(report))
 
 
 @router.get("/scans/{scan_id}/download")

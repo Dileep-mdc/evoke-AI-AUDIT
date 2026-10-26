@@ -975,6 +975,10 @@ async def on_13(spec, ctx):
             evidence["llm"] = {"named_client": sum(1 for v in verdicts if v.get("names_client")),
                                "quantified_outcome": sum(1 for v in verdicts if v.get("quantified_outcome")),
                                "deployment_detail": sum(1 for v in verdicts if v.get("deployment_detail")),
+                               # The pages earning the +20 bonus. Without this count the score
+                               # cannot be recomputed from the report, so its working went unshown.
+                               "client_and_outcome": sum(1 for v in verdicts
+                                                         if v.get("names_client") and v.get("quantified_outcome")),
                                **coverage.as_evidence()}
         elif coverage.error:
             evidence["llm_unavailable"] = coverage.error

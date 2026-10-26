@@ -423,12 +423,15 @@ def on_13(ev: dict) -> Result:
                                         llm.get("deployment_detail"), llm.get("assessed"))
         if not all(isinstance(v, int) for v in (named, quant, deploy)) or not judged:
             return None
-        if named and quant:
-            return None  # the +20 bonus needs the count of pages with BOTH, which is not stored
-        score = (named * 25 + quant * 30 + deploy * 25) / judged
+        both = llm.get("client_and_outcome")
+        if named and quant and not isinstance(both, int):
+            return None  # an audit saved before the count of pages with BOTH was recorded
+        both = both or 0
+        score = (named * 25 + quant * 30 + deploy * 25 + both * 20) / judged
+        bonus = (f" {_n(both)} {_v(both, 'does', 'do')} both a client and a result (20 bonus points)." if both else "")
         return (f"Of {_n(judged)} proof pages{_coverage(llm)}, {_n(named)} {_v(named, 'names', 'name')} a client (25 points),"
                 f" {_n(quant)} {_v(quant, 'gives', 'give')} a measured result (30 points) and {_n(deploy)}"
-                f" {_v(deploy, 'describes', 'describe')} the work done (25 points)."
+                f" {_v(deploy, 'describes', 'describe')} the work done (25 points).{bonus}"
                 f" Averaged over all {_n(judged)} pages, it scores {_s(score)}."), score
     pages = ev.get("pages")
     if not isinstance(pages, list) or not pages:

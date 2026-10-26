@@ -5,8 +5,10 @@ Each check is scored on its own, and some pairs then read as contradictions to a
 canonical tags are "fine" (TECH-20 = 100) while 330 near-duplicate pages remain (ON-19). Both
 halves are true. This module says so on the rows involved.
 
-Notes never change a score. They are written into the row's evidence (`cross_check`) and in front
-of its recommendation, so the report, the workbook and the score panel all carry them.
+Notes never change a score. They are written into the row's evidence (`cross_check`), which the
+workbook's explanation column and the score panel both show. They are kept out of the
+recommendation: a fix says what to change, and a note in front of it made TECH-19's "fix" an
+explanation of how TECH-16, 17 and 18 relate.
 """
 from __future__ import annotations
 
@@ -19,8 +21,6 @@ def _evidence(row: Optional[dict]) -> dict:
 
 def _note(row: dict, text: str) -> None:
     row["evidence"] = {**_evidence(row), "cross_check": text}
-    rec = row.get("recommendation")
-    row["recommendation"] = f"{text} {rec}" if rec else (text if row.get("status") != "PASS" else rec)
 
 
 def _robots_verdicts(row: Optional[dict]) -> tuple[list[str], list[str]]:
