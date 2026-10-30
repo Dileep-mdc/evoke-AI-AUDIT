@@ -323,7 +323,7 @@ def test_tech03_mailto_tel_javascript_and_anchors_are_not_counted_as_broken(monk
     monkeypatch.setattr(technical, "check", fake_check)
     body = ("# Site\n[Mail](mailto:hi@x.com) [Call](tel:+15550100) [Top](#top) [JS](javascript:void(0)) "
             "[About](/about) [Docs](https://docs.x.com/start)\nUpdated 2025-01-01")
-    llms = SimpleNamespace(ok=True, text=body, url="https://x/llms.txt", final_url="https://x/llms.txt", status_code=200)
+    llms = SimpleNamespace(ok=True, text=body, url="https://x/llms.txt", final_url="https://x/llms.txt", status_code=200, content_type="text/plain")
     out = _run(technical.tech_03(_spec("TECH-03"), _ctx([_page()], llms=llms)))
     assert requested == ["https://x/about", "https://docs.x.com/start"]
     assert out["evidence"]["links_found"] == 2 and out["evidence"]["non_web_links_skipped"] == 4

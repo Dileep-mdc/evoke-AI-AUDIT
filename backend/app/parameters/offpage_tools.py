@@ -40,6 +40,7 @@ from ..config import (
     WIKIMEDIA_USER_AGENT,
     WIKIPEDIA_API,
 )
+from .. import deadline
 from ..crawler.google_search import SearchResult, google_search
 from ..crawler.google_search import configured as google_configured
 from ..crawler.openai_search import configured as openai_configured
@@ -150,10 +151,21 @@ def search_provider() -> str:
 async def web_search(query: str) -> SearchResult:
     """One web search. Discovery only: the result pages are the evidence, not the listing."""
     provider = search_provider()
-    if provider == "openai":
-        return await openai_search(query)
-    if provider == "google":
-        return await google_search(query)
+    if provider in ("openai", "google"):
+        left = deadline.remaining()
+        if left is not None and left <= 0:
+            # Not started at all: a paid search cancelled a moment later would cost and say nothing.
+            return SearchResult(query, ok=False, error="the web search did not finish within the check's time limit")
+        search = openai_search(query) if provider == "openai" else google_search(query)
+        if left is None:
+            return await search
+        try:
+            # A search still running at the check's time limit is abandoned: the check reports the
+            # search as unavailable and the scan's retry runs it again, rather than the whole check
+            # being cut off with nothing.
+            return await asyncio.wait_for(search, timeout=max(0.1, left))
+        except asyncio.TimeoutError:
+            return SearchResult(query, ok=False, error="the web search did not finish within the check's time limit")
     return SearchResult(query, ok=False, error=(
         "Web search is not configured: set OPENAI_API_KEY, or GOOGLE_API_KEY and GOOGLE_CSE_ID, in backend/.env"))
 

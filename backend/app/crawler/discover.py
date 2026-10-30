@@ -40,7 +40,7 @@ from .parse import make_soup
 from .render import render_many, render_unavailable
 from .resolver import prefer_reachable_addresses
 from . import snapshot
-from .robots import RobotsData, fetch_robots
+from .robots import AI_BOTS, RobotsData, bot_decision, fetch_robots
 from .sitemap import fetch_sitemaps, locale_of
 
 log = logging.getLogger("crawler")
@@ -721,6 +721,41 @@ class SiteContext:
     # Whether the site let the audit read it -- see site_access(). Empty on a context restored
     # from an audit saved before this was recorded.
     access: dict = field(default_factory=dict)
+    # What each crawl step did and how long it took, and how every URL was found -- the crawl
+    # log PDF (crawl_log.py) is built from it. Keys: steps, sources ({url: how it was found}).
+    crawl_log: dict = field(default_factory=dict)
+
+
+class _CrawlLog:
+    """Records each crawl step as it finishes: its number, what it did, and how long it took."""
+
+    def __init__(self) -> None:
+        self.steps: list[dict] = []
+        self.sources: dict[str, str] = {}
+        self._clock = time.monotonic()
+
+    def restart(self) -> None:
+        self._clock = time.monotonic()
+
+    def step(self, number: str, name: str, result: str, **details) -> None:
+        now = time.monotonic()
+        self.steps.append({"step": number, "name": name, "result": result,
+                           "ms": int((now - self._clock) * 1000), "details": details})
+        self._clock = now
+
+    def amend(self, number: str, note: str, **details) -> None:
+        """Add to a step already recorded, once something later shows more about it."""
+        for entry in self.steps:
+            if entry["step"] == number:
+                entry["result"] += note
+                entry["details"].update(details)
+
+    def found(self, urls, how: str) -> None:
+        for u in urls:
+            self.sources.setdefault(u, how)
+
+    def as_dict(self) -> dict:
+        return {"steps": self.steps, "sources": self.sources}
 
 
 def _priority_urls(origin: str, sitemap_urls: list[str], homepage_links: list[str]) -> list[str]:
@@ -768,8 +803,10 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
     started_at = time.monotonic()
     deadline = started_at + CRAWL_TIME_BUDGET
     errors: list[str] = []
+    trail = _CrawlLog()
 
     normalized = normalize_url(input_url)
+    trail.step("0", "Normalise the address", f"{input_url} → {normalized}")
     # A saved copy of the site, if one exists, under either the host as typed or its
     # www/apex twin -- someone typing example.com means the www.example.com snapshot.
     snap = snapshot.load(normalized)
@@ -782,6 +819,9 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
     bump(2)
     if snap is not None:
         log.info("reading %d saved pages from snapshot %s", len(snap.pages), snap.folder)
+    trail.step("1", "Look for a saved copy of the site",
+               f"Saved copy found: {len(snap.pages)} pages in {snap.folder}" if snap is not None
+               else "No saved copy; the live website is read")
 
     # Before anything is fetched: find out which of the host's addresses can actually be
     # reached, and pin the crawl to those. A host behind a CDN answers on several, and when
@@ -795,6 +835,13 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
             f"{reach['host']}: {unreachable} of {reach['total']} addresses for this host "
             "would not complete a connection from here; the crawl used the ones that did."
         )
+    if snap is not None:
+        reach_result = "Skipped: pages come from the saved copy"
+    elif reach.get("checked"):
+        reach_result = f"{reach.get('reachable', 0)} of {reach.get('total', 0)} server addresses answered; the crawl uses those"
+    else:
+        reach_result = "Address check not possible; the system's normal lookup is used"
+    trail.step("2", "Find the server addresses that answer", reach_result, reach=reach, from_saved_copy=snap is not None)
 
     # Lightweight probe of the homepage purely to discover its internal links for seeding
     # crawl priority. The homepage Page used everywhere else below comes from the main
@@ -814,13 +861,50 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
                 normalized, seed_probe = alt_url, alt_probe
                 origin = origin_of(normalized)
                 domain = urlparse(origin).netloc.lower()
+    home_switched = normalized != normalize_url(input_url) and snap is None
+    home_result = (
+        f"HTTP {seed_probe.status_code} in {seed_probe.elapsed_ms} ms → {seed_probe.final_url}"
+        if seed_probe.status_code is not None else f"No response: {seed_probe.error or 'unknown error'}"
+    )
+    if home_switched:
+        home_result += " (the other www/non-www address was used because the first did not answer)"
     bump(3)
+    # bot_ua_refused is filled in after robots.txt and llms.txt: this probe, like the page crawl,
+    # is fetched as a browser, so it can never show the audit bot being refused.
+    trail.step("3", "Open the homepage", home_result, url=normalized, status=seed_probe.status_code, error=seed_probe.error,
+               final_url=seed_probe.final_url, switched_host=home_switched, bot_ua_refused=False)
     robots = await fetch_robots(origin)
+    ai_rules = {}
+    if robots.parser is not None:
+        for bot in AI_BOTS:
+            try:
+                decision = bot_decision(robots, bot, origin.rstrip("/") + "/")["decision"]
+                ai_rules[bot] = "allowed" if decision == "ALLOWED" else "blocked"
+            except Exception:
+                continue
+    blocked_bots = [b for b, rule in ai_rules.items() if rule == "blocked"]
+    trail.step(
+        "4", "Read robots.txt",
+        (f"HTTP {robots.result.status_code}; {len(robots.sitemap_urls)} sitemap line(s); "
+         + (f"blocks {', '.join(blocked_bots)}" if blocked_bots else "AI bots allowed on the homepage"))
+        if robots.result.ok and robots.raw.strip()
+        else f"No robots.txt ({robots.result.status_code or robots.result.error or 'no response'})",
+        ai_bots=ai_rules, url=robots.url, status=robots.result.status_code, error=robots.result.error,
+        found=bool(robots.result.ok and robots.raw.strip()), blocked=blocked_bots,
+    )
     bump(5)
     # The locale the homepage serves ("/en-in/" after a geo redirect), or the one the saved
     # pages are in, so a multi-language sitemap is read for the pages being audited.
     locale = locale_of(seed_probe.final_url) or (locale_of(snap.pages[0]) if snap is not None and snap.pages else "")
     sitemap = await fetch_sitemaps(origin, robots.sitemap_urls, prefer=locale)
+    trail.step(
+        "5", "Read the sitemaps",
+        f"{len(sitemap.get('urls', [])):,} page address(es) from "
+        f"{max(0, len(sitemap.get('sources', [])) - len(sitemap.get('errors', [])))} sitemap file(s) read"
+        + (f"; {len(sitemap.get('errors', []))} address(es) tried had no readable sitemap" if sitemap.get("errors") else ""),
+        errors=list(sitemap.get("errors", []))[:20], count=len(sitemap.get("urls", [])),
+        tried=list(sitemap.get("candidates", []))[:20],
+    )
     bump(8)
 
     home_links: list[str] = []
@@ -830,16 +914,33 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
             abs_url = join_url(seed_probe.final_url, a["href"])
             if abs_url and same_host(abs_url, origin):
                 home_links.append(urldefrag(abs_url)[0])
+    trail.restart()
     llms = await fetch(urljoin_safe(origin, "/llms.txt"))
+    trail.step("6", "Check /llms.txt",
+               f"Found (HTTP {llms.status_code}, {len(llms.content):,} bytes)" if llms.ok and not is_html(llms)
+               else f"Not found ({llms.status_code or llms.error or 'no response'})",
+               url=llms.url, status=llms.status_code, found=bool(llms.ok and not is_html(llms)),
+               served_html_page=bool(llms.ok and is_html(llms)))
+    if robots.result.bot_ua_refused or llms.bot_ua_refused:
+        # The site files are requested as the audit bot first; a refusal there is the site
+        # turning the bot away, which the homepage probe (sent as a browser) cannot see.
+        trail.amend("3", " (the site refused the audit bot, so a browser identity was used)", bot_ua_refused=True)
     bump(10)
 
+    home = origin.rstrip("/") + "/"
+    trail.found([home], "homepage")
     if snap is not None:
         # The saved page list IS the site for this scan: every page in the folder, homepage
         # first, and no link discovery below -- that would only reach pages the folder lacks.
-        home = origin.rstrip("/") + "/"
         targets = list(dict.fromkeys([home] + [u for u in snap.pages if looks_like_document(u)]))
+        trail.found(targets, "saved copy")
     else:
         targets = _priority_urls(origin, sitemap.get("urls", []), home_links)
+        trail.found([normalized], "homepage")
+        sitemap_set = set(sitemap.get("urls", []))
+        link_set = set(home_links)
+        for u in targets:
+            trail.found([u], "sitemap" if u in sitemap_set else "homepage link" if u in link_set else "priority path")
 
     pages_by_target: dict[str, Page] = {}
     all_targets: list[str] = list(targets)
@@ -918,7 +1019,14 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
         on_progress=_band(10, 18, bump),
         deadline=deadline,
     )
+    trail.step("7", "Build the page list and download it",
+               f"{len(targets):,} page(s) queued; {_status_summary(fetched.get(u) for u in targets)}",
+               queued=len(targets), statuses=_status_counts(fetched.get(u) for u in targets))
     frontier = await _parse_batch(targets, fetched, on_parse_progress=_band(18, 21, bump))
+    trail.step("8", "Read each page (text, headings, links, schema)",
+               f"{len(frontier):,} page(s) read; {sum(1 for p in frontier if _readable(p)):,} with readable content",
+               read=len(frontier), readable=sum(1 for p in frontier if _readable(p)),
+               bot_check_pages=sum(1 for p in frontier if p.blocked_reason))
 
     # A site that refuses this client outright -- its homepage answered 401/403/429 and nothing
     # in the first batch was readable -- is not crawled any further. Following links off a
@@ -944,7 +1052,7 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
     visited = set(all_targets)
     deadline_noted = False
 
-    async def _discover(frontier: list[Page], band_lo: float, band_hi: float) -> int:
+    async def _discover(frontier: list[Page], band_lo: float, band_hi: float, phase: str = "link discovery") -> int:
         """Follow same-site links out of `frontier` for up to MAX_DISCOVERY_ROUNDS rounds,
         reporting progress inside [band_lo, band_hi]. Returns how many new pages it fetched."""
         nonlocal deadline_noted
@@ -965,6 +1073,8 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
                 break
             discovered = discovered[: MAX_PAGES - len(pages_by_target)]
             all_targets.extend(discovered)
+            trail.found(discovered, f"{phase}, round {round_number + 1}")
+            trail.restart()
             # Rounds share the band, each taking an equal slice, and inside a slice the fetch
             # and the parse take their own sub-bands -- so a long crawl keeps moving instead of
             # sitting on one number until every round has finished.
@@ -981,6 +1091,9 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
                 discovered, batch_fetched, on_parse_progress=_band(hi - span / 3, hi, bump)
             )
             added += len(discovered)
+            trail.step("9" if phase == "link discovery" else "10b", f"{phase.capitalize()}, round {round_number + 1}",
+                       f"{len(discovered):,} new link(s) followed; {len(pages_by_target):,} pages held after "
+                       f"{time.monotonic() - started_at:.0f}s; {_status_summary(batch_fetched.get(u) for u in discovered)}")
             log.info(
                 "discovery round %d: %d new urls, %d pages held, %.0fs elapsed",
                 round_number + 1, len(discovered), len(pages_by_target), time.monotonic() - started_at,
@@ -988,8 +1101,14 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
         return added
 
     if snap is None and not refused_early:
-        await _discover(frontier, 21, 26)
+        if not await _discover(frontier, 21, 26):
+            trail.step("9", "Link discovery", "No new same-site links on the pages read")
+    elif refused_early:
+        trail.step("9", "Link discovery", f"Skipped: the site refused the crawl (HTTP {seed_probe.status_code})")
+    else:
+        trail.step("9", "Link discovery", "Skipped: the saved copy is the whole site for this audit")
     bump(26)
+    trail.restart()
 
     # The second half of the hybrid crawl. Every page above was fetched over plain HTTP and
     # holds the response facts the technical parameters score; this re-reads a small, chosen
@@ -1019,6 +1138,9 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
             saved_renders=bool(snap is not None and snap.has_renders),
         )
     bump(27)
+    trail.step("10", "Open pages in a browser where needed (JavaScript)", _render_result(render_summary),
+               decision=render_summary.get("decision"), reason=render_summary.get("reason"),
+               rendered=render_summary.get("rendered_count", 0), failed=render_summary.get("failed_count", 0))
 
     # Links that exist only once JavaScript has run. On a client-rendered site the server's
     # HTML carries little or no navigation, so link discovery above -- which reads that HTML --
@@ -1033,7 +1155,7 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
         client_rendered = _site_is_client_rendered(render_summary)
         while just_rendered and len(pages_by_target) < MAX_PAGES and time.monotonic() < deadline:
             before = set(pages_by_target)
-            added = await _discover(just_rendered, 27, 28)
+            added = await _discover(just_rendered, 27, 28, phase="links on rendered pages")
             found_after_render += added
             budget_left = render_summary["budget"] - render_summary["attempted"]
             if not added or budget_left <= 0:
@@ -1045,7 +1167,9 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
                 # only the empty-looking ones of a site whose homepage arrives fully rendered.
                 if client_rendered or _looks_like_shell(pages_by_target[key])
             ]
+            trail.restart()
             applied = await _render_and_apply(candidates, pages_by_target, render_summary)
+            trail.step("10b", "Open the new pages in a browser", f"{len(applied):,} of {len(candidates):,} rendered")
             just_rendered = [pages_by_target[k] for k in applied]
         if found_after_render:
             render_summary["pages_found_after_render"] = found_after_render
@@ -1074,6 +1198,7 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
     host = domain.removeprefix("www.")
     stem = host.split(".")[0].replace("-", " ").strip()
     name = stem.title() or host
+    name_source = "the web address"
     if homepage and homepage.soup:
         og = homepage.soup.find("meta", attrs={"property": "og:site_name"})
         # The company's own declared name before its homepage title: a title is often a
@@ -1082,14 +1207,23 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
         org = next((i.get("name") for i in flatten_schema(homepage.schema_blocks)
                     if "Organization" in str(i.get("@type")) or "Corporation" in str(i.get("@type"))), None)
         if og and og.get("content"):
-            name = og["content"].strip()
+            name, name_source = og["content"].strip(), "og:site_name"
         elif isinstance(org, str) and org.strip():
-            name = org.strip()
+            name, name_source = org.strip(), "Organization schema"
         elif homepage.title:
-            name = homepage.title.split("|")[0].split("-")[0].strip() or name
+            name, name_source = homepage.title.split("|")[0].split("-")[0].strip() or name, "the homepage title"
     # "American Academy of Orthopaedic Surgeons AAOS" -> the name Wikipedia and the web use.
     name = drop_acronym(name)
     brand_terms = list(dict.fromkeys([t for t in (name.lower(), stem.lower(), host.lower()) if t]))
+    duplicates = sum(1 for p in pages_by_target.values() if p is not None) - len(ordered)
+    trail.step("11", "Put the crawl together",
+               f"{len(ordered):,} unique page(s), homepage first"
+               + (f"; {duplicates:,} duplicate(s) that redirect to a page already held were merged" if duplicates > 0 else "")
+               + f"; company name \"{name}\" from {name_source}; total crawl time {time.monotonic() - started_at:.1f}s",
+               pages=len(ordered), duplicates=max(0, duplicates), company=name, name_source=name_source,
+               page_cap=MAX_PAGES, page_cap_reached=len(pages_by_target) >= MAX_PAGES,
+               time_budget_s=CRAWL_TIME_BUDGET, time_budget_reached=deadline_noted or time.monotonic() > deadline,
+               refused=refused_early)
 
     return SiteContext(
         input_url=input_url,
@@ -1114,7 +1248,39 @@ async def crawl_site(input_url: str, on_progress: Callable[[int], None] | None =
             llms=llms,
             pages=ordered,
         ),
+        crawl_log=trail.as_dict(),
     )
+
+
+def _status_summary(results) -> str:
+    """'412 OK, 3 redirected, 2 HTTP 404, 1 no response' for a batch of fetches."""
+    counts = _status_counts(results)
+    order = sorted(counts.items(), key=lambda kv: (kv[0] != "OK", -kv[1]))
+    return ", ".join(f"{n:,} {label}" for label, n in order) or "nothing fetched"
+
+
+def _status_counts(results) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for r in results:
+        if r is None or r.status_code is None:
+            label = "no response"
+        elif 200 <= r.status_code < 300:
+            label = "redirected to another address" if r.hops else "OK"
+        else:
+            label = f"HTTP {r.status_code}"
+        counts[label] = counts.get(label, 0) + 1
+    return counts
+
+
+def _render_result(summary: dict) -> str:
+    decision = summary.get("decision") or "disabled"
+    if decision == "not_needed":
+        return "Not needed: the homepage test showed the server already sends the content" + (
+            f" ({summary['reason']})" if summary.get("reason") else "")
+    if decision in ("disabled", "unavailable", "skipped"):
+        return f"Not used ({decision})" + (f": {summary['reason']}" if summary.get("reason") else "")
+    return (f"{summary.get('rendered_count', 0):,} page(s) rendered, {summary.get('failed_count', 0):,} failed, "
+            f"budget {summary.get('budget', 0)}" + (f" — {summary['reason']}" if summary.get("reason") else ""))
 
 
 def _alt_host_url(url: str) -> str | None:

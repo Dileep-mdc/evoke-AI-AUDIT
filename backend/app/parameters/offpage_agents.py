@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import quote, urlparse
 
+from .. import deadline
 from ..config import OFFPAGE_VERIFY_SOURCES, WIKIDATA_API, WIKIPEDIA_API
 from ..crawler.google_search import SearchResult
 from ..llm.client import judge
@@ -547,7 +548,9 @@ class EvidenceValidationAgent:
             f.verification = {**f.verification, "sources_checked": 0, "sources_verified": 0, "sources": []}
             return f
         terms = [t for t in (ctx.company_name, primary_brand(ctx)) if t]
-        results = await asyncio.gather(*(tools.verify_source(u, terms, ctx, require=f.require) for u in urls))
+        # Pages still loading at the check's time limit are left unopened; verification never sets the score.
+        results = [r for r in await deadline.gather_until(tools.verify_source(u, terms, ctx, require=f.require) for u in urls)
+                   if isinstance(r, dict)]
         verified = sum(1 for r in results if r["result"] == "verified")
         for r in results:
             f.add(r["url"], f"Source page opened to confirm it is about the company (result: {r['result'].replace('_', ' ')}). "

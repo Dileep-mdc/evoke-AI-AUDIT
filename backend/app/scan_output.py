@@ -228,6 +228,7 @@ def save_crawl_output(scan_id: str, ctx) -> Path:
     pages = []
     documents: list[tuple[Path, str]] = []
     seen_names: set[str] = set()
+    sources = (getattr(ctx, "crawl_log", None) or {}).get("sources") or {}
     for p in ctx.pages or []:
         confidence = scrape_confidence(p)
         # The server's HTML, and the post-JavaScript DOM when this page was rendered. Both
@@ -250,6 +251,12 @@ def save_crawl_output(scan_id: str, ctx) -> Path:
             "status_code": p.result.status_code if p.result else None,
             "content_type": p.result.content_type if p.result else "",
             "raw_html_bytes": len(p.result.content) if p.result else 0,
+            # How the crawler found this page, how long the server took, and whether it had to
+            # redirect or fall back to a browser identity -- the crawl log PDF lists these.
+            "found_via": sources.get(p.url, ""),
+            "fetch_ms": p.result.elapsed_ms if p.result else None,
+            "redirects": p.result.hops if p.result else 0,
+            "bot_ua_refused": bool(p.result and p.result.bot_ua_refused),
             "fetch_error": p.result.error if p.result else None,
             "blocked_reason": p.blocked_reason,
             "scrape_confidence_score": confidence["score"],
@@ -307,6 +314,7 @@ def save_crawl_output(scan_id: str, ctx) -> Path:
         "render": getattr(ctx, "render", None) or {},
         "snapshot": getattr(ctx, "snapshot", None) or {},
         "access": getattr(ctx, "access", None) or {},
+        "crawl_log": {"steps": ((getattr(ctx, "crawl_log", None) or {}).get("steps") or [])},
         # Where the source documents went, stated up front so this file explains itself:
         # anyone opening it can see the documents exist and where, without knowing to look.
         "raw_document_store": {

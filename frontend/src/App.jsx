@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { createScan, downloadUrl, getFixes, getParameter, getProgress, getRecheck, getReport, getStatus, listScans, startRecheck, workbookUrl } from "./api";
+import { crawlLogUrl, createScan, downloadUrl, getFixes, getParameter, getProgress, getRecheck, getReport, getStatus, listScans, startRecheck, workbookUrl } from "./api";
 import logoIcon from "./assets/logo-icon.png";
 
 function band(score) {
@@ -998,6 +998,26 @@ function Dashboard() {
     notify("Preparing PDF download");
   }
 
+  async function exportCrawlLog() {
+    notify("Preparing the crawl log PDF");
+    const res = await fetch(crawlLogUrl(scanId)).catch(() => null);
+    if (!res || !res.ok) {
+      notify(res && res.status === 404
+        ? "The crawl log is kept for the latest audit of each site. Run this audit again to get it."
+        : "Could not build the crawl log PDF", 6000);
+      return;
+    }
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(await res.blob());
+    link.download = `Crawl-Log-${report.domain || "site"}.pdf`;
+    // In the document while it is clicked, and the blob URL kept until the download has
+    // started: revoking it in the same tick can cancel the download in some browsers.
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 60000);
+  }
+
   // Only the checks that could not be measured are run again, against the pages this audit
   // already read; every other result stays as it is and the report is rebuilt in place.
   const unmeasured = params.filter((p) => p.status === "UNKNOWN");
@@ -1057,6 +1077,7 @@ function Dashboard() {
                 </button>
               )}
               <button className="btn btn-ghost" onClick={exportPdf}><Icon name="export" /> Export to PDF</button>
+              <button className="btn btn-ghost" onClick={exportCrawlLog}><Icon name="export" /> Crawl Log PDF</button>
               <button className="btn btn-primary" onClick={() => nav("/")}><Icon name="plus" /> Create New Report</button>
             </div>
           </div>

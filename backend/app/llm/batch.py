@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Sequence
 
 from ..config import LLM_BATCH_CHARS, LLM_BATCH_SIZE, LLM_FULL_COVERAGE, LLM_MAX_ITEMS, LLM_SAMPLE_BELOW_RPM
+from .. import deadline
 from . import client
 from .client import judge
 from .prompts import SYSTEM
@@ -45,6 +46,7 @@ class Coverage:
     batches_failed: int = 0
     capped: bool = False
     sampled_for_rate: Optional[int] = None    # the requests-per-minute limit that forced a sample
+    time_limited: int = 0                     # batches not judged because the check's time limit came first
     error: Optional[str] = None
     _errors: list[str] = field(default_factory=list, repr=False)
 
@@ -54,6 +56,7 @@ class Coverage:
             self.population > 0
             and self.assessed >= self.population
             and self.batches_failed == 0
+            and self.time_limited == 0
         )
 
     def as_evidence(self) -> dict:
@@ -68,6 +71,10 @@ class Coverage:
         if self.sampled_for_rate:
             out["sampled"] = (f"an evenly spread sample of {self.submitted} of {self.population} was judged, because the "
                               f"AI is limited to {self.sampled_for_rate} requests per minute")
+        if self.time_limited:
+            out["time_limited"] = (f"{self.assessed} of {self.population} were judged within the check's time limit; "
+                                   f"{self.time_limited} batch{'es' if self.time_limited != 1 else ''} did not finish in time. "
+                                   "The items were sent spread across the whole site, so those judged are an even sample of it.")
         if self.batches_failed:
             out["batches_failed"] = self.batches_failed
         if self.error:
@@ -167,6 +174,11 @@ async def judge_all(
 
     batches = _chunk(submitted, batch_size)
     submitted, batches = _fit_rate(submitted, batches, batch_size, coverage)
+    if deadline.remaining() is not None and len(batches) > 1:
+        # Under a time limit the batches that finish first must be a sample of the whole site, not
+        # its first pages: each batch takes every k-th item. Items are judged one by one, so the
+        # grouping does not change any verdict.
+        batches = _chunk(deadline.spread(submitted, len(batches)), batch_size)
     coverage.batches = len(batches)
 
     async def run(batch: list) -> list[dict]:
@@ -180,10 +192,13 @@ async def judge_all(
             raise RuntimeError(f"reply had no {result_key!r} list")
         return [r for r in rows if isinstance(r, dict)]
 
-    settled = await asyncio.gather(*(run(b) for b in batches), return_exceptions=True)
+    settled = await deadline.gather_until(run(b) for b in batches)
 
     verdicts: list[dict] = []
     for outcome in settled:
+        if outcome is deadline.NOT_DONE:
+            coverage.time_limited += 1
+            continue
         if isinstance(outcome, BaseException):
             coverage.batches_failed += 1
             coverage._errors.append(str(outcome))
@@ -233,11 +248,14 @@ async def judge_one(
             raise RuntimeError(res.error or "classification call failed")
         return res.parsed
 
-    settled = await asyncio.gather(*(run(b) for b in batches), return_exceptions=True)
+    settled = await deadline.gather_until(run(b) for b in batches)
 
     merged: dict[str, Any] = {}
     judged_items = 0
     for outcome, sent in zip(settled, batches):
+        if outcome is deadline.NOT_DONE:
+            coverage.time_limited += 1
+            continue
         if isinstance(outcome, BaseException):
             coverage.batches_failed += 1
             coverage._errors.append(str(outcome))

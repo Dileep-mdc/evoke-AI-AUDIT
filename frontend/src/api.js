@@ -34,6 +34,10 @@ export function downloadUrl(id) {
   return `/api/scans/${id}/download`;
 }
 
+export function crawlLogUrl(id) {
+  return `/api/scans/${id}/crawl-log.pdf`;
+}
+
 export function workbookUrl(id) {
   return `/api/scans/${id}/download.xlsx`;
 }

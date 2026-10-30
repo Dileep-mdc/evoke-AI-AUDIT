@@ -39,6 +39,7 @@ from ..config import (
     CWV_LAB_THROTTLE,
     CWV_LAB_TIMEOUT,
 )
+from .. import deadline
 from .render import _loop_can_start_processes, _on_proactor_loop, render_unavailable
 
 log = logging.getLogger("crawler.vitals")
@@ -142,7 +143,8 @@ def _period(p: dict) -> Optional[str]:
 # ---------------------------------------------------------------------------------------------
 def pick_pages(ctx, limit: int = CWV_LAB_PAGES) -> list[str]:
     """The homepage, then one page of each kind a buyer lands on, in crawl order."""
-    ok = [p for p in ctx.pages if p.result and p.result.ok]
+    # A bot-challenge page loads fast and says nothing about the site's real pages.
+    ok = [p for p in ctx.pages if p.result and p.result.ok and not getattr(p, "blocked_reason", "")]
     chosen = [ctx.homepage.url] if ctx.homepage and ctx.homepage.result and ctx.homepage.result.ok else []
     for kind in ("service", "article", "case_study", "about"):
         page = next((p for p in ok if p.page_type == kind and p.url not in chosen), None)
@@ -173,6 +175,10 @@ async def lab(urls: list[str]) -> list[dict]:
     return out
 
 
+# About how long one throttled page test takes, load and settle included.
+_SECONDS_PER_PAGE = 30
+
+
 async def _measure(urls: list[str], out: list[dict]) -> None:
     from playwright.async_api import async_playwright
 
@@ -184,13 +190,22 @@ async def _measure(urls: list[str], out: list[dict]) -> None:
             out.extend({"url": u, "error": reason} for u in urls)
             return
         try:
-            for url in urls:
-                out.append(await _one(browser, url))
+            for index, url in enumerate(urls):
+                # The homepage is always measured; each further page only if a page's test still fits.
+                if index and deadline.expired(_SECONDS_PER_PAGE):
+                    out.append({"url": url, "error": "not measured: the check's time limit was reached"})
+                    continue
+                # The page's load is also cut at the check's deadline: a page test can take
+                # CWV_LAB_TIMEOUT (45s), more than the margin above, and one that ran on into the
+                # check's hard stop would lose the pages already measured with it.
+                left = deadline.remaining()
+                timeout = CWV_LAB_TIMEOUT if left is None else max(1.0, min(CWV_LAB_TIMEOUT, left))
+                out.append(await _one(browser, url, timeout))
         finally:
             await browser.close()
 
 
-async def _one(browser, url: str) -> dict:
+async def _one(browser, url: str, timeout: float = CWV_LAB_TIMEOUT) -> dict:
     context = await browser.new_context(ignore_https_errors=True, **(_MOBILE if CWV_LAB_THROTTLE else _DESKTOP))
     try:
         page = await context.new_page()
@@ -200,7 +215,7 @@ async def _one(browser, url: str) -> dict:
             await cdp.send("Network.enable")
             await cdp.send("Network.emulateNetworkConditions", _NETWORK)
             await cdp.send("Emulation.setCPUThrottlingRate", {"rate": _CPU_SLOWDOWN})
-        response = await page.goto(url, wait_until="load", timeout=CWV_LAB_TIMEOUT * 1000)
+        response = await page.goto(url, wait_until="load", timeout=timeout * 1000)
         await page.wait_for_timeout(CWV_LAB_SETTLE_MS)
         values = await page.evaluate(_READ)
         status = response.status if response else None

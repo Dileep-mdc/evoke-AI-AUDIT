@@ -171,7 +171,13 @@ PARAMETER_CONCURRENCY = int(os.getenv("PARAMETER_CONCURRENCY", "6"))
 # heading or every list on a 750-page site in front of the model runs tens of batched calls
 # inside this one budget. At the old 60s, ON-12 timed out on a mid-size site and the whole
 # parameter came back UNKNOWN -- the check reported nothing rather than reporting late.
-PARAMETER_TIMEOUT = float(os.getenv("PARAMETER_TIMEOUT", "900"))
+#
+# 90s: a check's slow parts (AI batches, link and sitemap requests, web searches, the speed test)
+# stop starting new work CHECK_WRAP_UP_SECONDS before it and score what finished (app/deadline.py),
+# so a large site gets a score from an even sample instead of no score.
+PARAMETER_TIMEOUT = float(os.getenv("PARAMETER_TIMEOUT", "90"))
+# Left at the end of the time limit for a check to score and write up what it measured.
+CHECK_WRAP_UP_SECONDS = float(os.getenv("CHECK_WRAP_UP_SECONDS", "10"))
 # A scan retries the parameters that came back unscored once, after this many seconds -- long
 # enough for a rate-limit window to reopen -- so no parameter needs re-running by hand.
 SCAN_RETRY_DELAY = float(os.getenv("SCAN_RETRY_DELAY", "30"))
@@ -345,6 +351,9 @@ OUTPUT_WRITE_WORKERS = int(os.getenv("OUTPUT_WRITE_WORKERS", "8"))
 # .txt per page, _index.csv and the links workbook. Same root as the snapshots, so the folder a
 # scan writes is the one snapshot_site.py reads. SAVE_SITE_FOLDER=false turns it off.
 SITE_FOLDERS_ROOT = Path(os.getenv("SITE_FOLDERS_ROOT", str(SNAPSHOT_ROOT)))
+# Every audit's crawl log PDF (crawl_log.py) is also copied here, beside the site folders, where it is
+# easy to find; the original stays in data/scan_output/.
+CRAWL_LOGS_DIR = Path(os.getenv("CRAWL_LOGS_DIR", str(SITE_FOLDERS_ROOT / "Crawl Logs")))
 SAVE_SITE_FOLDER = os.getenv("SAVE_SITE_FOLDER", "true").strip().lower() in {"1", "true", "yes"}
 
 # Section weights are scoring methodology, so they live with the other scoring rules in

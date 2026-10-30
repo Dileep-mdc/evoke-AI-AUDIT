@@ -4,9 +4,10 @@ import asyncio
 import re
 from urllib.parse import urlparse
 
+from .. import deadline
 from ..config import BROWSER_UA, LINK_RECHECK_LIMIT
 from ..crawler.discover import _in_chrome, internal_links
-from ..crawler.http import check, fetch
+from ..crawler.http import check, fetch, is_html, same_host
 from ..crawler import vitals
 from ..crawler.robots import AI_BOTS, bot_decision
 from ..llm.client import judge
@@ -81,6 +82,22 @@ async def tech_02(spec, ctx):
     return result(spec, score=score, evidence={"baseline_bytes": baseline_len, "bots": rows}, recommendation=rec, checked=url, duration_ms=ms_since(t), confidence=0.6, links=links)
 
 
+# Requests one check keeps in flight. Enough to finish in time; few enough that it does not hold the
+# shared request queue (crawler/http.py) and leave other checks' few requests waiting behind it.
+_CHECK_WORKERS = 12
+
+
+def _answered(c) -> bool:
+    return c is not deadline.NOT_DONE and not isinstance(c, BaseException)
+
+
+def _time_note(left_out: int, noun: str) -> dict:
+    if not left_out:
+        return {}
+    return {"time_limited": f"{left_out:,} {noun} were not checked because the check's time limit was reached; "
+                            "the score is from those checked."}
+
+
 _LLMS_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)\s]+)\)")
 _DATE_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2}|20\d{2}[/.]\d{1,2}[/.]\d{1,2}|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+20\d{2})\b", re.I)
 
@@ -109,20 +126,38 @@ async def tech_03(spec, ctx):
     file_link = [link(llms.url or ctx.origin.rstrip("/") + "/llms.txt", "The site's /llms.txt file: checked that it exists, has content, links to pages that resolve, and carries a date.")]
     if not llms.ok or not llms.text.strip():
         return result(spec, score=0, evidence={"url": llms.url, "status": llms.status_code}, recommendation="Publish an /llms.txt file listing the site's most important pages for AI assistants.", checked=ctx.origin.rstrip("/") + "/llms.txt", duration_ms=ms_since(t), links=file_link)
+    if is_html(llms):
+        # A site that answers every unknown path with its homepage or a "not found" page returns
+        # 200 here too. That page is not an llms.txt, and its links are the site's menu, not a list
+        # written for AI assistants -- scoring them gave a site with no llms.txt up to 90.
+        return result(spec, score=0, evidence={"url": llms.url, "status": llms.status_code, "served_html_page": True,
+                                               "final_url": llms.final_url},
+                      recommendation="Publish an /llms.txt file listing the site's most important pages for AI assistants; "
+                                     "the address currently returns an HTML web page, not a text file.",
+                      checked=llms.final_url or ctx.origin.rstrip("/") + "/llms.txt", duration_ms=ms_since(t), links=file_link)
     text = llms.text
     non_empty = len(text.strip()) > 40
     found = _LLMS_LINK_RE.findall(text)
     links = [(link, url) for link in found if (url := _llms_link_target(link, ctx.origin))]
     resolved = []
+    not_checked = 0
     if links:
-        checks = await asyncio.gather(*(check(url) for _, url in links))
-        resolved = [{"url": link, "ok": c.ok} for (link, _), c in zip(links, checks)]
+        checks = await deadline.map_until(check, [url for _, url in links], workers=_CHECK_WORKERS)
+        resolved = [{"url": link, "ok": c.ok} for (link, _), c in zip(links, checks) if _answered(c)]
+        not_checked = len(links) - len(resolved)
+        if not resolved:
+            # No link was checked before the time limit: a 0 for "links resolve" would score the
+            # file as if every link were broken, so the check is left unmeasured instead, as TECH-05 is.
+            return result(spec, score=None, unknown=True, evidence={"links_found": len(links), **_time_note(not_checked, "links")},
+                          recommendation="Run the audit again; no llms.txt link could be checked in time.",
+                          checked=llms.final_url, error="no llms.txt link checked within the time limit",
+                          duration_ms=ms_since(t), links=file_link)
     link_ratio = (sum(1 for r in resolved if r["ok"]) / len(resolved)) if resolved else 0.0
     fresh = bool(_DATE_RE.search(text))
     score = 40 + (20 if non_empty else 0) + (20 * link_ratio if links else 10) + (20 if fresh else 0)
     rec = "Keep llms.txt non-empty, link to pages that resolve, and include a freshness/date signal." if score < 90 else None
     checked_links = file_link + url_links([u for _, u in links], "Linked from llms.txt: requested to confirm the link resolves.")
-    return result(spec, score=min(100, score), evidence={"non_empty": non_empty, "links_found": len(links), "non_web_links_skipped": len(found) - len(links), "sampled_links": resolved, "freshness_signal": fresh}, recommendation=rec, checked=llms.final_url, duration_ms=ms_since(t), links=checked_links)
+    return result(spec, score=min(100, score), evidence={"non_empty": non_empty, "links_found": len(links), "non_web_links_skipped": len(found) - len(links), "sampled_links": resolved, "freshness_signal": fresh, **_time_note(not_checked, "links")}, recommendation=rec, checked=llms.final_url, duration_ms=ms_since(t), links=checked_links)
 
 
 _OVERLAY_MARKERS = ("cookie", "consent", "gdpr", "onetrust", "cookiebot", "trustarc", "cookieyes", "modal", "overlay", "paywall")
@@ -159,8 +194,16 @@ async def tech_05(spec, ctx):
         return result(spec, score=0, evidence={"candidates": sm.get("candidates"), "errors": sm.get("errors")}, recommendation="Publish an XML sitemap and reference it from robots.txt.", checked=ctx.origin, duration_ms=ms_since(t), links=files + tried)
     # Every sitemap URL is validated, not the first fifteen in document order -- "is the
     # sitemap accurate" cannot be answered from a fixed-size slice of the front of it.
-    sample = urls
-    checks = await asyncio.gather(*(check(u) for u in sample))
+    # Requested in an evenly spread order so that, if the time limit comes first, the URLs checked
+    # are a sample of the whole sitemap rather than its first section.
+    ordered = deadline.spread(urls, max(1, len(urls) // 50))
+    answers = await deadline.map_until(check, ordered, workers=_CHECK_WORKERS)
+    sample = [u for u, c in zip(ordered, answers) if _answered(c)]
+    checks = [c for c in answers if _answered(c)]
+    if not sample:
+        return result(spec, score=None, unknown=True, evidence={"sitemap_url_count": len(urls), **_time_note(len(urls), "sitemap URLs")},
+                      recommendation="Run the audit again; no sitemap URL could be checked in time.", checked=ctx.origin,
+                      error="no sitemap URL checked within the time limit", duration_ms=ms_since(t), links=files)
     valid = sum(1 for c in checks if c.ok)
     validity = valid / len(sample) * 100
     # Pages the crawl actually retrieved: a 404 or a bot challenge is not a page the sitemap should list.
@@ -172,7 +215,7 @@ async def tech_05(spec, ctx):
     rec = "Fix sitemap URLs that don't resolve and ensure crawled pages are listed in the sitemap." if score < 90 else None
     checked_links = (files + url_links(sample, "Listed in the sitemap: requested to confirm the URL resolves (sitemap accuracy).")
                      + page_links(scorable_pages(ctx), "Crawled page: checked for whether the sitemap lists it (sitemap coverage)."))
-    return result(spec, score=min(100, score), evidence={"sitemap_url_count": len(urls), "sampled": len(sample), "valid_sampled": valid, "crawled_coverage_pct": round(coverage, 1), "errors": sm.get("errors")}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.7, links=checked_links)
+    return result(spec, score=min(100, score), evidence={"sitemap_url_count": len(urls), "sampled": len(sample), "valid_sampled": valid, "crawled_coverage_pct": round(coverage, 1), "errors": sm.get("errors"), **_time_note(len(urls) - len(sample), "sitemap URLs")}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.7, links=checked_links)
 
 
 async def tech_06(spec, ctx):
@@ -191,7 +234,10 @@ async def tech_06(spec, ctx):
     crawled = {p.url: p.result for p in ctx.pages if p.result is not None}
     uncrawled = [u for u in links if u not in crawled]
     pending = uncrawled[:LINK_RECHECK_LIMIT]
-    fresh = dict(zip(pending, await asyncio.gather(*(check(u) for u in pending))))
+    answers = await deadline.map_until(check, pending, workers=_CHECK_WORKERS)
+    fresh = {u: c for u, c in zip(pending, answers) if _answered(c)}
+    timed_out = len(pending) - len(fresh)
+    pending = [u for u in pending if u in fresh]
     # Links neither crawled nor in the re-check sample are left out, and counted below.
     links = [u for u in links if u in crawled or u in fresh]
     if not links:
@@ -215,7 +261,7 @@ async def tech_06(spec, ctx):
     score = (len(links) - broken) / len(links) * 100 - min(_CHAIN_PENALTY_MAX, chains * _CHAIN_PENALTY)
     rec = "Fix broken internal links and collapse redirect chains to 1-2 hops." if score < 90 else None
     return result(spec, score=max(0, score), evidence={"sampled": len(links), "from_crawl": len(links) - len(pending), "rechecked": len(pending),
-                                                     "uncrawled_links": len(uncrawled), "not_checked": len(uncrawled) - len(pending), "broken": broken, "redirect_chains": chains, "pages": rows}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.7, links=checked_links)
+                                                     "uncrawled_links": len(uncrawled), "not_checked": len(uncrawled) - len(pending), "broken": broken, "redirect_chains": chains, "pages": rows, **_time_note(timed_out, "links")}, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=0.7, links=checked_links)
 
 
 async def tech_07(spec, ctx):
@@ -557,17 +603,28 @@ async def tech_11(spec, ctx):
     # Real headings with the word count of their own section. This previously sent each
     # page's URL as the "heading" and its mean words-per-heading as the "word count", so the
     # model was judging URLs against an average and its verdict overwrote the score.
-    sections_payload = []
+    #
+    # Taken one section per page in turn, not every section of the first pages: filling the 40 from
+    # the homepage and the next two or three pages let those few pages decide the whole site's score.
+    # At most 40 pages can contribute, so sections are split out of no more than the first 40
+    # pages that have any, not out of every page of a large site.
+    per_page: list[tuple] = []
     for page in pages:
         if page.word_count < _MIN_CONTENT_WORDS:
             continue
-        for block in heading_blocks(page):
-            if block["heading"]:
-                sections_payload.append({"heading": block["heading"][:160], "word_count": block["words"]})
-            if len(sections_payload) >= 40:
+        blocks = [b for b in heading_blocks(page) if b["heading"]]
+        if blocks:
+            per_page.append((page, blocks))
+            if len(per_page) >= 40:
                 break
-        if len(sections_payload) >= 40:
-            break
+    sections_payload, sent_from = [], []
+    depth = 0
+    while len(sections_payload) < 40 and any(depth < len(blocks) for _, blocks in per_page):
+        for page, blocks in per_page:
+            if depth < len(blocks) and len(sections_payload) < 40:
+                sections_payload.append({"heading": blocks[depth]["heading"][:160], "word_count": blocks[depth]["words"]})
+                sent_from.append(page.result.final_url)
+        depth += 1
 
     if sections_payload:
         llm_res = await judge(tech11_prompt(sections_payload), system=SYSTEM)
@@ -582,14 +639,19 @@ async def tech_11(spec, ctx):
             avg = liftable / total * 100
             confidence = 0.8
             evidence["method"] = "llm"
-            evidence["llm"] = {"liftable_count": liftable, "total": total, "model_total": parsed.get("total")}
+            evidence["llm"] = {"liftable_count": liftable, "total": total, "model_total": parsed.get("total"),
+                               "pages_sampled": len(set(sent_from))}
         elif not llm_res.ok:
             evidence["llm_unavailable"] = llm_res.error
         else:
             evidence["llm_unusable"] = "the model's reply had no usable liftable_count"
 
     rec = "Break long sections with H2/H3 question-style headings so assistants can lift a passage." if avg < 90 else None
-    links = url_links([r["url"] for r in rows], f"Crawled page with at least {_MIN_CONTENT_WORDS} words of body text: words per heading and heading density are scored, and its sections may be sent to the AI to judge whether a passage can be lifted on its own.")
+    judged = set(sent_from) if evidence["method"] == "llm" else set()
+    links = [link(r["url"], f"Crawled page with at least {_MIN_CONTENT_WORDS} words of body text: "
+                  + ("a section of it was sent to the AI to judge whether the passage can be lifted on its own."
+                     if r["url"] in judged else "its words per heading and heading density are measured."))
+             for r in rows]
     return result(spec, score=avg, evidence=evidence, recommendation=rec, checked=ctx.origin, duration_ms=ms_since(t), confidence=confidence, links=links)
 
 
@@ -705,7 +767,9 @@ def _organization_nodes(obj, out: list) -> list:
     """Every Organization node in the JSON-LD, including nested ones such as a Service's
     `provider` or an Article's `publisher` -- flatten_schema() only follows @graph."""
     if isinstance(obj, dict):
-        if "Organization" in str(obj.get("@type")) or "Corporation" in str(obj.get("@type")):
+        types = obj.get("@type")
+        names = {_type_name(str(x)) for x in (types if isinstance(types, list) else [types]) if x}
+        if names & set(_ORGANIZATION_TYPES) or any("organization" in n or "corporation" in n for n in names):
             out.append(obj)
         for value in obj.values():
             _organization_nodes(value, out)
@@ -838,8 +902,9 @@ def _collect_author_signals(pages) -> list[dict]:
 
 async def tech_18(spec, ctx):
     t = timed()
-    authors = await asyncio.to_thread(_collect_author_signals, ctx.pages)
-    links = page_links(ctx.pages, "Crawled page: its structured data is searched for an author marked up as a Person (with a job title for full marks).")
+    pages = scorable_pages(ctx)
+    authors = await asyncio.to_thread(_collect_author_signals, pages)
+    links = page_links(pages, "Crawled page: its structured data is searched for an author marked up as a Person (with a job title for full marks).")
     if not authors:
         return no_data(spec, reason="no page marks up an author as a Person in its structured data",
                        evidence={"author_signals": []}, checked=ctx.origin, duration_ms=ms_since(t), links=links)
@@ -872,7 +937,7 @@ async def tech_19(spec, ctx):
     total = valid = 0
     mismatches = []
     validated = []   # every block, with its type, so the report says what markup this check read
-    for page in ctx.pages:
+    for page in scorable_pages(ctx):
         for block in page.schema_blocks:
             total += 1
             if block.get("ok"):
@@ -952,12 +1017,17 @@ _MIN_SHARED_PATHS = 3   # translations share many page paths; unrelated sections
 
 
 def _market_urls(ctx) -> list[str]:
-    """Every URL _markets() reads for locale prefixes: the crawled pages, their links and the sitemap."""
+    """Every URL _markets() reads for locale prefixes: the crawled pages, their links and the sitemap.
+
+    The site's own URLs only, once each. Links to other sites used to count, so a page linking to
+    microsoft.com/en-us/... and partner.example/de-de/... gave a one-market site "several markets".
+    """
     urls = [p.result.final_url for p in ctx.pages if getattr(p, "result", None)]
     urls += [item.get("href") if isinstance(item, dict) else item
              for p in ctx.pages for item in (getattr(p, "links", None) or []) if item]
     urls += list(((getattr(ctx, "sitemap", None) or {}).get("urls") or []))
-    return urls
+    origin = getattr(ctx, "origin", "") or ""
+    return list(dict.fromkeys(u for u in urls if isinstance(u, str) and (not origin or same_host(u, origin))))
 
 
 def _markets(ctx, tags=()) -> dict:

@@ -42,3 +42,6 @@ EV caluction.xlsx
 # A full copy of this project (with its own .git) and its archive -- not part of the repo
 /AI Audit/
 *.zip
+
+# Crawl log PDFs built from client sites
+Crawl Logs/

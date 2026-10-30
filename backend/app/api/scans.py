@@ -25,7 +25,7 @@ from ..parameters.platforms import resolve as resolve_platforms
 from ..parameters.spec import parameter_specs
 from ..parameters.working import working_for
 from ..parameters.scoring import SCORING_METHOD, build_report, final_from_rules, prioritize
-from .. import parameter_links, site_folder
+from .. import crawl_log, parameter_links, site_folder
 from ..pdf_export import build_pdf
 from ..scan_output import build_excel, save_crawl_failures, save_crawl_output, save_excel_output
 from ..storage.repository import ScanRepository
@@ -142,6 +142,15 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None, choice
     def bump(pct: int) -> None:
         repo.update(scan_id, status="crawling", progress_percent=pct)
 
+    # Step 12 of the crawl log: what ran after the crawl, and how long each part took.
+    pipeline_log: list[dict] = []
+    clock = [time.perf_counter()]
+
+    def logged(step: str, name: str, result: str) -> None:
+        now = time.perf_counter()
+        pipeline_log.append({"step": step, "name": name, "result": result, "ms": int((now - clock[0]) * 1000)})
+        clock[0] = now
+
     try:
         if folder:
             # Every fetch this scan makes -- crawl, robots.txt, sitemap, the link checks in the
@@ -156,6 +165,7 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None, choice
         crawl_ms = int((time.perf_counter() - crawl_clock) * 1000)
         repo.update(scan_id, crawl_completed_at=datetime.now(timezone.utc).isoformat(), crawl_duration_ms=crawl_ms)
         log.info("Scan %s scraped %d pages in %.1fs", scan_id, len(ctx.pages), crawl_ms / 1000)
+        clock[0] = time.perf_counter()
         # Company Identity Agent: who owns the site, before any off-page research searches for it.
         ctx.identity = await identity.resolve(ctx)
         ctx.company_name = ctx.identity["name"]
@@ -164,12 +174,16 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None, choice
             + list(ctx.brand_terms)))
         log.info("Scan %s organisation: %s (%s, confidence %s)", scan_id, ctx.company_name,
                  ctx.identity["source"], ctx.identity["confidence"])
+        logged("12a", "Identify the organisation",
+               f"{ctx.company_name} (from {ctx.identity['source']}, confidence {ctx.identity['confidence']})")
         # The industry profile: named in the request, or read from the site's own pages.
         choice = choice or {}
         ctx.industry = industry.chosen(choice["industry"]) if choice.get("industry") else industry.detect(ctx)
         ctx.platforms = resolve_platforms(ctx.industry["key"], choice.get("region"))
         log.info("Scan %s audited as %s (%s)", scan_id, ctx.industry["label"],
                  "detected" if ctx.industry["detected"] else "chosen")
+        logged("12b", "Choose the industry profile",
+               f"{ctx.industry['label']} ({'detected from the site' if ctx.industry['detected'] else 'chosen for this audit'})")
         # The crawl's size is now known, so the AI spend can be estimated before scoring starts.
         estimate = usage.estimate(len(ctx.pages), usage_history())
         if estimate:
@@ -187,6 +201,8 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None, choice
         )
         if site_dir:
             log.info("Scan %s saved the site folder %s", scan_id, site_dir)
+        logged("12c", "Save the pages, scraped content and site folder (site_folder.save)",
+               f"{len(ctx.pages):,} page(s) saved; site folder {site_dir or 'not written (no readable page)'}")
         # Writing the scraped content is tens of megabytes on a large site and takes real
         # time, so it gets its own step on the bar rather than looking like a stalled crawl.
         repo.update(scan_id, status="crawling", progress_percent=29)
@@ -216,7 +232,10 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None, choice
                 status="evaluating",
             )
 
+        clock[0] = time.perf_counter()
         results = await run_all_parameters(ctx, registry, on_each)
+        logged("12d", "Run the checks (Technical / Content / Reputation)",
+               f"{len(results)} checks: {counts['technical']} technical, {counts['on_page']} content, {counts['off_page']} reputation")
         # Checks that came back unscored are retried once, straight away, against the same
         # crawl, so the report is complete when the scan finishes and nothing has to be
         # re-run by hand afterwards.
@@ -239,6 +258,7 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None, choice
                 by_id[row["parameter_id"]] = row
             results = [by_id[s["parameter_id"]] for s in registry if s["parameter_id"] in by_id]
             repo.update(scan_id, errors_count=sum(1 for r in results if r.get("error")))
+            logged("12e", "Retry checks that came back unscored", ", ".join(s["parameter_id"] for s in retry))
         # The links each check read, taken off the rows now that the results are final: they go
         # to the <company>.xlsx workbook below, not into the report or the model's input.
         checked_links = parameter_links.take(results)
@@ -250,6 +270,8 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None, choice
                 repo.save_parameter(scan_id, row)
         issues = prioritize(results)
         repo.save_issues(scan_id, issues)
+        logged("12f", "Cross-check the results and rank the fixes",
+               f"{len(findings['cross_checks'])} cross-check note(s); {len(issues)} issue(s) ranked")
         completed = datetime.now(timezone.utc).isoformat()
         repo.update(scan_id, completed_at=completed, progress_percent=100)
         scan = repo.get(scan_id)
@@ -267,6 +289,7 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None, choice
         report["cross_checks"] = findings["cross_checks"]
         report["content_analysis"] = crosschecks.content_analysis(ctx)
         report["ai_usage"] = {**meter.as_dict(), "pages": len(ctx.pages), "estimate": _estimates.get(scan_id)}
+        report["pipeline_log"] = pipeline_log
         repo.save_report(scan_id, report)
         _history_cache = None
         # The workbook is an artifact of the report, not a precondition for it. Writing it
@@ -284,6 +307,10 @@ async def execute_scan(scan_id: str, url: str, folder: str | None = None, choice
         links_path = await asyncio.to_thread(parameter_links.save, scan_id, ctx, results, checked_links)
         if links_path:
             log.info("Scan %s saved the parameter links workbook %s", scan_id, links_path)
+        # The crawl log PDF: every crawl step and every URL. Logs, never raises.
+        log_path = await asyncio.to_thread(crawl_log.save, scan_id, {**report, "crawl_duration_ms": crawl_ms}, site_dir)
+        if log_path:
+            log.info("Scan %s saved the crawl log %s", scan_id, log_path)
         # Only flip status to "completed" once the report is fully persisted, so a client
         # that sees "completed" and immediately requests the report never hits a window
         # where report_json is still empty.
@@ -394,7 +421,7 @@ def _carried(report: dict) -> dict:
     out = {"snapshot": report.get("snapshot") or {}}
     # Recalculating a saved report is not a new report: it keeps the time it was generated.
     for key in ("platforms", "ai_usage", "industry", "identity", "cross_checks", "content_analysis",
-                "site_access", "generated_at", "audited_at"):
+                "site_access", "pipeline_log", "generated_at", "audited_at"):
         if key in report:
             out[key] = report[key]
     return out
@@ -618,6 +645,28 @@ async def download_report(scan_id: str):
     pdf = build_pdf(report)
     filename = f"AI-Visibility-Audit-{report.get('domain','report')}.pdf"
     return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@router.get("/scans/{scan_id}/crawl-log.pdf")
+async def download_crawl_log(scan_id: str):
+    """The crawl log PDF: what each crawl step did and what happened to every URL.
+
+    Rebuilt from the audit's saved crawl record, which is kept per site -- so it is available
+    for the most recent audit of each site.
+    """
+    report = _current_report(scan_id)
+    if not report:
+        raise HTTPException(409, "Report not ready")
+    crawl = await asyncio.to_thread(crawl_log.load_crawl, report.get("domain") or "", scan_id)
+    if crawl is None:
+        raise HTTPException(404, "The crawl log is kept for the latest audit of each site; a newer audit "
+                                 "of this site has replaced it, or its saved crawl is no longer on disk.")
+    scan = repo.get(scan_id) or {}
+    data = await asyncio.to_thread(crawl_log.build_crawl_log_pdf, crawl,
+                                   {**report, "crawl_duration_ms": scan.get("crawl_duration_ms")})
+    filename = f"Crawl-Log-{report.get('domain', 'site')}.pdf"
+    return Response(content=data, media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

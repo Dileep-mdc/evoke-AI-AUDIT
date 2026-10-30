@@ -10,6 +10,7 @@ from typing import Optional
 
 from openai import APIConnectionError, APIError, APITimeoutError, AsyncOpenAI, RateLimitError
 
+from .. import deadline
 from ..config import (
     ENABLE_LLM_SCORING,
     LLM_CONCURRENCY,
@@ -137,6 +138,9 @@ class LLMResult:
     elapsed_ms: int = 0
 
 
+_TIME_LIMIT = "not asked: the check's time limit was reached first"
+
+
 async def judge(prompt: str, *, system: str = "", json_mode: bool = True, lane: str = "classify") -> LLMResult:
     """Ask the configured LLM to judge something and return its response.
 
@@ -173,7 +177,27 @@ async def judge(prompt: str, *, system: str = "", json_mode: bool = True, lane: 
     combined = f"{system}\n\n{prompt}" if system else prompt
     messages = [{"role": "user", "content": combined}]
 
+    left = deadline.remaining()
+    if left is None:
+        return await _ask(messages, json_mode=json_mode, lane=lane, meter=meter)
+    if left <= 0:
+        return LLMResult(ok=False, error=_TIME_LIMIT)
+    try:
+        # The wait for a lane, the RPM pacing and the request itself all end at the check's
+        # deadline. A call still queued or in flight then would otherwise run on into the
+        # check's hard stop (PARAMETER_TIMEOUT) and take the whole check down with it.
+        return await asyncio.wait_for(_ask(messages, json_mode=json_mode, lane=lane, meter=meter), timeout=left)
+    except asyncio.TimeoutError:
+        return LLMResult(ok=False, error=_TIME_LIMIT)
+
+
+async def _ask(messages: list, *, json_mode: bool, lane: str, meter) -> LLMResult:
+    """judge()'s request with its retries, once the call has been allowed."""
     async with _lane_semaphore(lane):
+        if deadline.expired():
+            # Queued behind other calls until the check's time limit passed: the check has
+            # stopped waiting for this answer, so the request is not sent.
+            return LLMResult(ok=False, error=_TIME_LIMIT)
         started = time.perf_counter()
         last_error = None
         # Rate-limit retries are counted separately so a burst of 429s cannot exhaust the
@@ -210,8 +234,12 @@ async def judge(prompt: str, *, system: str = "", json_mode: bool = True, lane: 
                 if rate_limited < RATE_LIMIT_RETRIES:
                     # A refusal that names the RPM limit sets the pace; pace() then supplies the
                     # wait, so a backoff on top would only add idle time.
+                    delay = _rate_limit_delay(rate_limited, exc)   # jittered: computed once
+                    if deadline.expired(delay):
+                        return LLMResult(ok=False, error=f"{last_error} (the check's time limit came first)",
+                                         elapsed_ms=int((time.perf_counter() - started) * 1000))
                     if not _learn_rpm(exc):
-                        await asyncio.sleep(_rate_limit_delay(rate_limited, exc))
+                        await asyncio.sleep(delay)
                     rate_limited += 1
                     continue
                 return LLMResult(ok=False, error=last_error, elapsed_ms=int((time.perf_counter() - started) * 1000))
@@ -223,7 +251,7 @@ async def judge(prompt: str, *, system: str = "", json_mode: bool = True, lane: 
                 last_error = f"API error: {exc}"
             except Exception as exc:
                 last_error = str(exc)
-            if attempt >= LLM_RETRIES:
+            if attempt >= LLM_RETRIES or deadline.expired():
                 return LLMResult(ok=False, error=last_error, elapsed_ms=int((time.perf_counter() - started) * 1000))
             attempt += 1
             await asyncio.sleep(RETRY_BACKOFF_SECONDS * attempt)

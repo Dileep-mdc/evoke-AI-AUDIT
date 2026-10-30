@@ -27,7 +27,8 @@ import json
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
-from ..config import JUDGEMENT_TIMEOUT, PARAMETER_CONCURRENCY, PARAMETER_TIMEOUT, REGISTRY_PATH
+from .. import deadline
+from ..config import CHECK_WRAP_UP_SECONDS, JUDGEMENT_TIMEOUT, PARAMETER_CONCURRENCY, PARAMETER_TIMEOUT, REGISTRY_PATH
 from ..errors import humanize_error
 from ..llm.scoring import curate, score_parameter
 from .citations import build_citations
@@ -48,6 +49,10 @@ def load_registry() -> list[dict]:
 # Checks that read no crawled page: robots.txt, the CDN probe, llms.txt and the sitemap. Every
 # other on-site check needs at least one page the crawl could read; off-page checks search the web.
 _PAGE_INDEPENDENT = {"TECH-01", "TECH-02", "TECH-03", "TECH-05"}
+# Checks that read one file or one response, never the crawled pages: robots.txt, the homepage
+# fetched as a bot, llms.txt. The crawl's page counts say nothing about them, and attaching them
+# made llms.txt look as if it had been scored from every page of the site.
+_READS_NO_PAGES = {"TECH-01", "TECH-02", "TECH-03"}
 
 
 def _skip(spec: dict, ctx) -> dict | None:
@@ -92,6 +97,9 @@ async def evaluate(spec: dict, ctx) -> dict:
             "duration_ms": 0,
             "evaluated_at": now,
         }
+    # The check's work stops starting new requests and AI calls at the deadline and scores what
+    # finished; wait_for is the hard stop behind it.
+    token = deadline.start(PARAMETER_TIMEOUT - CHECK_WRAP_UP_SECONDS)
     try:
         out = await asyncio.wait_for(handler(spec, ctx), timeout=PARAMETER_TIMEOUT)
         # Attached centrally rather than by sixty handlers: how big the crawl was, and how
@@ -100,9 +108,10 @@ async def evaluate(spec: dict, ctx) -> dict:
         # workbook's "Which Pages Were Used" column is assembled from them. setdefault, so a
         # handler that already recorded its own figure keeps it.
         out["evidence"] = out.get("evidence") or {}
-        for key, value in excluded_page_counts(ctx).items():
-            if value:
-                out["evidence"].setdefault(key, value)
+        if spec["parameter_id"] not in _READS_NO_PAGES:
+            for key, value in excluded_page_counts(ctx).items():
+                if value:
+                    out["evidence"].setdefault(key, value)
         out["evaluated_at"] = now
         return out
     except asyncio.TimeoutError:
@@ -142,6 +151,9 @@ async def evaluate(spec: dict, ctx) -> dict:
             "duration_ms": 0,
             "evaluated_at": now,
         }
+    finally:
+        # The model's write-up that follows has its own budget (JUDGEMENT_TIMEOUT), not this one.
+        deadline.reset(token)
 
 
 def site_context(ctx, row: dict) -> str:
@@ -169,7 +181,8 @@ def site_context(ctx, row: dict) -> str:
     if industry:
         lines.append(f"Industry profile: {industry}")
     pages = getattr(ctx, "pages", None) or []
-    lines.append(f"Pages crawled: {len(pages)}; readable: {len(scorable_pages(ctx))}")
+    if (row.get("parameter_id") or "") not in _READS_NO_PAGES:
+        lines.append(f"Pages crawled: {len(pages)}; readable: {len(scorable_pages(ctx))}")
     fixes = page_fixes.fixes_for(row, page_fixes.Site(origin=getattr(ctx, "origin", ""), company=company))
     if fixes["scope"] == "page":
         lines.append(f"Pages or items needing a change for this parameter: {fixes['total']}")
